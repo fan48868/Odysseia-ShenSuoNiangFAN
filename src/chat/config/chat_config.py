@@ -166,6 +166,12 @@ MODEL_GENERATION_CONFIG = {
             "thinking_level": "Medium",  # 使用新的思考等级设置
         },
     },
+    "deepseek-chat": {
+        "temperature": 1.3,
+        "top_p": 0.95,
+        "top_k": 40,
+        "max_output_tokens": 8192,
+    },
     # 你可以在这里为其他模型添加更多自定义配置
     # "gemini-2.5-pro-custom": { ... },
 }

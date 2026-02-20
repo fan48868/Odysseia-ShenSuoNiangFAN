@@ -14,6 +14,7 @@ import base64
 
 from PIL import Image
 import io
+import httpx
 
 # 导入新库
 from google import genai
@@ -232,6 +233,12 @@ class GeminiService:
             log.info(f"✅ 已启用自定义聊天通道: {self.custom_chat_url}")
         else:
             log.info("ℹ️ 未检测到完整的自定义聊天配置，将回退到官方 API。")
+
+        # --- [新增] DeepSeek 独立配置 ---
+        self.deepseek_url = os.getenv("DEEPSEEK_URL")
+        self.deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+        if self.deepseek_url and self.deepseek_key:
+            log.info(f"✅ 已加载 DeepSeek 配置。URL: {self.deepseek_url}")
 
         # --- (新) SDK 底层调试日志 ---
         # 根据最新指南 (2025)，开启此选项可查看详细的 HTTP 请求/响应
@@ -515,6 +522,32 @@ class GeminiService:
         AI 回复生成的分发器。
         如果选择了自定义模型，则优先尝试自定义端点；如果失败，则自动回退到官方 API。
         """
+        # --- [新增] DeepSeek 专用路由 ---
+        if model_name == "deepseek-chat":
+            if self.deepseek_url and self.deepseek_key:
+                log.info("检测到 deepseek-chat 模型，切换至 DeepSeek 专用通道。")
+                return await self._generate_with_deepseek(
+                    user_id=user_id,
+                    guild_id=guild_id,
+                    message=message,
+                    channel=channel,
+                    replied_message=replied_message,
+                    images=images,
+                    user_name=user_name,
+                    channel_context=channel_context,
+                    world_book_entries=world_book_entries,
+                    personal_summary=personal_summary,
+                    affection_status=affection_status,
+                    user_profile_data=user_profile_data,
+                    guild_name=guild_name,
+                    location_name=location_name,
+                    model_name=model_name,
+                    user_id_for_settings=user_id_for_settings,
+                )
+            else:
+                log.warning("请求使用 deepseek-chat 但未配置 DEEPSEEK_URL 或 DEEPSEEK_API_KEY。")
+                return "DeepSeek 配置缺失，请检查环境变量。"
+
         # 如果选择了自定义模型，则尝试使用它，并准备好回退
         if model_name and model_name in app_config.CUSTOM_GEMINI_ENDPOINTS:
             log.info(f"检测到自定义模型 '{model_name}'，将优先尝试使用自定义端点。")
@@ -792,6 +825,143 @@ class GeminiService:
             client=client,
             user_id_for_settings=user_id_for_settings,
         )
+
+    async def _generate_with_deepseek(
+        self,
+        user_id: int,
+        guild_id: int,
+        message: str,
+        channel: Optional[Any],
+        replied_message: Optional[str],
+        images: Optional[List[Dict]],
+        user_name: str,
+        channel_context: Optional[List[Dict]],
+        world_book_entries: Optional[List[Dict]],
+        personal_summary: Optional[str],
+        affection_status: Optional[Dict[str, Any]],
+        user_profile_data: Optional[Dict[str, Any]],
+        guild_name: str,
+        location_name: str,
+        model_name: Optional[str],
+        user_id_for_settings: Optional[str] = None,
+    ) -> str:
+        """
+        [新增] 专门用于处理 DeepSeek API 的方法。
+        直接使用 httpx 发送 OpenAI 格式的请求。
+        """
+        # --- 模型使用计数 ---
+        effective_model_name = model_name or "deepseek-chat"
+        await chat_settings_service.increment_model_usage(effective_model_name)
+
+        # --- [新增] 自动 RAG 检索逻辑 (保持与 _execute_generation_cycle 一致) ---
+        if not world_book_entries and message:
+            try:
+                # 延迟导入，防止循环引用
+                from src.chat.features.world_book.database.world_book_db_manager import world_book_db_manager
+                
+                # 拿着用户的消息去数据库里搜关键词
+                found_entries = await world_book_db_manager.search_entries_in_message(message)
+                
+                if found_entries:
+                    # 如果搜到了，就强制替换掉原本为空的 entries
+                    world_book_entries = found_entries
+                    titles = [e.get('title', '未知') for e in found_entries]
+                    log.info(f"📚 [DeepSeek] 触发世界书/成员设定，已注入 Prompt: {titles}")
+            except Exception as e:
+                log.warning(f"[DeepSeek] 世界书自动检索失败: {e}")
+
+        # 1. 构建 Prompt (复用现有逻辑)
+        final_conversation = await prompt_service.build_chat_prompt(
+            user_name=user_name,
+            message=message,
+            replied_message=replied_message,
+            images=images,
+            channel_context=channel_context,
+            world_book_entries=world_book_entries,
+            affection_status=affection_status,
+            personal_summary=personal_summary,
+            user_profile_data=user_profile_data,
+            guild_name=guild_name,
+            location_name=location_name,
+            model_name=effective_model_name,
+            channel=channel,
+        )
+
+        # 获取 System Prompt 以便使用 system role
+        system_prompt = prompt_service.get_prompt("SYSTEM_PROMPT", model_name=effective_model_name)
+        if not system_prompt:
+             log.warning("DeepSeek: 未能获取特定模型的 SYSTEM_PROMPT，回退到默认配置。")
+             system_prompt = prompt_service.get_prompt("SYSTEM_PROMPT", model_name="default")
+
+        # 2. 转换为 OpenAI 格式的消息列表
+        openai_messages = []
+        if system_prompt:
+             openai_messages.append({"role": "system", "content": system_prompt})
+
+        for turn in final_conversation:
+            role = turn.get("role")
+            # 映射角色：model -> assistant
+            if role == "model":
+                role = "assistant"
+            
+            content = ""
+            parts = turn.get("parts", [])
+            for part in parts:
+                if isinstance(part, str):
+                    content += part
+                elif isinstance(part, dict) and "text" in part:
+                    content += part["text"]
+            
+            # 过滤掉已经在 system role 中添加的 System Prompt 及其确认消息
+            # 使用更宽松的比较，防止换行符差异
+            if system_prompt and role == "user" and content.strip().replace('\r\n', '\n') == system_prompt.strip().replace('\r\n', '\n'):
+                continue
+            # 过滤掉 prompt_service 中硬编码的确认消息
+            if role == "assistant" and content.strip() == "我在线啦，随时开聊！":
+                continue
+
+            if content:
+                openai_messages.append({"role": role, "content": content})
+
+        # --- [调试日志] 打印发送给 DeepSeek 的完整消息列表 ---
+        if app_config.DEBUG_CONFIG.get("LOG_AI_FULL_CONTEXT", False):
+            log.info(f"--- [DeepSeek] 发送的完整上下文 ---\n{json.dumps(openai_messages, ensure_ascii=False, indent=2)}")
+
+        # 3. 发送请求
+        try:
+            # 处理 URL，确保指向 chat/completions
+            api_url = self.deepseek_url.rstrip("/")
+            if not api_url.endswith("/chat/completions"):
+                 api_url += "/chat/completions"
+            
+            # 获取生成配置
+            gen_config = app_config.MODEL_GENERATION_CONFIG.get(
+                effective_model_name, app_config.MODEL_GENERATION_CONFIG["default"]
+            )
+
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    api_url,
+                    headers={"Authorization": f"Bearer {self.deepseek_key}", "Content-Type": "application/json"},
+                    json={
+                        "model": "deepseek-chat",
+                        "messages": openai_messages,
+                        "stream": False,
+                        "temperature": gen_config.get("temperature", 1.3),
+                        "top_p": gen_config.get("top_p", 0.95),
+                        "max_tokens": gen_config.get("max_output_tokens", 8192),
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                raw_content = result["choices"][0]["message"]["content"]
+                
+                # 4. 后处理
+                return await self._post_process_response(raw_content, user_id, guild_id)
+
+        except Exception as e:
+            log.error(f"DeepSeek API 调用失败: {e}", exc_info=True)
+            return "DeepSeek 连接失败，请稍后再试。"
 
     async def _execute_generation_cycle(
         self,
