@@ -97,44 +97,105 @@ class PersonalMemoryService:
 
         log.info(f"---[MEMORY DEBUGGER]--- 用户 {user_id} 开始总结 ---")
 
-        ai_response = await gemini_service.generate_simple_response(
-            prompt=final_prompt,
-            generation_config=GEMINI_SUMMARY_GEN_CONFIG,
-            model_name=SUMMARY_MODEL,
-        )
+        max_retries = 3
+        ai_response = None
+        added_long_lines = []
+        new_recent_lines = []
+
+        for attempt in range(max_retries):
+            ai_response = await gemini_service.generate_simple_response(
+                prompt=final_prompt,
+                generation_config=GEMINI_SUMMARY_GEN_CONFIG,
+                model_name=SUMMARY_MODEL,
+            )
+
+            if not ai_response:
+                log.error(f"为用户 {user_id} 生成记忆摘要失败，AI 返回空 (尝试 {attempt + 1}/{max_retries})。")
+                continue
+
+            # 4. 解析 AI 响应并合并记忆
+            # 提取新增的长期记忆
+            new_long_match = re.search(
+                r"<new_long_memory>(.*?)</new_long_memory>", ai_response, re.DOTALL
+            )
+            added_long_lines = []
+            if new_long_match:
+                content = new_long_match.group(1).strip()
+                if content:
+                    added_long_lines = [
+                        line.strip()
+                        for line in content.split("\n")
+                        if line.strip().startswith("-")
+                    ]
+
+            # 检测条数限制
+            if len(added_long_lines) > 2:
+                log.warning(f"生成的长期记忆条数 ({len(added_long_lines)}) 超过限制 (2条)，正在重试 (尝试 {attempt + 1}/{max_retries})...")
+                if attempt == max_retries - 1:
+                    log.warning("达到最大重试次数，正在请求 AI 筛选最重要的 2 条...")
+                    
+                    # 构建筛选 Prompt
+                    memory_items = [line.lstrip("- ").strip() for line in added_long_lines]
+                    memory_list_text = "\n".join([f"{i+1}. {item}" for i, item in enumerate(memory_items)])
+                    
+                    selection_prompt = (
+                        f"你为用户生成了以下 {len(memory_items)} 条长期记忆，但这超过了系统限制（最多保留 2 条）。\n"
+                        "请仔细评估，从中筛选出 **最重要、最具深层价值** 的 2 条记忆。\n\n"
+                        "**待筛选列表:**\n"
+                        f"{memory_list_text}\n\n"
+                        "**输出要求:**\n"
+                        "1. 只输出筛选后的 2 条内容。\n"
+                        "2. 保持原意，不要修改内容。\n"
+                        "3. 每条一行，严格以 `- ` 开头。\n"
+                        "4. 不要输出任何其他解释性文字。"
+                    )
+
+                    try:
+                        selection_response = await gemini_service.generate_simple_response(
+                            prompt=selection_prompt,
+                            generation_config=GEMINI_SUMMARY_GEN_CONFIG,
+                            model_name=SUMMARY_MODEL,
+                        )
+
+                        if selection_response:
+                            selected_lines = [
+                                line.strip()
+                                for line in selection_response.split("\n")
+                                if line.strip().startswith("-")
+                            ]
+                            if selected_lines:
+                                log.info(f"AI 筛选成功，保留了 {len(selected_lines)} 条记忆。")
+                                added_long_lines = selected_lines[:2]
+                            else:
+                                log.warning("AI 筛选响应格式不符合预期，回退到强制截断。")
+                                added_long_lines = added_long_lines[:2]
+                        else:
+                            log.warning("AI 筛选响应为空，回退到强制截断。")
+                            added_long_lines = added_long_lines[:2]
+                    except Exception as e:
+                        log.error(f"AI 筛选过程发生错误: {e}，回退到强制截断。")
+                        added_long_lines = added_long_lines[:2]
+                else:
+                    continue
+
+            # 提取新的近期动态 (只有在长期记忆检查通过或截断后才提取)
+            new_recent_match = re.search(
+                r"<recent_dynamics>(.*?)</recent_dynamics>", ai_response, re.DOTALL
+            )
+            new_recent_lines = []
+            if new_recent_match:
+                content = new_recent_match.group(1).strip()
+                if content:
+                    new_recent_lines = [
+                        line.strip()
+                        for line in content.split("\n")
+                        if line.strip().startswith("-")
+                    ]
+            break
 
         if not ai_response:
-            log.error(f"为用户 {user_id} 生成记忆摘要失败，AI 返回空。")
+            log.error(f"为用户 {user_id} 生成记忆摘要失败，重试多次后仍无有效响应。")
             return
-
-        # 4. 解析 AI 响应并合并记忆
-        # 提取新增的长期记忆
-        new_long_match = re.search(
-            r"<new_long_memory>(.*?)</new_long_memory>", ai_response, re.DOTALL
-        )
-        added_long_lines = []
-        if new_long_match:
-            content = new_long_match.group(1).strip()
-            if content:
-                added_long_lines = [
-                    line.strip()
-                    for line in content.split("\n")
-                    if line.strip().startswith("-")
-                ]
-
-        # 提取新的近期动态
-        new_recent_match = re.search(
-            r"<recent_dynamics>(.*?)</recent_dynamics>", ai_response, re.DOTALL
-        )
-        new_recent_lines = []
-        if new_recent_match:
-            content = new_recent_match.group(1).strip()
-            if content:
-                new_recent_lines = [
-                    line.strip()
-                    for line in content.split("\n")
-                    if line.strip().startswith("-")
-                ]
 
         # --- 日志记录逻辑 ---
         log_dir = PERSONAL_MEMORY_CONFIG.get("log_dir")
