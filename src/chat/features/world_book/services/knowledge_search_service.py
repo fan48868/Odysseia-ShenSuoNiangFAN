@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import logging
 import re
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Optional
 
 from sqlalchemy import text
 from src.database.database import AsyncSessionLocal
@@ -48,17 +48,17 @@ class KnowledgeSearchService:
         # SQL 查询同时搜索两个 chunks 表
         sql_query = text(
             """
-            WITH semantic_search AS (
+            WITH vector_candidates AS (
                 -- 社区成员向量搜索
                 (SELECT
                     'community' as source_table,
                     id as chunk_id,
                     profile_id as parent_id,
                     chunk_text,
-                    ROW_NUMBER() OVER (ORDER BY embedding <=> :query_vector) as rank
+                    (embedding <=> :query_vector) as distance
                 FROM community.member_chunks
                 WHERE (embedding <=> :query_vector) < :max_distance
-                ORDER BY embedding <=> :query_vector
+                ORDER BY distance ASC
                 LIMIT :top_k_vector)
                 UNION ALL
                 -- 通用知识向量搜索
@@ -67,20 +67,27 @@ class KnowledgeSearchService:
                     id as chunk_id,
                     document_id as parent_id,
                     chunk_text,
-                    ROW_NUMBER() OVER (ORDER BY embedding <=> :query_vector) as rank
+                    (embedding <=> :query_vector) as distance
                 FROM general_knowledge.knowledge_chunks
                 WHERE (embedding <=> :query_vector) < :max_distance
-                ORDER BY embedding <=> :query_vector
+                ORDER BY distance ASC
                 LIMIT :top_k_vector)
             ),
-            keyword_search AS (
+            semantic_search AS (
+                -- 对合并后的结果进行全局排名
+                SELECT 
+                    *,
+                    ROW_NUMBER() OVER (ORDER BY distance ASC) as rank
+                FROM vector_candidates
+            ),
+            keyword_candidates AS (
                 -- 社区成员 BM25 搜索 (使用 paradedb.score)
                 (SELECT
                     'community' as source_table,
                     id as chunk_id,
                     profile_id as parent_id,
                     chunk_text,
-                    ROW_NUMBER() OVER (ORDER BY paradedb.score(id) DESC) as rank
+                    paradedb.score(id) as bm25_score
                 FROM community.member_chunks
                 WHERE chunk_text @@@ :query_text
                 LIMIT :top_k_fts)
@@ -91,10 +98,17 @@ class KnowledgeSearchService:
                     id as chunk_id,
                     document_id as parent_id,
                     chunk_text,
-                    ROW_NUMBER() OVER (ORDER BY paradedb.score(id) DESC) as rank
+                    paradedb.score(id) as bm25_score
                 FROM general_knowledge.knowledge_chunks
                 WHERE chunk_text @@@ :query_text
                 LIMIT :top_k_fts)
+            ),
+            keyword_search AS (
+                -- 对合并后的结果进行全局排名
+                SELECT 
+                    *,
+                    ROW_NUMBER() OVER (ORDER BY bm25_score DESC) as rank
+                FROM keyword_candidates
             ),
             -- 使用 RRF (Reciprocal Rank Fusion) 融合排名
             fused_ranks AS (
@@ -129,7 +143,7 @@ class KnowledgeSearchService:
         # SQLAlchemy 2.x 的 Row 对象需要通过 ._mapping 转换为字典
         return [dict(row._mapping) for row in result.fetchall()]
 
-    async def search(self, query: str) -> List[Dict[str, Any]]:
+    async def search(self, query: str, user_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         执行完整的 RAG 混合搜索流程。
         1. 生成查询嵌入。
@@ -153,7 +167,30 @@ class KnowledgeSearchService:
             # 清理用于全文搜索的查询文本
             cleaned_fts_query = self._clean_fts_query(query)
 
+            user_card_chunk = None
             async with AsyncSessionLocal() as session:
+                # 如果提供了 user_id，尝试获取该用户的名片并强制置顶
+                if user_id:
+                    try:
+                        user_card_query = text("""
+                            SELECT 
+                                c.id as chunk_id,
+                                c.profile_id as parent_id,
+                                c.chunk_text,
+                                'community' as source_table
+                            FROM community.member_chunks c
+                            JOIN community.member_profiles p ON c.profile_id = p.id
+                            WHERE p.discord_id = :user_id OR p.source_metadata->>'uploaded_by' = :user_id
+                            LIMIT 1
+                        """)
+                        result = await session.execute(user_card_query, {"user_id": str(user_id)})
+                        row = result.fetchone()
+                        if row:
+                            user_card_chunk = dict(row._mapping)
+                            log.info(f"成功获取并置顶用户 {user_id} 的名片")
+                    except Exception as e:
+                        log.error(f"获取用户 {user_id} 名片失败: {e}")
+
                 search_results = await self._hybrid_search_chunks(
                     session, cleaned_fts_query, query_embedding
                 )
@@ -163,14 +200,28 @@ class KnowledgeSearchService:
             log.error(f"在数据库中执行混合搜索时出错: {e}", exc_info=True)
             return []
 
-        if not search_results:
+        if not search_results and not user_card_chunk:
             log.info(f"知识库混合搜索未找到 '{query}' 的相关文档。")
             return []
 
         # 转换为 world_book_service 期望的格式
         # 'content' 字段直接使用 chunk_text
         formatted_results = []
+
+        # 1. 首先添加用户自己的名片（如果存在）
+        if user_card_chunk:
+            formatted_results.append({
+                "id": user_card_chunk.get("parent_id"),
+                "content": user_card_chunk.get("chunk_text"),
+                "distance": 0.0,  # 强制置顶，相关性设为最高
+                "metadata": {"source_table": "community", "is_user_card": True},
+            })
+
         for res in search_results:
+            # 去重：如果搜索结果中包含用户自己的名片，则跳过
+            if user_card_chunk and str(res.get("document_id")) == str(user_card_chunk.get("parent_id")):
+                continue
+
             rrf_score = float(res["rrf_score"])  # 确保为浮点数
             formatted_results.append(
                 {
