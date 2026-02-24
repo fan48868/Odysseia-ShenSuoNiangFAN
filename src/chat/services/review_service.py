@@ -670,6 +670,16 @@ Discord ID: {profile_user_id}
                     self.background_tasks.add(task)
                     task.add_done_callback(self._handle_task_result)
 
+                    # 发送私信通知用户
+                    try:
+                        proposer_id = entry["proposer_id"]
+                        proposer = await self.bot.fetch_user(proposer_id)
+                        if proposer:
+                            await proposer.send("嘘，偷偷告诉你，输入命令 `/查看并修改记忆` 可以直接编辑记忆哦！来试试吧！")
+                            log.info(f"已向用户 {proposer_id} 发送名片通过私信提示。")
+                    except Exception as e:
+                        log.warning(f"向用户 {entry['proposer_id']} 发送私信失败: {e}")
+
                 if message:
                     original_embed = message.embeds[0]
                     new_embed = original_embed.copy()
