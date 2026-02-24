@@ -273,12 +273,7 @@ class GuidanceBot(commands.Bot):
         self.add_view(PermanentPanelView())
         log.info("已成功重新加载持久化视图 (PermanentPanelView)。")
 
-        # 加载个人记忆管理命令
-        try:
-            await self.load_extension("src.chat.features.personal_memory.ui.memory_commands")
-            log.info("已加载扩展: src.chat.features.personal_memory.ui.memory_commands")
-        except Exception as e:
-            log.error(f"加载扩展失败: {e}", exc_info=True)
+       
 
         # 2. 加载功能模块 (Cogs)
         log.info("--- 正在加载功能模块 (Cogs) ---")
