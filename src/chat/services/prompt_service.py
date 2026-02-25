@@ -129,6 +129,7 @@ class PromptService:
         user_profile_data: Optional[Dict[str, Any]] = None,
         model_name: Optional[str] = None,
         channel: Optional[Any] = None,  # 新增 channel 参数
+        user_id: Optional[int] = None,  # 新增 user_id 参数
     ) -> List[Dict[str, Any]]:
         """
         构建用于AI聊天的分层对话历史。
@@ -457,6 +458,11 @@ class PromptService:
                 ):
                     original_message = processed_parts[first_text_index]
 
+                    # 构建用户标签，包含ID以防止冒充
+                    user_label = user_name
+                    if user_id:
+                        user_label = f"{user_name} (ID: {user_id})"
+
                     # 根据消息内容是否包含换行符（由 message_processor 添加，表示是引用回复）来决定格式
                     if "\n" in original_message:
                         # 如果是回复，格式应为：引用回复部分\n\n[当前用户]:实际消息部分
@@ -466,14 +472,14 @@ class PromptService:
                             # lines 是引用回复部分，lines 是实际消息部分
                             # 我们需要在实际消息部分前加上 [当前用户]:
                             formatted_message = (
-                                f"{lines[0]}\n\n[{user_name}]:{lines[1]}"
+                                f"{lines[0]}\n\n[{user_label}]:{lines[1]}"
                             )
                         else:
                             # 如果分割失败，使用原始逻辑
-                            formatted_message = f"[{user_name}]: {original_message}"
+                            formatted_message = f"[{user_label}]: {original_message}"
                     else:
                         # 如果是普通消息，则用冒号和空格
-                        formatted_message = f"[{user_name}]: {original_message}"
+                        formatted_message = f"[{user_label}]: {original_message}"
 
                     processed_parts[first_text_index] = formatted_message
 

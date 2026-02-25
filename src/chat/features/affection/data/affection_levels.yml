@@ -54,8 +54,3 @@
   max_affection: 10000
   level_name: "信赖"
   prompt: "信赖"
-- id: "master"
-  min_affection: 10000
-  max_affection: 99999
-  level_name: "主人"
-  prompt: "主人"
