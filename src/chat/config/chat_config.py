@@ -184,7 +184,7 @@ MODEL_GENERATION_CONFIG = {
 
 # --- 消息设置 ---
 MESSAGE_SETTINGS = {
-    "DM_THRESHOLD": 3000,  # 当消息长度超过此值时，通过私信发送
+    "DM_THRESHOLD": 1000,  # 当消息长度超过此值时，通过私信发送
 }
 
 GEMINI_TEXT_GEN_CONFIG = {
