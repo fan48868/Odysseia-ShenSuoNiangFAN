@@ -147,7 +147,7 @@ async def search_channel_history(
     add_unique(author_all_results)
     
     # 限制返回数量，防止 Token 爆炸
-    MAX_RETURN = 40
+    MAX_RETURN = 300
     final_results = final_results[:MAX_RETURN]
     
     log.info(f"双擎搜索完成。Query: {query}, Author: {author_id}, 去重后结果 {len(final_results)} 条。")
@@ -231,8 +231,8 @@ async def _execute_history_search(channel: discord.TextChannel, query: Optional[
                     "timestamp_obj": utc_dt
                 })
                 
-                # 熔断：本地查到 40 条就收手，防止卡死
-                if len(results) >= 40: 
+                # 熔断：本地查到 300 条就收手，防止卡死
+                if len(results) >= 300: 
                     break
     except discord.Forbidden:
         log.error(f"没有读取当前频道 {channel.id} 历史记录的权限！")

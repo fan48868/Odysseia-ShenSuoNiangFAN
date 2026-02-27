@@ -38,6 +38,7 @@ from src.chat.features.chat_settings.services.chat_settings_service import (
 from src.chat.utils.image_utils import sanitize_image
 from src.database.services.token_usage_service import token_usage_service
 from src.database.database import AsyncSessionLocal
+from src.chat.services.moonshot_vision_service import moonshot_vision_service
 
 
 log = logging.getLogger(__name__)
@@ -445,6 +446,116 @@ class GeminiService:
                         {"type": "unknown_part", "content": str(part)}
                     )
         return {"role": content.role, "parts": serialized_parts}
+
+    def _build_moonshot_image_payload_from_pil(
+        self, image: Image.Image
+    ) -> Dict[str, Any]:
+        """将 PIL 图片转换为 Moonshot 识别所需 payload。"""
+        mime_type = "image/webp"
+        buffered = io.BytesIO()
+        try:
+            image.save(buffered, format="WEBP")
+        except Exception:
+            # 兜底为 PNG，避免运行环境缺少 WEBP 编码支持时失败
+            mime_type = "image/png"
+            buffered = io.BytesIO()
+            image.save(buffered, format="PNG")
+
+        image_bytes = buffered.getvalue()
+        return {
+            "type": "image",
+            "mime_type": mime_type,
+            "data_size": len(image_bytes),
+            # 这里存放完整十六进制数据，键名沿用既有约定 data_preview
+            "data_preview": image_bytes.hex(),
+        }
+
+    def _build_tool_image_context_list(
+        self, images: Optional[List[Dict[str, Any]]]
+    ) -> List[Dict[str, str]]:
+        """
+        将当前轮可用图片构建为工具可注入的标准上下文列表。
+        仅在服务层注入，不暴露给模型参数 schema。
+        """
+        if not images:
+            return []
+
+        max_images = app_config.IMAGE_PROCESSING_CONFIG.get("MAX_IMAGES_PER_MESSAGE", 9)
+        image_context_list: List[Dict[str, str]] = []
+
+        for idx, img in enumerate(images[:max_images], start=1):
+            if not isinstance(img, dict):
+                continue
+
+            image_bytes = img.get("data") or img.get("bytes")
+            if not isinstance(image_bytes, (bytes, bytearray)) or not image_bytes:
+                continue
+
+            mime_type = str(img.get("mime_type", "image/png"))
+            source = str(img.get("source", "unknown"))
+
+            try:
+                image_b64 = base64.b64encode(bytes(image_bytes)).decode("utf-8")
+            except Exception as e:
+                log.warning(f"构建图片上下文时 Base64 编码失败，已跳过第 {idx} 张: {e}")
+                continue
+
+            image_context_list.append(
+                {
+                    "index": str(idx),
+                    "mime_type": mime_type,
+                    "source": source,
+                    "image_base64": image_b64,
+                }
+            )
+
+        return image_context_list
+
+    async def _build_deepseek_turn_content(self, parts: List[Any]) -> str:
+        """
+        构建单条消息在 DeepSeek 通道中的文本内容。
+        对于图片，调用 Moonshot 进行识别并将结果插入到对应位置。
+        """
+        content_chunks: List[str] = []
+
+        for part in parts or []:
+            if hasattr(part, "thought") and getattr(part, "thought", False):
+                continue
+
+            # 1) 文本字典（常见结构）
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                content_chunks.append(part["text"])
+                continue
+
+            # 2) PIL 图片对象（PromptService 常见图片承载方式）
+            if isinstance(part, Image.Image):
+                try:
+                    image_payload = self._build_moonshot_image_payload_from_pil(part)
+                    vision_text = await moonshot_vision_service.recognize_image(
+                        image_payload
+                    )
+                except Exception as e:
+                    log.error("Moonshot 图片识别流程异常: %s", e, exc_info=True)
+                    vision_text = "（图片识别失败：处理流程异常）"
+
+                content_chunks.append(f"\n【图片识别结果】{vision_text}\n")
+                continue
+
+            # 3) 已是图片结构的字典（兼容扩展）
+            if isinstance(part, dict) and part.get("type") == "image":
+                try:
+                    vision_text = await moonshot_vision_service.recognize_image(part)
+                except Exception as e:
+                    log.error("Moonshot 图片字典识别异常: %s", e, exc_info=True)
+                    vision_text = "（图片识别失败：处理流程异常）"
+
+                content_chunks.append(f"\n【图片识别结果】{vision_text}\n")
+                continue
+
+            # 4) 其他类型兜底
+            content_chunks.append(str(part))
+
+        return "".join(content_chunks).strip()
 
     # --- Refactored generate_response and its helpers ---
     def _prepare_api_contents(self, conversation: List[Dict]) -> List[types.Content]:
@@ -968,8 +1079,12 @@ class GeminiService:
         }
         # 由系统注入、不暴露给模型的参数
         _INTERNAL_PARAMS = {
-            "bot", "guild", "channel", "guild_id", "thread_id",
-            "log_detailed", "kwargs",
+            "bot",
+            "guild",
+            "channel",
+            "guild_id",
+            "thread_id",
+            "kwargs",
         }
 
         def _schema_from_annotation(annotation: Any) -> Dict[str, Any]:
@@ -985,12 +1100,13 @@ class GeminiService:
                 non_none_args = [arg for arg in args if arg is not type(None)]
                 if len(non_none_args) == 1:
                     return _schema_from_annotation(non_none_args[0])
+                return {"type": "string"}
 
-            # List[T] / list[T]
+            # List[T] / list[T] / Tuple[T]
             if origin in (list, List, tuple, Tuple):
                 item_annotation = args[0] if args else str
                 item_schema = _schema_from_annotation(item_annotation)
-                if "type" not in item_schema:
+                if "type" not in item_schema and "anyOf" not in item_schema:
                     item_schema = {"type": "string"}
                 return {"type": "array", "items": item_schema}
 
@@ -998,8 +1114,11 @@ class GeminiService:
             if origin in (dict, Dict):
                 return {"type": "object"}
 
-            # Union[A, B] (非 Optional 的 Union，回退 string)
-            if origin is Union:
+            # Union[A, B]（非 Optional）: 为兼容严格校验器，降级为首个非空类型
+            if origin is Union and args:
+                non_none_args = [arg for arg in args if arg is not type(None)]
+                if non_none_args:
+                    return _schema_from_annotation(non_none_args[0])
                 return {"type": "string"}
 
             # 直接类型（int/str/...）
@@ -1018,7 +1137,7 @@ class GeminiService:
                 if normalized.startswith("List[") and normalized.endswith("]"):
                     inner = normalized[5:-1].strip()
                     item_schema = _schema_from_annotation(inner)
-                    if "type" not in item_schema:
+                    if "type" not in item_schema and "anyOf" not in item_schema:
                         item_schema = {"type": "string"}
                     return {"type": "array", "items": item_schema}
                 if normalized.startswith("Dict["):
@@ -1031,7 +1150,17 @@ class GeminiService:
 
             return {"type": "string"}
 
-        def _is_default_type_compatible(schema_type: str, value: Any) -> bool:
+        def _is_default_type_compatible(schema_type: Any, value: Any) -> bool:
+            if isinstance(schema_type, list):
+                if value is None:
+                    return "null" in schema_type
+                return any(
+                    st != "null" and _is_default_type_compatible(st, value)
+                    for st in schema_type
+                )
+
+            if schema_type == "null":
+                return value is None
             if schema_type == "string":
                 return isinstance(value, str)
             if schema_type == "integer":
@@ -1046,6 +1175,35 @@ class GeminiService:
                 return isinstance(value, dict)
             return True
 
+        _NO_CONVERSION = object()
+
+        def _coerce_default_to_schema_type(schema_type: Any, default_value: Any) -> Any:
+            target_types = schema_type if isinstance(schema_type, list) else [schema_type]
+
+            if default_value is None and "null" in target_types:
+                return None
+
+            for t in target_types:
+                if t == "null":
+                    continue
+                try:
+                    if t == "string":
+                        return str(default_value)
+                    if t == "integer" and isinstance(default_value, str):
+                        raw = default_value.strip()
+                        if re.fullmatch(r"[+-]?\d+", raw):
+                            return int(raw)
+                    if t == "number" and isinstance(default_value, str):
+                        return float(default_value.strip())
+                    if t == "boolean" and isinstance(default_value, str):
+                        lowered = default_value.strip().lower()
+                        if lowered in {"true", "false"}:
+                            return lowered == "true"
+                except Exception:
+                    continue
+
+            return _NO_CONVERSION
+
         def _attach_default_if_compatible(
             prop_schema: Dict[str, Any], default_value: Any, field_path: str
         ) -> None:
@@ -1057,34 +1215,138 @@ class GeminiService:
                 prop_schema["default"] = default_value
                 return
 
-            converted = None
-            try:
-                if schema_type == "string":
-                    converted = str(default_value)
-                elif schema_type == "integer" and isinstance(default_value, str):
-                    raw = default_value.strip()
-                    if re.fullmatch(r"[+-]?\d+", raw):
-                        converted = int(raw)
-                elif schema_type == "number" and isinstance(default_value, str):
-                    converted = float(default_value.strip())
-                elif schema_type == "boolean" and isinstance(default_value, str):
-                    lowered = default_value.strip().lower()
-                    if lowered in {"true", "false"}:
-                        converted = lowered == "true"
-            except Exception:
-                converted = None
-
-            if converted is not None and _is_default_type_compatible(schema_type, converted):
+            converted = _coerce_default_to_schema_type(schema_type, default_value)
+            if converted is not _NO_CONVERSION and _is_default_type_compatible(
+                schema_type, converted
+            ):
                 prop_schema["default"] = converted
                 log.warning(
                     f"[DeepSeek Schema] 字段 '{field_path}' 的默认值类型不匹配，已自动修正为 {converted!r}。"
                 )
                 return
 
+            prop_schema.pop("default", None)
             log.warning(
                 f"[DeepSeek Schema] 字段 '{field_path}' 的默认值 {default_value!r} "
                 f"与类型 '{schema_type}' 不匹配，已移除 default。"
             )
+
+        def _resolve_local_ref(
+            root_schema: Dict[str, Any], ref: str
+        ) -> Optional[Dict[str, Any]]:
+            if not isinstance(ref, str) or not ref.startswith("#/"):
+                return None
+
+            node: Any = root_schema
+            for part in ref[2:].split("/"):
+                if not isinstance(node, dict) or part not in node:
+                    return None
+                node = node[part]
+
+            return node if isinstance(node, dict) else None
+
+        def _normalize_schema_dict(
+            schema: Any,
+            field_path: str = "root",
+            root_schema: Optional[Dict[str, Any]] = None,
+        ) -> Any:
+            if root_schema is None and isinstance(schema, dict):
+                root_schema = schema
+
+            if isinstance(schema, list):
+                return [
+                    _normalize_schema_dict(
+                        item,
+                        field_path=f"{field_path}[{idx}]",
+                        root_schema=root_schema,
+                    )
+                    for idx, item in enumerate(schema)
+                ]
+
+            if not isinstance(schema, dict):
+                return schema
+
+            if "$ref" in schema and isinstance(root_schema, dict):
+                resolved = _resolve_local_ref(root_schema, schema["$ref"])
+                if resolved:
+                    merged = dict(resolved)
+                    for key, value in schema.items():
+                        if key != "$ref":
+                            merged[key] = value
+                    schema = merged
+
+            normalized: Dict[str, Any] = {}
+            for key, value in schema.items():
+                if key in {"$defs", "definitions"}:
+                    continue
+
+                if key == "properties" and isinstance(value, dict):
+                    normalized_props = {}
+                    for prop_name, prop_schema in value.items():
+                        normalized_props[prop_name] = _normalize_schema_dict(
+                            prop_schema,
+                            field_path=f"{field_path}.properties.{prop_name}",
+                            root_schema=root_schema,
+                        )
+                    normalized[key] = normalized_props
+                    continue
+
+                if key in {"items", "additionalProperties"}:
+                    normalized[key] = _normalize_schema_dict(
+                        value,
+                        field_path=f"{field_path}.{key}",
+                        root_schema=root_schema,
+                    )
+                    continue
+
+                if key in {"anyOf", "oneOf", "allOf"} and isinstance(value, list):
+                    variants = [
+                        _normalize_schema_dict(
+                            item,
+                            field_path=f"{field_path}.{key}[{idx}]",
+                            root_schema=root_schema,
+                        )
+                        for idx, item in enumerate(value)
+                    ]
+
+                    # 严格兼容模式：移除复杂组合结构，拍平成单一 type
+                    chosen_type = None
+                    for item in variants:
+                        if isinstance(item, dict):
+                            t = item.get("type")
+                            if isinstance(t, str) and t != "null":
+                                chosen_type = t
+                                break
+
+                    normalized["type"] = chosen_type or "string"
+                    continue
+
+                if key == "type":
+                    if isinstance(value, str):
+                        normalized[key] = value.lower()
+                    elif isinstance(value, list):
+                        normalized[key] = [
+                            t.lower() if isinstance(t, str) else t for t in value
+                        ]
+                    else:
+                        normalized[key] = value
+                    continue
+
+                normalized[key] = value
+
+            # 严格兼容模式：直接丢弃 nullable 标记，不输出 null 联合类型
+            normalized.pop("nullable", None)
+
+            # 严格兼容模式：不保留 default:null
+            if normalized.get("default") is None:
+                normalized.pop("default", None)
+
+            if "default" in normalized and "type" in normalized:
+                _attach_default_if_compatible(
+                    normalized, normalized["default"], field_path
+                )
+
+            return normalized
 
         if dynamic_tools:
             import inspect as _inspect
@@ -1094,31 +1356,28 @@ class GeminiService:
                 _BaseModel = None
 
             def _pydantic_to_schema(model_cls):
-                """将 Pydantic BaseModel 展开为 JSON Schema object。"""
-                props = {}
-                reqs = []
-                for field_name, field_info in model_cls.model_fields.items():
-                    ann = field_info.annotation
-                    desc = field_info.description or ""
-                    prop = _schema_from_annotation(ann)
+                """将 Pydantic BaseModel 转换为 JSON Schema，并保留嵌套约束。"""
+                raw_schema = model_cls.model_json_schema()
+                normalized = _normalize_schema_dict(
+                    raw_schema, field_path=model_cls.__name__
+                )
 
-                    if not field_info.is_required() and field_info.default is not None:
-                        _attach_default_if_compatible(
-                            prop, field_info.default, f"{model_cls.__name__}.{field_name}"
-                        )
+                if not isinstance(normalized, dict):
+                    return {"type": "object", "properties": {}}
 
-                    if desc:
-                        prop["description"] = desc
+                normalized.pop("$defs", None)
+                normalized.pop("definitions", None)
 
-                    props[field_name] = prop
+                if normalized.get("type") != "object":
+                    fallback_schema: Dict[str, Any] = {
+                        "type": "object",
+                        "properties": normalized.get("properties", {}),
+                    }
+                    if isinstance(raw_schema, dict) and raw_schema.get("required"):
+                        fallback_schema["required"] = raw_schema["required"]
+                    return fallback_schema
 
-                    if field_info.is_required():
-                        reqs.append(field_name)
-
-                schema = {"type": "object", "properties": props}
-                if reqs:
-                    schema["required"] = reqs
-                return schema
+                return normalized
 
             for tool in dynamic_tools:
                 try:
@@ -1158,12 +1417,17 @@ class GeminiService:
                         prop_schema = _schema_from_annotation(
                             ann if ann != _inspect.Parameter.empty else Any
                         )
+                        prop_schema = _normalize_schema_dict(
+                            prop_schema, field_path=f"{func_name}.{param_name}"
+                        )
 
                         # 处理默认值（必须与类型一致，或可安全转换）
                         if (
                             param.default is not _inspect.Parameter.empty
                             and param.default is not None
-                            and isinstance(param.default, (str, int, float, bool, list, dict))
+                            and isinstance(
+                                param.default, (str, int, float, bool, list, dict)
+                            )
                         ):
                             _attach_default_if_compatible(
                                 prop_schema, param.default, f"{func_name}.{param_name}"
@@ -1179,12 +1443,11 @@ class GeminiService:
                         "description": func_desc,
                     }
 
-                    # 无参数工具：省略 parameters，避免严格校验器误报
-                    if properties:
-                        final_params = {"type": "object", "properties": properties}
-                        if required:
-                            final_params["required"] = required
-                        func_dict["parameters"] = final_params
+                    # 无参数工具也显式注入空参数结构，提升严格校验兼容性
+                    final_params = {"type": "object", "properties": properties}
+                    if required:
+                        final_params["required"] = required
+                    func_dict["parameters"] = final_params
 
                     openai_tools.append({
                         "type": "function",
@@ -1222,11 +1485,7 @@ class GeminiService:
         is_first_user = True  # 第一条 user 消息是 system prompt，转为 system role
         for turn in final_conversation:
             gemini_role = turn.get("role")
-            content = "".join(
-                [part["text"] if isinstance(part, dict) and "text" in part else str(part)
-                 for part in turn.get("parts", [])
-                 if not (hasattr(part, "thought") and getattr(part, "thought", False))]
-            )
+            content = await self._build_deepseek_turn_content(turn.get("parts", []) or [])
             if not content:
                 continue
 
@@ -1276,6 +1535,8 @@ class GeminiService:
         max_calls = 5
         called_tool_names = []
         bad_format_retries = 0
+        deep_vision_used = False
+        tool_image_context_list = self._build_tool_image_context_list(images)
 
         try:
             async with httpx.AsyncClient(timeout=120.0) as http_client:
@@ -1325,21 +1586,36 @@ class GeminiService:
                     # 如果没有工具调用，说明已生成最终回复
                     if not tool_calls:
                         # --- 违禁词检测 ---
-                        if content and re.search(r"不过话说回来|话说回来|另外|话又说回来|不过话又说回来", content):
-                            if bad_format_retries < 3:
-                                log.warning(
-                                    f"[DeepSeek] 检测到违禁词 '不过话说回来' (尝试 {bad_format_retries + 1}/3)。正在重试..."
+                        # 成本优化：当回复长度超过 800 字时，不再触发“违禁词重试打回”
+                        # 以减少额外请求次数和费用。
+                        if content:
+                            has_forbidden_phrase = bool(
+                                re.search(
+                                    r"不过话说回来|话说回来|另外|话又说回来|不过话又说回来",
+                                    content,
                                 )
-                                # 这里我们需要把刚才 append 的 assistant 消息暂时移除，或者添加一条 system prompt 要求重试
-                                # 为了简单起见，我们添加 user 消息要求重写
-                                openai_messages.append({
-                                    "role": "user",
-                                    "content": "[系统提示] 检测到你使用了“不过话说回来|话说回来|另外|话又说回来”。这是被禁止的。请重新生成回复，去掉这个短语，保持语气自然。"
-                                })
-                                bad_format_retries += 1
-                                continue
-                            else:
-                                return "抱歉，我的说话格式一直达不到要求，我是杂鱼"
+                            )
+                            content_len = len(content)
+
+                            if has_forbidden_phrase and content_len <= 800:
+                                if bad_format_retries < 3:
+                                    log.warning(
+                                        f"[DeepSeek] 检测到违禁词 '不过话说回来' (尝试 {bad_format_retries + 1}/3)。正在重试..."
+                                    )
+                                    # 这里我们需要把刚才 append 的 assistant 消息暂时移除，或者添加一条 system prompt 要求重试
+                                    # 为了简单起见，我们添加 user 消息要求重写
+                                    openai_messages.append({
+                                        "role": "user",
+                                        "content": "[系统提示] 检测到你使用了“不过话说回来|话说回来|另外|话又说回来”。这是被禁止的。请重新生成回复，去掉这个短语，保持语气自然。"
+                                    })
+                                    bad_format_retries += 1
+                                    continue
+                                else:
+                                    return "抱歉，我的说话格式一直达不到要求，我是杂鱼"
+                            elif has_forbidden_phrase:
+                                log.info(
+                                    f"[DeepSeek] 检测到违禁词，但回复长度为 {content_len} (>800)，按成本优化策略放行。"
+                                )
                         # ----------------
                         
                         if log_detailed:
@@ -1396,6 +1672,25 @@ class GeminiService:
 
                         log.info(f"  - 准备执行工具: {tool_name}, 参数: {args}")
 
+                        # 深度识图是高成本工具：单轮对话最多执行 1 次
+                        if tool_name == "analyze_image_with_gemini_pro":
+                            if deep_vision_used:
+                                openai_messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": call["id"],
+                                        "name": tool_name,
+                                        "content": json.dumps(
+                                            {
+                                                "error": "深度识图工具本轮已调用过一次。为避免明显变慢，本轮不再重复调用。"
+                                            },
+                                            ensure_ascii=False,
+                                        ),
+                                    }
+                                )
+                                continue
+                            deep_vision_used = True
+
                         # 【关键桥接】伪造 Gemini 的 FunctionCall 对象，交给 ToolService 执行
                         mock_gemini_call = types.FunctionCall(name=tool_name, args=args)
 
@@ -1405,21 +1700,52 @@ class GeminiService:
                             user_id=user_id,
                             log_detailed=log_detailed,
                             user_id_for_settings=user_id_for_settings,
+                            image_context_list=tool_image_context_list,
                         )
 
                         # 解析工具执行的结果并转换为 OpenAI 格式
                         if isinstance(tool_res, types.Part) and tool_res.function_response:
                             raw_response = tool_res.function_response.response
-                            # DeepSeek 是纯文本 API，无法处理图片数据
-                            # 深拷贝后剔除所有 base64 图片字段，避免请求体过大触发 400
+                            # DeepSeek 是纯文本 API，无法直接处理大块 base64 图片数据。
+                            # 这里先做头像识图，再移除原始 base64，保留可读文本与链接信息。
                             import copy as _copy
                             clean_response = _copy.deepcopy(raw_response)
-                            result_data = clean_response.get("result", {})
-                            if isinstance(result_data, dict):
-                                profile = result_data.get("profile", {})
-                                if isinstance(profile, dict) and "avatar_image_base64" in profile:
-                                    del profile["avatar_image_base64"]
-                                    profile["avatar_note"] = "（头像图片数据已省略，仅文字通道可用）"
+
+                            if isinstance(clean_response, dict):
+                                result_data = clean_response.get("result", {})
+                                if isinstance(result_data, dict):
+                                    profile = result_data.get("profile", {})
+                                    if isinstance(profile, dict):
+                                        avatar_b64 = profile.get("avatar_image_base64")
+                                        if isinstance(avatar_b64, str) and avatar_b64.strip():
+                                            try:
+                                                avatar_bytes = base64.b64decode(avatar_b64)
+                                                avatar_mime_type = profile.get("avatar_mime_type", "image/png")
+                                                if not isinstance(avatar_mime_type, str) or not avatar_mime_type:
+                                                    avatar_mime_type = "image/png"
+
+                                                avatar_payload = {
+                                                    "type": "image",
+                                                    "mime_type": avatar_mime_type,
+                                                    "data_size": len(avatar_bytes),
+                                                    "data_preview": avatar_bytes.hex(),
+                                                }
+                                                avatar_vision_text = await moonshot_vision_service.recognize_image(
+                                                    avatar_payload,
+                                                    prompt="请识别这张用户头像图片，简洁描述可见人物、风格、配色与关键元素。",
+                                                )
+                                                profile["avatar_image_vision"] = avatar_vision_text
+                                            except Exception as e:
+                                                log.error("处理 get_user_profile 头像识图失败: %s", e, exc_info=True)
+                                                profile["avatar_image_vision"] = "（头像识图失败：处理异常）"
+                                            finally:
+                                                # 避免向 DeepSeek 发送大体积 base64 导致 400
+                                                profile.pop("avatar_image_base64", None)
+                                                profile.setdefault(
+                                                    "avatar_note",
+                                                    "（头像原始图片数据已省略，已提供识图摘要）",
+                                                )
+
                             content_str = json.dumps(clean_response, ensure_ascii=False)
                         else:
                             content_str = str(tool_res)
@@ -1534,8 +1860,19 @@ class GeminiService:
             user_id_for_settings=user_id_for_settings
         )
         if dynamic_tools:
-            enabled_tools.extend(dynamic_tools)
-            log.info(f"已根据上下文合并 {len(dynamic_tools)} 个动态函数工具。")
+            filtered_dynamic_tools = [
+                tool
+                for tool in dynamic_tools
+                if getattr(tool, "__name__", "") != "analyze_image_with_gemini_pro"
+            ]
+            enabled_tools.extend(filtered_dynamic_tools)
+            log.info(f"已根据上下文合并 {len(filtered_dynamic_tools)} 个动态函数工具。")
+
+            skipped_count = len(dynamic_tools) - len(filtered_dynamic_tools)
+            if skipped_count > 0:
+                log.info(
+                    f"Gemini 分支已跳过 {skipped_count} 个禁用工具（analyze_image_with_gemini_pro）。"
+                )
 
         # 4. 如果最终有工具被启用，则配置到生成参数中
         if enabled_tools:
@@ -1644,7 +1981,29 @@ class GeminiService:
             if log_detailed:
                 log.info(f"准备执行 {len(function_calls)} 个工具调用...")
 
-            tool_result_parts = []
+            skipped_tool_parts = []
+            executable_calls = []
+
+            for call in function_calls:
+                if call.name == "analyze_image_with_gemini_pro":
+                    skipped_tool_parts.append(
+                        types.Part.from_function_response(
+                            name=call.name or "analyze_image_with_gemini_pro",
+                            response={
+                                "result": {
+                                    "error": "当前 Gemini 分支已禁用深度识图工具 analyze_image_with_gemini_pro。"
+                                }
+                            },
+                        )
+                    )
+                    if log_detailed:
+                        log.info("Gemini 分支拦截到深度识图工具调用，已跳过执行。")
+                    continue
+
+                executable_calls.append(call)
+
+            tool_result_parts = list(skipped_tool_parts)
+
             tasks = [
                 self.tool_service.execute_tool_call(
                     tool_call=call,
@@ -1653,9 +2012,11 @@ class GeminiService:
                     log_detailed=log_detailed,
                     user_id_for_settings=user_id_for_settings,
                 )
-                for call in function_calls
+                for call in executable_calls
             ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            results = (
+                await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
+            )
 
             for result in results:
                 if isinstance(result, Exception):

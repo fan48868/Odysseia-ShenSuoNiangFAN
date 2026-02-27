@@ -91,6 +91,74 @@ class MessageProcessor:
             log.warning(f"下载表情图片失败: {url}, 错误: {e}")
             return None
 
+    def _guess_mime_type_from_url(self, url: str) -> str:
+        """根据 URL 后缀猜测 MIME 类型。"""
+        lowered = (url or "").lower().split("?", 1)[0]
+        if lowered.endswith(".png"):
+            return "image/png"
+        if lowered.endswith(".jpg") or lowered.endswith(".jpeg"):
+            return "image/jpeg"
+        if lowered.endswith(".webp"):
+            return "image/webp"
+        if lowered.endswith(".gif"):
+            return "image/gif"
+        return "image/png"
+
+    async def _extract_images_from_embed_urls(
+        self, embeds: List[Any], source: str = "reply_embed"
+    ) -> List[Dict[str, Any]]:
+        """从 embed.image/embed.thumbnail 中提取图片并下载。"""
+        if not embeds:
+            return []
+
+        urls: List[str] = []
+        for embed in embeds:
+            try:
+                if (
+                    getattr(embed, "image", None)
+                    and getattr(embed.image, "url", None)
+                ):
+                    urls.append(embed.image.url)
+                if (
+                    getattr(embed, "thumbnail", None)
+                    and getattr(embed.thumbnail, "url", None)
+                ):
+                    urls.append(embed.thumbnail.url)
+            except Exception:
+                continue
+
+        # 去重并保持顺序
+        unique_urls: List[str] = []
+        seen = set()
+        for u in urls:
+            if u and u not in seen:
+                unique_urls.append(u)
+                seen.add(u)
+
+        if not unique_urls:
+            return []
+
+        proxy_url = config.PROXY_URL
+        results_list: List[Dict[str, Any]] = []
+        async with aiohttp.ClientSession() as session:
+            tasks = [
+                asyncio.create_task(self._fetch_image_aio(session, u, proxy=proxy_url))
+                for u in unique_urls
+            ]
+            fetched = await asyncio.gather(*tasks)
+
+        for url, image_bytes in zip(unique_urls, fetched):
+            if image_bytes:
+                results_list.append(
+                    {
+                        "mime_type": self._guess_mime_type_from_url(url),
+                        "data": image_bytes,
+                        "source": source,
+                    }
+                )
+
+        return results_list
+
     async def _extract_emojis_as_images(
         self, content: str
     ) -> Tuple[str, List[Dict[str, Any]]]:
@@ -216,6 +284,12 @@ class MessageProcessor:
                                             f"{field.name}: {field.value}"
                                         )
 
+                                image_data_list.extend(
+                                    await self._extract_images_from_embed_urls(
+                                        snapshot.embeds, source="snapshot_embed"
+                                    )
+                                )
+
                             if (
                                 hasattr(snapshot, "attachments")
                                 and snapshot.attachments
@@ -315,6 +389,12 @@ class MessageProcessor:
                             replied_message_content = (
                                 f"{reply_header}\n> {formatted_quote}\n\n"
                             )
+
+                        image_data_list.extend(
+                            await self._extract_images_from_embed_urls(
+                                ref_msg.embeds, source="reply_embed"
+                            )
+                        )
 
                         if ref_msg.attachments:
                             image_data_list.extend(
