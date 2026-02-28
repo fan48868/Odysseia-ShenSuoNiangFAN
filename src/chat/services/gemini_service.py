@@ -987,18 +987,23 @@ class GeminiService:
             user_id_for_settings=user_id_for_settings
         )
         if dynamic_tools:
+            disabled_in_gemini = {"analyze_image_with_gemini_pro", "get_balance"}
             filtered_dynamic_tools = [
                 tool
                 for tool in dynamic_tools
-                if getattr(tool, "__name__", "") != "analyze_image_with_gemini_pro"
+                if getattr(tool, "__name__", "") not in disabled_in_gemini
             ]
             enabled_tools.extend(filtered_dynamic_tools)
             log.info(f"已根据上下文合并 {len(filtered_dynamic_tools)} 个动态函数工具。")
 
-            skipped_count = len(dynamic_tools) - len(filtered_dynamic_tools)
-            if skipped_count > 0:
+            skipped_tools = [
+                getattr(tool, "__name__", "unknown")
+                for tool in dynamic_tools
+                if getattr(tool, "__name__", "") in disabled_in_gemini
+            ]
+            if skipped_tools:
                 log.info(
-                    f"Gemini 分支已跳过 {skipped_count} 个禁用工具（analyze_image_with_gemini_pro）。"
+                    f"Gemini 分支已跳过 {len(skipped_tools)} 个禁用工具（{', '.join(skipped_tools)}）。"
                 )
 
         # 4. 如果最终有工具被启用，则配置到生成参数中
@@ -1111,20 +1116,27 @@ class GeminiService:
             skipped_tool_parts = []
             executable_calls = []
 
+            disabled_tool_calls_in_gemini = {
+                "analyze_image_with_gemini_pro",
+                "get_balance",
+            }
+
             for call in function_calls:
-                if call.name == "analyze_image_with_gemini_pro":
+                if call.name in disabled_tool_calls_in_gemini:
                     skipped_tool_parts.append(
                         types.Part.from_function_response(
-                            name=call.name or "analyze_image_with_gemini_pro",
+                            name=call.name or "unknown_tool",
                             response={
                                 "result": {
-                                    "error": "当前 Gemini 分支已禁用深度识图工具 analyze_image_with_gemini_pro。"
+                                    "error": f"当前 Gemini 分支已禁用工具 {call.name}。"
                                 }
                             },
                         )
                     )
                     if log_detailed:
-                        log.info("Gemini 分支拦截到深度识图工具调用，已跳过执行。")
+                        log.info(
+                            f"Gemini 分支拦截到禁用工具调用 {call.name}，已跳过执行。"
+                        )
                     continue
 
                 executable_calls.append(call)
