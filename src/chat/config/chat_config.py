@@ -178,6 +178,10 @@ MODEL_GENERATION_CONFIG = {
         "top_k": 40,
         "max_output_tokens": 8192,
     },
+    "kimi-k2.5": {
+        "temperature": 0.6,
+    },
+
     # 你可以在这里为其他模型添加更多自定义配置
     # "gemini-2.5-pro-custom": { ... },
 }

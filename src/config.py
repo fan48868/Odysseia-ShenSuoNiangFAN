@@ -82,4 +82,5 @@ AVAILABLE_AI_MODELS = [
     "gemini-3-flash-custom",
     "deepseek-chat",
     "deepseek-reasoner",
+    "kimi-k2.5",
 ]

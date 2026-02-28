@@ -67,6 +67,10 @@ async def analyze_image_with_gemini_pro(
     - **使用场景**：当用户询问"这是谁？这是什么角色？这个人物出自哪里？这是什么动漫？....."等问题，而前置【图片识别结果】未给出准确答复时，调用此工具。
     - **优先专问**: `question` 必须是明确问题，不要泛泛地说“帮我看图”。例如：
       - “请识别图片中的人物角色名字”
+      - "请识别图片出自哪个动漫"
+      - "请识别图中人物动作"
+      - "解释图片笑点"
+      .........
     - **输入来源**: 本工具不要求 AI 传入图片。图片编码由系统在工具上下文中注入（联动逻辑后续接入）。
     - **结果权威**: 如果工具返回有效结果，请以该结果为主要依据组织最终回复。
     - **失败处理**: 如果工具返回 `error`，应向用户解释失败原因并给出可操作建议（如重新上传清晰图片）。
@@ -81,7 +85,7 @@ async def analyze_image_with_gemini_pro(
 
     result_data: Dict[str, Any] = {
         "question_received": question,
-        "model_used": "gemini-2.5-flash",
+        "model_used": "gemini-3-flash-preview-search",
         "result": None,
         "error": None,
     }
@@ -191,10 +195,13 @@ async def analyze_image_with_gemini_pro(
             )
 
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3-flash-preview-search",
             contents=request_contents,
             config=types.GenerateContentConfig(
                 temperature=0.2,
+                tools=[
+                    types.Tool(google_search=types.GoogleSearch()),
+                ],
             ),
         )
 
@@ -212,15 +219,15 @@ async def analyze_image_with_gemini_pro(
             # 输出识图结果到日志（可在 docker logs 中直接查看）
             log_text_preview = text if len(text) <= 2000 else text[:2000] + "...[TRUNCATED]"
             log.info(
-                f"Gemini-2.5-flash 识图成功，输入 {len(image_context_list)} 张，实际发送 {len(parsed_images)} 张。"
+                f"Gemini-3-flash-preview-search 识图成功，输入 {len(image_context_list)} 张，实际发送 {len(parsed_images)} 张。"
             )
             log.info(f"--- [深度识图结果] ---\n{log_text_preview}\n----------------------")
         else:
             result_data["error"] = "Gemini 未返回有效文本结果。"
-            log.warning("Gemini-2.5-flash 未返回有效文本结果。")
+            log.warning("Gemini-3-flash-preview-search 未返回有效文本结果。")
 
     except Exception as e:
-        result_data["error"] = f"调用 Gemini-2.5-flash 识图失败: {str(e)}"
+        result_data["error"] = f"调用 Gemini-3-flash-preview-search 识图失败: {str(e)}"
         log.error("analyze_image_with_gemini_pro 执行失败。", exc_info=True)
 
     return result_data

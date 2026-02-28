@@ -256,11 +256,18 @@ class GeminiService:
         else:
             log.info("ℹ️ 未检测到完整的自定义聊天配置，将回退到官方 API。")
 
-        # --- [新增] DeepSeek 独立配置 ---
+        # --- [新增] OpenAI 兼容模型独立配置 ---
         self.deepseek_url = os.getenv("DEEPSEEK_URL")
         self.deepseek_key = os.getenv("DEEPSEEK_API_KEY")
         if self.deepseek_url and self.deepseek_key:
             log.info(f"✅ 已加载 DeepSeek 配置。URL: {self.deepseek_url}")
+
+        # Kimi（Moonshot）网关配置：
+        # 优先读取 MOONSHOT_*，同时兼容 KIMI_* 命名。
+        self.kimi_url = os.getenv("MOONSHOT_URL") or os.getenv("KIMI_URL")
+        self.kimi_key = os.getenv("MOONSHOT_API_KEY") or os.getenv("KIMI_API_KEY")
+        if self.kimi_url and self.kimi_key:
+            log.info(f"✅ 已加载 Kimi 配置。URL: {self.kimi_url}")
 
         # 一次性调试 URL（下一次发送生效一次后自动清空）
         self._one_time_debug_base_url: Optional[str] = None
@@ -557,6 +564,131 @@ class GeminiService:
 
         return "".join(content_chunks).strip()
 
+    def _extract_text_from_openai_content(
+        self, content: Union[str, List[Dict[str, Any]]]
+    ) -> str:
+        """
+        从 OpenAI 消息 content 中提取纯文本。
+        content 可能是 string（文本模式）或 block 列表（多模态模式）。
+        """
+        if isinstance(content, str):
+            return content.strip()
+
+        text_chunks: List[str] = []
+        for block in content or []:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            ):
+                text_value = block["text"].strip()
+                if text_value:
+                    text_chunks.append(text_value)
+
+        return "\n".join(text_chunks).strip()
+
+    def _build_kimi_turn_content(self, parts: List[Any]) -> List[Dict[str, Any]]:
+        """
+        构建 Kimi (OpenAI 兼容多模态) 单条消息 content。
+        直接把图片作为 image_url(data URI) 发给模型，不做 OCR。
+        """
+        content_blocks: List[Dict[str, Any]] = []
+
+        for part in parts or []:
+            if hasattr(part, "thought") and getattr(part, "thought", False):
+                continue
+
+            # 1) 文本字典
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                text_value = part["text"].strip()
+                if text_value:
+                    content_blocks.append({"type": "text", "text": text_value})
+                continue
+
+            # 2) Gemini Part（兼容）
+            if isinstance(part, types.Part):
+                if part.text:
+                    text_value = part.text.strip()
+                    if text_value:
+                        content_blocks.append({"type": "text", "text": text_value})
+                    continue
+
+                if part.inline_data and part.inline_data.data:
+                    mime_type = part.inline_data.mime_type or "image/png"
+                    image_b64 = base64.b64encode(part.inline_data.data).decode("utf-8")
+                    content_blocks.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime_type};base64,{image_b64}"
+                            },
+                        }
+                    )
+                    continue
+
+            # 3) PIL 图片对象
+            if isinstance(part, Image.Image):
+                buffered = io.BytesIO()
+                part.save(buffered, format="PNG")
+                image_bytes = buffered.getvalue()
+                image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+                content_blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                    }
+                )
+                continue
+
+            # 4) 图片字典
+            if isinstance(part, dict) and part.get("type") == "image":
+                mime_type = str(part.get("mime_type", "image/png"))
+                image_bytes: Optional[bytes] = None
+
+                direct_bytes = part.get("data") or part.get("bytes")
+                if isinstance(direct_bytes, (bytes, bytearray)):
+                    image_bytes = bytes(direct_bytes)
+
+                if image_bytes is None:
+                    image_base64 = part.get("image_base64")
+                    if isinstance(image_base64, str) and image_base64.strip():
+                        try:
+                            image_bytes = base64.b64decode(image_base64)
+                        except Exception:
+                            image_bytes = None
+
+                if image_bytes is None:
+                    data_preview = part.get("data_preview")
+                    if isinstance(data_preview, str) and data_preview.strip():
+                        try:
+                            image_bytes = bytes.fromhex(data_preview.strip())
+                        except Exception:
+                            try:
+                                image_bytes = base64.b64decode(data_preview.strip())
+                            except Exception:
+                                image_bytes = None
+
+                if image_bytes:
+                    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    content_blocks.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
+                        }
+                    )
+                else:
+                    content_blocks.append(
+                        {"type": "text", "text": "（收到一张图片，但解析失败）"}
+                    )
+                continue
+
+            # 5) 兜底文本
+            fallback_text = str(part).strip()
+            if fallback_text:
+                content_blocks.append({"type": "text", "text": fallback_text})
+
+        return content_blocks
+
     # --- Refactored generate_response and its helpers ---
     def _prepare_api_contents(self, conversation: List[Dict]) -> List[types.Content]:
         """将对话历史转换为 API 所需的 Content 对象列表。"""
@@ -676,32 +808,50 @@ class GeminiService:
                 f"🧪 generate_response 已启用一次性调试 URL: {one_time_debug_base_url}，模型: {model_name or self.default_model_name}"
             )
 
-        # --- [新增] DeepSeek 专用路由 ---
-        if model_name in ["deepseek-chat", "deepseek-reasoner"]:
-            if self.deepseek_url and self.deepseek_key:
-                log.info(f"检测到 {model_name} 模型，切换至 DeepSeek 专用通道。")
-                return await self._generate_with_deepseek(
-                    user_id=user_id,
-                    guild_id=guild_id,
-                    message=message,
-                    channel=channel,
-                    replied_message=replied_message,
-                    images=images,
-                    user_name=user_name,
-                    channel_context=channel_context,
-                    world_book_entries=world_book_entries,
-                    personal_summary=personal_summary,
-                    affection_status=affection_status,
-                    user_profile_data=user_profile_data,
-                    guild_name=guild_name,
-                    location_name=location_name,
-                    model_name=model_name,
-                    user_id_for_settings=user_id_for_settings,
-                    override_base_url=one_time_debug_base_url,
-                )
+        # --- [新增] OpenAI 兼容专用路由（DeepSeek / Kimi 共链路） ---
+        if model_name in ["deepseek-chat", "deepseek-reasoner", "kimi-k2.5"]:
+            target_base_url: Optional[str] = None
+            target_api_key: Optional[str] = None
+
+            if model_name in ["deepseek-chat", "deepseek-reasoner"]:
+                target_base_url = self.deepseek_url
+                target_api_key = self.deepseek_key
+                if not (target_base_url and target_api_key):
+                    log.warning(
+                        f"请求使用 {model_name} 但未配置 DEEPSEEK_URL 或 DEEPSEEK_API_KEY。"
+                    )
+                    return "DeepSeek 配置缺失，请检查环境变量。"
             else:
-                log.warning("请求使用 deepseek-chat 但未配置 DEEPSEEK_URL 或 DEEPSEEK_API_KEY。")
-                return "DeepSeek 配置缺失，请检查环境变量。"
+                target_base_url = self.kimi_url
+                target_api_key = self.kimi_key
+                if not (target_base_url and target_api_key):
+                    log.warning(
+                        "请求使用 kimi-k2.5 但未配置 MOONSHOT_URL/MOONSHOT_API_KEY（或 KIMI_URL/KIMI_API_KEY）。"
+                    )
+                    return "Kimi 配置缺失，请检查环境变量。"
+
+            log.info(f"检测到 {model_name} 模型，切换至 OpenAI 兼容专用通道。")
+            return await self._generate_with_deepseek(
+                user_id=user_id,
+                guild_id=guild_id,
+                message=message,
+                channel=channel,
+                replied_message=replied_message,
+                images=images,
+                user_name=user_name,
+                channel_context=channel_context,
+                world_book_entries=world_book_entries,
+                personal_summary=personal_summary,
+                affection_status=affection_status,
+                user_profile_data=user_profile_data,
+                guild_name=guild_name,
+                location_name=location_name,
+                model_name=model_name,
+                user_id_for_settings=user_id_for_settings,
+                override_base_url=one_time_debug_base_url,
+                openai_base_url=target_base_url,
+                openai_api_key=target_api_key,
+            )
 
         # 如果选择了自定义模型，则尝试使用它，并准备好回退
         if model_name and model_name in app_config.CUSTOM_GEMINI_ENDPOINTS:
@@ -1029,6 +1179,8 @@ class GeminiService:
         model_name: Optional[str],
         user_id_for_settings: Optional[str] = None,
         override_base_url: Optional[str] = None,
+        openai_base_url: Optional[str] = None,
+        openai_api_key: Optional[str] = None,
     ) -> str:
         """
         [重构] 包含完整工具调用 (Tool Calling) 循环的 DeepSeek 专用通道。
@@ -1036,6 +1188,12 @@ class GeminiService:
         已根据最新官方文档更新：移除 Strict Mode，支持 reasoning_content 回传。
         """
         effective_model_name = model_name or "deepseek-chat"
+        is_deepseek_model = effective_model_name in {
+            "deepseek-chat",
+            "deepseek-reasoner",
+        }
+        channel_label = "DeepSeek" if is_deepseek_model else "Kimi"
+
         await chat_settings_service.increment_model_usage(effective_model_name)
 
         # --- 1. 自动 RAG 检索逻辑 ---
@@ -1046,9 +1204,9 @@ class GeminiService:
                 if found_entries:
                     world_book_entries = found_entries
                     titles = [e.get('title', '未知') for e in found_entries]
-                    log.info(f"📚 [DeepSeek] 触发世界书/成员设定，已注入 Prompt: {titles}")
+                    log.info(f"📚 [{channel_label}] 触发世界书/成员设定，已注入 Prompt: {titles}")
             except Exception as e:
-                log.warning(f"[DeepSeek] 世界书自动检索失败: {e}")
+                log.warning(f"[{channel_label}] 世界书自动检索失败: {e}")
 
         # --- 2. 获取并转换工具 (Python函数对象 -> OpenAI 格式) ---
         dynamic_tools = await self.tool_service.get_dynamic_tools_for_context(
@@ -1221,13 +1379,13 @@ class GeminiService:
             ):
                 prop_schema["default"] = converted
                 log.warning(
-                    f"[DeepSeek Schema] 字段 '{field_path}' 的默认值类型不匹配，已自动修正为 {converted!r}。"
+                    f"[{channel_label} Schema] 字段 '{field_path}' 的默认值类型不匹配，已自动修正为 {converted!r}。"
                 )
                 return
 
             prop_schema.pop("default", None)
             log.warning(
-                f"[DeepSeek Schema] 字段 '{field_path}' 的默认值 {default_value!r} "
+                f"[{channel_label} Schema] 字段 '{field_path}' 的默认值 {default_value!r} "
                 f"与类型 '{schema_type}' 不匹配，已移除 default。"
             )
 
@@ -1380,6 +1538,16 @@ class GeminiService:
                 return normalized
 
             for tool in dynamic_tools:
+                func_name = getattr(tool, "__name__", "")
+                if (
+                    not is_deepseek_model
+                    and func_name == "analyze_image_with_gemini_pro"
+                ):
+                    log.info(
+                        f"[{effective_model_name}] 已禁用工具: {func_name}（仅 DeepSeek 模型可用）"
+                    )
+                    continue
+
                 try:
                     func_name = tool.__name__
                     func_desc = (tool.__doc__ or "").strip()
@@ -1453,15 +1621,15 @@ class GeminiService:
                         "type": "function",
                         "function": func_dict
                     })
-                    log.debug(f"[DeepSeek] 成功转换工具: {func_name}")
+                    log.debug(f"[{channel_label}] 成功转换工具: {func_name}")
 
                 except Exception as e:
-                    log.error(f"[DeepSeek 工具转换失败] 跳过工具 '{getattr(tool, '__name__', tool)}'，错误: {e}", exc_info=True)
+                    log.error(f"[{channel_label} 工具转换失败] 跳过工具 '{getattr(tool, '__name__', tool)}'，错误: {e}", exc_info=True)
 
             if openai_tools:
-                log.info(f"[DeepSeek] 成功转换 {len(openai_tools)} 个工具发往 API。")
+                log.info(f"[{channel_label}] 成功转换 {len(openai_tools)} 个工具发往 API。")
             else:
-                log.warning("[DeepSeek] 获取到了工具，但转换结果为空！")
+                log.warning(f"[{channel_label}] 获取到了工具，但转换结果为空！")
 
         # --- 3. 构建 Prompt 并转换为 OpenAI 消息格式 ---
         final_conversation = await prompt_service.build_chat_prompt(
@@ -1485,46 +1653,112 @@ class GeminiService:
         is_first_user = True  # 第一条 user 消息是 system prompt，转为 system role
         for turn in final_conversation:
             gemini_role = turn.get("role")
-            content = await self._build_deepseek_turn_content(turn.get("parts", []) or [])
-            if not content:
+
+            if is_deepseek_model:
+                # DeepSeek: 文本模式（图片先经 Moonshot 识别后拼接为文本）
+                content = await self._build_deepseek_turn_content(
+                    turn.get("parts", []) or []
+                )
+                if not content:
+                    continue
+
+                if gemini_role == "model":
+                    openai_messages.append({"role": "assistant", "content": content})
+                else:
+                    if is_first_user:
+                        openai_messages.append({"role": "system", "content": content})
+                        is_first_user = False
+                    else:
+                        openai_messages.append({"role": "user", "content": content})
+                continue
+
+            # Kimi: 多模态模式（图片直接作为 image_url 传入）
+            content_blocks = self._build_kimi_turn_content(turn.get("parts", []) or [])
+            if not content_blocks:
                 continue
 
             if gemini_role == "model":
-                openai_messages.append({"role": "assistant", "content": content})
+                assistant_text = self._extract_text_from_openai_content(content_blocks)
+                if assistant_text:
+                    openai_messages.append(
+                        {"role": "assistant", "content": assistant_text}
+                    )
             else:
                 if is_first_user:
-                    # 第一条 user 消息（system prompt）转为 system role
-                    openai_messages.append({"role": "system", "content": content})
+                    system_text = self._extract_text_from_openai_content(content_blocks)
+                    if system_text:
+                        openai_messages.append({"role": "system", "content": system_text})
                     is_first_user = False
                 else:
-                    openai_messages.append({"role": "user", "content": content})
+                    openai_messages.append({"role": "user", "content": content_blocks})
 
         # --- 4. 输出完整上下文日志 ---
+        def _truncate_data_uri_for_log(url: str) -> str:
+            if not isinstance(url, str):
+                return str(url)
+
+            if url.startswith("data:") and ";base64," in url:
+                prefix, b64_data = url.split(";base64,", 1)
+                preview = b64_data[:80]
+                return (
+                    f"{prefix};base64,{preview}...(truncated, total_base64_chars={len(b64_data)})"
+                )
+
+            if len(url) > 500:
+                return url[:500] + "...(truncated)"
+
+            return url
+
+        def _sanitize_openai_payload_for_log(obj: Any) -> Any:
+            if isinstance(obj, dict):
+                sanitized = {}
+                for k, v in obj.items():
+                    if k == "url" and isinstance(v, str):
+                        sanitized[k] = _truncate_data_uri_for_log(v)
+                    else:
+                        sanitized[k] = _sanitize_openai_payload_for_log(v)
+                return sanitized
+
+            if isinstance(obj, list):
+                return [_sanitize_openai_payload_for_log(item) for item in obj]
+
+            if isinstance(obj, str) and len(obj) > 1500:
+                return obj[:1500] + "...(truncated)"
+
+            return obj
+
         log_detailed = app_config.DEBUG_CONFIG.get("LOG_DETAILED_GEMINI_PROCESS", False)
         if log_detailed:
-            log.info(f"--- [DeepSeek] 完整发送上下文 (用户 {user_id}) ---")
+            safe_openai_messages = _sanitize_openai_payload_for_log(openai_messages)
+            log.info(f"--- [{channel_label}] 完整发送上下文 (用户 {user_id}) ---")
             log.info(
                 json.dumps(
-                    openai_messages,
+                    safe_openai_messages,
                     ensure_ascii=False,
                     indent=2,
                     default=str,
                 )
             )
             if openai_tools:
-                log.info("--- [DeepSeek] 工具列表 ---")
+                log.info(f"--- [{channel_label}] 工具列表 ---")
                 log.info(
                     json.dumps(openai_tools, ensure_ascii=False, indent=2, default=str)
                 )
             log.info("------------------------------------")
 
         # --- 5. 核心：带工具调用的请求循环 ---
-        api_url = (override_base_url or self.deepseek_url or "").rstrip("/")
+        api_url = (override_base_url or openai_base_url or "").rstrip("/")
+        api_key = openai_api_key or ""
+
         if not api_url:
-            return "DeepSeek URL 配置缺失，请检查配置。"
+            return "OpenAI 兼容通道 URL 配置缺失，请检查配置。"
+        if not api_key:
+            return "OpenAI 兼容通道 API Key 配置缺失，请检查配置。"
+
         if override_base_url:
-            log.info(f"🧪 一次性调试已生效：DeepSeek 临时改用 URL: {api_url}")
-        # 不再需要自动修正 beta URL，因为用户已确认使用标准/新版 URL
+            log.info(f"🧪 一次性调试已生效：OpenAI 兼容通道临时改用 URL: {api_url}")
+
+        # 若未直接传完整 completions 地址，则自动补全。
         if not api_url.endswith("/chat/completions"):
              api_url += "/chat/completions"
              
@@ -1549,14 +1783,30 @@ class GeminiService:
                         "top_p": gen_config.get("top_p", 0.95),
                         "max_tokens": gen_config.get("max_output_tokens", 8192),
                     }
+
+                    # Kimi-k2.5: 按需关闭思维链（thinking）
+                    if effective_model_name == "kimi-k2.5":
+                        payload["thinking"] = {"type": "disabled"}
+
                     if openai_tools:
                         payload["tools"] = openai_tools
 
                     response = await http_client.post(
                         api_url,
-                        headers={"Authorization": f"Bearer {self.deepseek_key}", "Content-Type": "application/json"},
+                        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                         json=payload
                     )
+
+                    if response.is_error:
+                        response_body_preview = response.text[:4000] if response.text else ""
+                        log.error(
+                            "[OpenAI兼容] 请求失败 | status=%s | model=%s | url=%s | body=%s",
+                            response.status_code,
+                            effective_model_name,
+                            api_url,
+                            response_body_preview,
+                        )
+
                     response.raise_for_status()
                     result = response.json()
 
@@ -1568,7 +1818,7 @@ class GeminiService:
                     tool_calls = response_message.get("tool_calls")
 
                     if reasoning_content:
-                        log.info(f"--- [DeepSeek] 思考过程 ---\n{reasoning_content}\n-----------------------------")
+                        log.info(f"--- [{channel_label}] 思考过程 ---\n{reasoning_content}\n-----------------------------")
 
                     # [关键更新] 将回复加入上下文，必须包含 reasoning_content 以维持思考连续性
                     # 根据最新文档，assistant 消息应包含 content, reasoning_content, tool_calls
@@ -1600,7 +1850,7 @@ class GeminiService:
                             if has_forbidden_phrase and content_len <= 800:
                                 if bad_format_retries < 3:
                                     log.warning(
-                                        f"[DeepSeek] 检测到违禁词 '不过话说回来' (尝试 {bad_format_retries + 1}/3)。正在重试..."
+                                        f"[{channel_label}] 检测到违禁词 '不过话说回来' (尝试 {bad_format_retries + 1}/3)。正在重试..."
                                     )
                                     # 这里我们需要把刚才 append 的 assistant 消息暂时移除，或者添加一条 system prompt 要求重试
                                     # 为了简单起见，我们添加 user 消息要求重写
@@ -1614,16 +1864,62 @@ class GeminiService:
                                     return "抱歉，我的说话格式一直达不到要求，我是杂鱼"
                             elif has_forbidden_phrase:
                                 log.info(
-                                    f"[DeepSeek] 检测到违禁词，但回复长度为 {content_len} (>800)，按成本优化策略放行。"
+                                    f"[{channel_label}] 检测到违禁词，但回复长度为 {content_len} (>800)，按成本优化策略放行。"
                                 )
                         # ----------------
-                        
-                        if log_detailed:
-                            log.info("--- [DeepSeek] 模型决策：直接生成文本回复 (未调用工具) ---")
-                        self.last_called_tools = called_tool_names
-                        log.info("--- [DeepSeek] 文本生成完成 ---")
 
-                        # --- [DeepSeek] 记录 Token 使用情况 ---
+                        # --- <xx> 表情白名单过滤（仅 DeepSeek 分支）---
+                        allowed_emoji_names = {
+                            "开心",
+                            "乖巧",
+                            "害羞",
+                            "偷笑",
+                            "比心",
+                            "desuwa",
+                            "伤心",
+                            "生气",
+                            "加油",
+                            "好奇",
+                            "邀请",
+                            "傲娇",
+                            "祝福",
+                            "你好",
+                            "叹气",
+                            "投降",
+                        }
+                        removed_emoji_tags = []
+
+                        def _strip_disallowed_emoji_tag(match):
+                            emoji_name = match.group(1).strip()
+                            if emoji_name in allowed_emoji_names:
+                                return match.group(0)
+
+                            removed_emoji_tags.append(match.group(0))
+                            return ""
+
+                        if content:
+                            content = re.sub(
+                                r"<([^<>\s/]{1,20})>",
+                                _strip_disallowed_emoji_tag,
+                                content,
+                            )
+
+                        if removed_emoji_tags:
+                            unique_removed_tags = list(dict.fromkeys(removed_emoji_tags))
+                            log.warning(
+                                f"[{channel_label}] 检测并剔除非白名单表情标签 | user_id=%s | model=%s | count=%s | removed=%s",
+                                user_id,
+                                effective_model_name,
+                                len(removed_emoji_tags),
+                                unique_removed_tags,
+                            )
+
+                        if log_detailed:
+                            log.info(f"--- [{channel_label}] 模型决策：直接生成文本回复 (未调用工具) ---")
+                        self.last_called_tools = called_tool_names
+                        log.info(f"--- [{channel_label}] 文本生成完成 ---")
+
+                        # --- [OpenAI兼容] 记录 Token 使用情况 ---
                         if "usage" in result:
                             try:
                                 usage = result["usage"]
@@ -1642,15 +1938,15 @@ class GeminiService:
                                         await token_usage_service.create_token_usage(
                                             session, usage_date, input_tokens, output_tokens, total_tokens
                                         )
-                                log.info(f"[DeepSeek] Token 记录: In={input_tokens}, Out={output_tokens}, Total={total_tokens}")
+                                log.info(f"[{channel_label}] Token 记录: In={input_tokens}, Out={output_tokens}, Total={total_tokens}")
                             except Exception as e:
-                                log.error(f"[DeepSeek] Token 记录失败: {e}")
+                                log.error(f"[{channel_label}] Token 记录失败: {e}")
 
                         return await self._post_process_response(content, user_id, guild_id)
 
                     # 有工具调用
                     if log_detailed:
-                        log.info(f"--- [DeepSeek] 模型决策：建议进行工具调用 (第 {i + 1}/{max_calls} 次) ---")
+                        log.info(f"--- [{channel_label}] 模型决策：建议进行工具调用 (第 {i + 1}/{max_calls} 次) ---")
                         for call in tool_calls:
                             try:
                                 args_preview = json.loads(call["function"]["arguments"])
@@ -1718,32 +2014,40 @@ class GeminiService:
                                     if isinstance(profile, dict):
                                         avatar_b64 = profile.get("avatar_image_base64")
                                         if isinstance(avatar_b64, str) and avatar_b64.strip():
-                                            try:
-                                                avatar_bytes = base64.b64decode(avatar_b64)
-                                                avatar_mime_type = profile.get("avatar_mime_type", "image/png")
-                                                if not isinstance(avatar_mime_type, str) or not avatar_mime_type:
-                                                    avatar_mime_type = "image/png"
+                                            if is_deepseek_model:
+                                                try:
+                                                    avatar_bytes = base64.b64decode(avatar_b64)
+                                                    avatar_mime_type = profile.get("avatar_mime_type", "image/png")
+                                                    if not isinstance(avatar_mime_type, str) or not avatar_mime_type:
+                                                        avatar_mime_type = "image/png"
 
-                                                avatar_payload = {
-                                                    "type": "image",
-                                                    "mime_type": avatar_mime_type,
-                                                    "data_size": len(avatar_bytes),
-                                                    "data_preview": avatar_bytes.hex(),
-                                                }
-                                                avatar_vision_text = await moonshot_vision_service.recognize_image(
-                                                    avatar_payload,
-                                                    prompt="请识别这张用户头像图片，简洁描述可见人物、风格、配色与关键元素。",
-                                                )
-                                                profile["avatar_image_vision"] = avatar_vision_text
-                                            except Exception as e:
-                                                log.error("处理 get_user_profile 头像识图失败: %s", e, exc_info=True)
-                                                profile["avatar_image_vision"] = "（头像识图失败：处理异常）"
-                                            finally:
-                                                # 避免向 DeepSeek 发送大体积 base64 导致 400
+                                                    avatar_payload = {
+                                                        "type": "image",
+                                                        "mime_type": avatar_mime_type,
+                                                        "data_size": len(avatar_bytes),
+                                                        "data_preview": avatar_bytes.hex(),
+                                                    }
+                                                    avatar_vision_text = await moonshot_vision_service.recognize_image(
+                                                        avatar_payload,
+                                                        prompt="请识别这张用户头像图片，简洁描述可见人物、风格、配色与关键元素。",
+                                                    )
+                                                    profile["avatar_image_vision"] = avatar_vision_text
+                                                except Exception as e:
+                                                    log.error("处理 get_user_profile 头像识图失败: %s", e, exc_info=True)
+                                                    profile["avatar_image_vision"] = "（头像识图失败：处理异常）"
+                                                finally:
+                                                    # 避免向 DeepSeek 发送大体积 base64 导致 400
+                                                    profile.pop("avatar_image_base64", None)
+                                                    profile.setdefault(
+                                                        "avatar_note",
+                                                        "（头像原始图片数据已省略，已提供识图摘要）",
+                                                    )
+                                            else:
+                                                # Kimi 分支：禁用 Moonshot 识图，不生成识图摘要
                                                 profile.pop("avatar_image_base64", None)
                                                 profile.setdefault(
                                                     "avatar_note",
-                                                    "（头像原始图片数据已省略，已提供识图摘要）",
+                                                    "（头像原始图片数据已省略）",
                                                 )
 
                             content_str = json.dumps(clean_response, ensure_ascii=False)
@@ -1764,11 +2068,27 @@ class GeminiService:
                 self.last_called_tools = called_tool_names
                 return "哎呀，我好像陷入了一个复杂的思考循环里，换个话题聊聊吧！"
 
+        except httpx.HTTPStatusError as e:
+            error_info = f"{type(e).__name__}: {str(e)}"
+            response_text = ""
+            try:
+                response_text = e.response.text
+            except Exception:
+                response_text = "<无法读取响应体>"
+
+            # 按用户要求，显式打印 HTTP 400/4xx/5xx 的真实错误体
+            print(f"{channel_label} 致命错误详情: {response_text}")
+            log.error(f"{channel_label} API 调用失败: {error_info}", exc_info=True)
+            log.error(f"{channel_label} 致命错误详情: {response_text}")
+
+            short_detail = response_text[:500] if response_text else "无响应体"
+            return f"{channel_label} 连接失败: {error_info}。详情: {short_detail}"
+
         except Exception as e:
             error_info = f"{type(e).__name__}: {str(e)}"
-            log.error(f"DeepSeek API 调用失败: {error_info}", exc_info=True)
+            log.error(f"{channel_label} API 调用失败: {error_info}", exc_info=True)
             # 返回具体错误信息给用户，方便调试
-            return f"DeepSeek 连接失败: {error_info}。请检查日志或配置。"
+            return f"{channel_label} 连接失败: {error_info}。请检查日志或配置。"
 
     async def _execute_generation_cycle(
         self,
