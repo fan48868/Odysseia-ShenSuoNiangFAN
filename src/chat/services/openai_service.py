@@ -17,6 +17,10 @@ from google.genai import types
 from src.chat.config import chat_config as app_config
 from src.chat.features.chat_settings.services.chat_settings_service import chat_settings_service
 from src.chat.features.tools.services.tool_service import ToolService
+from src.chat.services.kimi_key_rotation import (
+    KimiKeyRotationService,
+    NoAvailableKimiKeyError,
+)
 from src.chat.services.moonshot_vision_service import moonshot_vision_service
 from src.chat.services.prompt_service import prompt_service
 from src.database.database import AsyncSessionLocal
@@ -47,14 +51,108 @@ class OpenAIService:
         self.deepseek_url = os.getenv("DEEPSEEK_URL")
         self.deepseek_key = os.getenv("DEEPSEEK_API_KEY")
 
-        # Kimi（Moonshot）网关配置：兼容 MOONSHOT_* 与 KIMI_* 命名
-        self.kimi_url = os.getenv("MOONSHOT_URL") or os.getenv("KIMI_URL")
-        self.kimi_key = os.getenv("MOONSHOT_API_KEY") or os.getenv("KIMI_API_KEY")
+        # Kimi 网关配置：优先 CUSTOM_KIMI_*，回落 MOONSHOT_*
+        self.custom_kimi_url = os.getenv("CUSTOM_KIMI_URL")
+        self.custom_kimi_key = os.getenv("CUSTOM_KIMI_API_KEY")
+        self.custom_kimi_model = (os.getenv("CUSTOM_KIMI_MODEL") or "").strip()
+        self.moonshot_url = os.getenv("MOONSHOT_URL")
+        self.moonshot_key = os.getenv("MOONSHOT_API_KEY")
+
+        fallback_kimi_url = self.moonshot_url
+        fallback_kimi_key = self.moonshot_key
+
+        self.kimi_key_rotation = KimiKeyRotationService(
+            custom_base_url=self.custom_kimi_url,
+            custom_api_key=self.custom_kimi_key,
+            fallback_base_url=fallback_kimi_url,
+            fallback_api_key=fallback_kimi_key,
+        )
+        self.kimi_alert_user_id = 1046310552365973524
 
         if self.deepseek_url and self.deepseek_key:
             log.info(f"✅ [OpenAIService] 已加载 DeepSeek 配置。URL: {self.deepseek_url}")
-        if self.kimi_url and self.kimi_key:
-            log.info(f"✅ [OpenAIService] 已加载 Kimi 配置。URL: {self.kimi_url}")
+        if self.custom_kimi_url and self.custom_kimi_key:
+            log.info(f"✅ [OpenAIService] 已加载 CUSTOM_KIMI 配置。URL: {self.custom_kimi_url}")
+        if self.custom_kimi_model:
+            log.info(f"✅ [OpenAIService] 已加载 CUSTOM_KIMI_MODEL: {self.custom_kimi_model}")
+        if fallback_kimi_url and fallback_kimi_key:
+            log.info(f"✅ [OpenAIService] 已加载 Kimi 兜底配置。URL: {fallback_kimi_url}")
+
+    async def _notify_kimi_alert(self, content: str) -> None:
+        """向指定管理员发送 Kimi 轮换告警私信（失败不影响主流程）。"""
+        bot = getattr(self.tool_service, "bot", None)
+        if bot is None:
+            log.warning("[KimiAlert] Bot 实例尚未注入，跳过私信告警: %s", content)
+            return
+
+        try:
+            user = bot.get_user(self.kimi_alert_user_id)
+            if user is None:
+                user = await bot.fetch_user(self.kimi_alert_user_id)
+            if user is None:
+                log.warning("[KimiAlert] 未找到告警用户: %s", self.kimi_alert_user_id)
+                return
+
+            await user.send(content)
+        except Exception as e:
+            log.warning("[KimiAlert] 发送私信告警失败: %s", e)
+
+    @staticmethod
+    def _is_custom_quota_exhausted(status_code: int, error_text: str) -> bool:
+        """
+        判断 custom key 错误是否更接近“额度耗尽”（应封禁到次日）而非短时故障。
+        说明：关键词可按实际网关报错继续补充。
+        """
+        text = (error_text or "").lower()
+
+        # 纯 429 更偏向短时限流，不直接判定为额度耗尽
+        if "429 too many requests" in text:
+            return False
+
+        quota_keywords = [
+            "quota",
+            "配额",
+            "额度",
+            "余额不足",
+            "insufficient balance",
+            "credit",
+            "exhaust",
+            "exceeded",
+            "daily limit",
+            "用完",
+            "已用尽",
+            "今日",
+            "当天",
+            "limit reached",
+        ]
+
+        if any(keyword in text for keyword in quota_keywords):
+            return True
+
+        return status_code in {402}
+
+    async def _notify_switched_to_official_if_needed(self, already_notified: bool) -> bool:
+        """
+        在 custom 出错后检查当前活跃槽位是否已回落到 moonshot。
+        仅发送一次切换告警。
+        """
+        if already_notified:
+            return True
+
+        try:
+            active_slot = await self.kimi_key_rotation.acquire_active_slot()
+        except NoAvailableKimiKeyError:
+            return False
+
+        if active_slot.label == "moonshot":
+            await self._notify_kimi_alert("所有公益站key均失效，切换至官方url")
+            return True
+
+        return False
+
+    async def reset_kimi_penalties(self) -> None:
+        """手动重置 Kimi 轮换中的全部惩罚记录。"""
+        await self.kimi_key_rotation.reset_all_penalties()
 
     def _build_moonshot_image_payload_from_pil(self, image: Image.Image) -> Dict[str, Any]:
         """将 PIL 图片转换为 Moonshot 识别所需 payload。"""
@@ -287,6 +385,269 @@ class OpenAIService:
 
         return content_blocks
 
+    @staticmethod
+    def _build_chat_completions_url(base_url: str) -> str:
+        normalized = (base_url or "").rstrip("/")
+        if not normalized.endswith("/chat/completions"):
+            normalized += "/chat/completions"
+        return normalized
+
+    @staticmethod
+    def _normalize_kimi_model_name(model_name: str) -> str:
+        return re.sub(r"[\s_\-]", "", (model_name or "").strip().lower())
+
+    @classmethod
+    def _is_kimi_25_family(cls, model_name: str) -> bool:
+        normalized = cls._normalize_kimi_model_name(model_name)
+        return normalized in {"kimik2.5", "kimi2.5"}
+
+    def _is_custom_kimi_ready(self) -> bool:
+        return bool((self.custom_kimi_url or "").strip() and (self.custom_kimi_key or "").strip())
+
+    def _build_kimi_model_candidates(self, model_name: str) -> List[str]:
+        raw_model = (model_name or "").strip()
+        if not raw_model:
+            return []
+
+        candidates: List[str] = []
+        prefer_custom_site = self._is_custom_kimi_ready()
+
+        # 关键策略：
+        # 1) 只要 custom 可用，Kimi 2.5 家族默认先打网关常见命名 "KIMI 2.5"（或 CUSTOM_KIMI_MODEL）
+        # 2) 再回退到官方命名 "kimi-k2.5"
+        if self._is_kimi_25_family(raw_model):
+            if prefer_custom_site:
+                candidates.append(self.custom_kimi_model or "KIMI 2.5")
+                candidates.append(raw_model)
+                candidates.append("kimi-k2.5")
+            else:
+                candidates.append(raw_model)
+                candidates.append(self.custom_kimi_model or "KIMI 2.5")
+        else:
+            candidates.append(raw_model)
+            if self.custom_kimi_model:
+                candidates.append(self.custom_kimi_model)
+
+        deduped: List[str] = []
+        seen = set()
+        for item in candidates:
+            normalized = item.strip()
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            deduped.append(normalized)
+
+        return deduped
+
+    @staticmethod
+    def _is_model_not_found_error(status_code: int, response_text: str) -> bool:
+        text = response_text or ""
+        lowered = text.lower()
+        return status_code in {400, 404, 422, 503} and (
+            "model_not_found" in lowered or "无可用渠道" in text
+        )
+
+    @staticmethod
+    def _build_request_error_log_fields(e: httpx.RequestError) -> Dict[str, str]:
+        req = getattr(e, "request", None)
+        cause = getattr(e, "__cause__", None)
+
+        return {
+            "exc_type": type(e).__name__,
+            "exc_repr": repr(e),
+            "exc_str": str(e) or "<empty>",
+            "cause_type": type(cause).__name__ if cause else "<none>",
+            "cause_repr": repr(cause) if cause else "<none>",
+            "request_method": getattr(req, "method", "<none>") if req else "<none>",
+            "request_url": str(getattr(req, "url", "<none>")) if req else "<none>",
+        }
+
+    async def _post_kimi_with_rotation(
+        self,
+        http_client: httpx.AsyncClient,
+        payload: Dict[str, Any],
+        override_base_url: Optional[str] = None,
+    ) -> Tuple[httpx.Response, str, str, str, str, str]:
+        """
+        使用 Kimi key 路由服务发起请求：
+        - 路由到 custom 时强制模型名为 CUSTOM_KIMI_MODEL 或 "KIMI 2.5"；
+        - 路由到 moonshot 时强制模型名为 "kimi-k2.5"；
+        - custom 出错时无缝切下一个 key，必要时回落官方；
+        - moonshot 保留 429 两阶段惩罚（2 分钟冷却 -> 次日封禁）。
+        """
+        switched_to_official_notified = False
+        while True:
+            slot = await self.kimi_key_rotation.acquire_active_slot()
+            current_base_url = (override_base_url or slot.base_url or "").rstrip("/")
+            current_api_url = self._build_chat_completions_url(current_base_url)
+
+            request_payload = dict(payload)
+
+            if slot.label == "custom":
+                routed_model_name = self.custom_kimi_model or "KIMI 2.5"
+                # 自定义路由统一关闭思维链，避免网关透传/兼容行为不一致
+                thinking_cfg = request_payload.get("thinking")
+                if not isinstance(thinking_cfg, dict) or thinking_cfg.get("type") != "disabled":
+                    request_payload["thinking"] = {"type": "disabled"}
+            elif slot.label == "moonshot":
+                routed_model_name = "kimi-k2.5"
+            else:
+                routed_model_name = str(request_payload.get("model", "kimi-k2.5"))
+
+            request_payload["model"] = routed_model_name
+
+            site_kind = "自定义站点" if slot.label == "custom" else "官方站点"
+            current_model = str(request_payload.get("model", "<none>"))
+            log.info(
+                "[Kimi] 生成前路由 | site=%s | source=%s | model=%s | url=%s | key_tail=%s",
+                site_kind,
+                slot.label,
+                current_model,
+                current_api_url,
+                slot.key_tail,
+            )
+
+            try:
+                response = await http_client.post(
+                    current_api_url,
+                    headers={
+                        "Authorization": f"Bearer {slot.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=request_payload,
+                )
+            except httpx.RequestError as e:
+                if slot.label == "custom":
+                    stage, until_ts = await self.kimi_key_rotation.report_custom_error(
+                        slot.slot_id,
+                        daily_disabled=False,
+                    )
+                    until_dt = datetime.fromtimestamp(until_ts, ZoneInfo("Asia/Shanghai"))
+                    log.warning(
+                        "[Kimi] 公益 key 网络错误，已切换下一个 | key_tail=%s | stage=%s | until=%s | reason=%s",
+                        slot.key_tail,
+                        stage,
+                        until_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        str(e),
+                    )
+                    await self._notify_kimi_alert("当前公益站key出现报错，开始尝试下一个")
+                    switched_to_official_notified = await self._notify_switched_to_official_if_needed(
+                        switched_to_official_notified
+                    )
+                    continue
+
+                err_fields = self._build_request_error_log_fields(e)
+                log.error(
+                    "[Kimi] 网络请求异常 | source=%s | slot_id=%s | key_tail=%s | base_url=%s | api_url=%s | "
+                    "exc_type=%s | exc_repr=%s | exc_str=%s | cause_type=%s | cause_repr=%s | "
+                    "request_method=%s | request_url=%s",
+                    slot.label,
+                    slot.slot_id,
+                    slot.key_tail,
+                    current_base_url,
+                    current_api_url,
+                    err_fields["exc_type"],
+                    err_fields["exc_repr"],
+                    err_fields["exc_str"],
+                    err_fields["cause_type"],
+                    err_fields["cause_repr"],
+                    err_fields["request_method"],
+                    err_fields["request_url"],
+                    exc_info=True,
+                )
+                raise
+
+            response_text = response.text or ""
+            combined_error_text = f"{response.status_code} {response.reason_phrase}"
+            if response_text:
+                combined_error_text = f"{combined_error_text} | {response_text}"
+            lowered_combined_error_text = combined_error_text.lower()
+            reason_preview = combined_error_text[:1000]
+
+            # 官方 key 的 429 双阶段惩罚
+            if slot.label == "moonshot" and (
+                response.status_code == 429
+                or "429 too many requests" in lowered_combined_error_text
+            ):
+                await self._notify_kimi_alert("当前官方key出现429报错")
+                stage, until_ts = await self.kimi_key_rotation.report_429(slot.slot_id)
+                until_dt = datetime.fromtimestamp(until_ts, ZoneInfo("Asia/Shanghai"))
+                if stage == "temporary_cooldown":
+                    log.warning(
+                        "[Kimi] Key ...%s 触发 429，临时禁用至 %s，自动切换下一个 key 重试。reason=%s",
+                        slot.key_tail,
+                        until_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        reason_preview,
+                    )
+                else:
+                    log.error(
+                        "[Kimi] Key ...%s 二次触发 429（TPD），已封禁至次日重置: %s。reason=%s",
+                        slot.key_tail,
+                        until_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        reason_preview,
+                    )
+                continue
+
+            # 公益 key 错误：自动切下一个；额度类错误会封禁到次日
+            custom_body_429_error = (
+                "429 too many requests" in lowered_combined_error_text
+                and '"error"' in lowered_combined_error_text
+            )
+            if slot.label == "custom" and (response.is_error or custom_body_429_error):
+                is_quota_exhausted = self._is_custom_quota_exhausted(
+                    response.status_code,
+                    combined_error_text,
+                )
+                stage, until_ts = await self.kimi_key_rotation.report_custom_error(
+                    slot.slot_id,
+                    daily_disabled=is_quota_exhausted,
+                )
+                until_dt = datetime.fromtimestamp(until_ts, ZoneInfo("Asia/Shanghai"))
+                if stage == "custom_daily_disabled":
+                    log.error(
+                        "[Kimi] 公益 key 额度疑似耗尽，封禁至次日 | key_tail=%s | until=%s | reason=%s",
+                        slot.key_tail,
+                        until_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        reason_preview,
+                    )
+                else:
+                    log.warning(
+                        "[Kimi] 公益 key 出错，临时冷却并切换下一个 | key_tail=%s | until=%s | reason=%s",
+                        slot.key_tail,
+                        until_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        reason_preview,
+                    )
+
+                await self._notify_kimi_alert("当前公益站key出现报错，开始尝试下一个")
+                switched_to_official_notified = await self._notify_switched_to_official_if_needed(
+                    switched_to_official_notified
+                )
+                continue
+
+            if response.is_error:
+                response_body_preview = response_text[:4000] if response_text else ""
+                log.error(
+                    "[Kimi] 请求失败 | status=%s | url=%s | key_tail=%s | body=%s",
+                    response.status_code,
+                    current_api_url,
+                    slot.key_tail,
+                    response_body_preview,
+                )
+
+            response.raise_for_status()
+            await self.kimi_key_rotation.report_success(slot.slot_id)
+            return (
+                response,
+                current_api_url,
+                slot.label,
+                slot.slot_id,
+                slot.key_tail,
+                routed_model_name,
+            )
+
     async def generate_response(
         self,
         user_id: int,
@@ -325,13 +686,22 @@ class OpenAIService:
                 log.warning(f"请求使用 {effective_model_name} 但未配置 DEEPSEEK_URL 或 DEEPSEEK_API_KEY。")
                 return "DeepSeek 配置缺失，请检查环境变量。"
         else:
-            target_base_url = self.kimi_url
-            target_api_key = self.kimi_key
-            if not (target_base_url and target_api_key):
+            target_base_url = None
+            target_api_key = None
+            if not self.kimi_key_rotation.has_configured_keys:
                 log.warning(
-                    "请求使用 kimi-k2.5 但未配置 MOONSHOT_URL/MOONSHOT_API_KEY（或 KIMI_URL/KIMI_API_KEY）。"
+                    "请求使用 kimi-k2.5 但未配置 CUSTOM_KIMI_*，且缺少 MOONSHOT_URL/MOONSHOT_API_KEY。"
                 )
-                return "Kimi 配置缺失，请检查环境变量。"
+                return "Kimi 配置缺失，请检查 CUSTOM_KIMI_* 或 MOONSHOT_* 环境变量。"
+
+        if not is_deepseek_model:
+            preferred_site = "custom" if self._is_custom_kimi_ready() else "moonshot_only"
+            log.info(
+                "[Kimi] 本轮回复预路由 | preferred_site=%s | custom_model=%s | moonshot_model=%s",
+                preferred_site,
+                self.custom_kimi_model or "KIMI 2.5",
+                "kimi-k2.5",
+            )
 
         await chat_settings_service.increment_model_usage(effective_model_name)
 
@@ -837,19 +1207,24 @@ class OpenAIService:
             log.info("------------------------------------")
 
         # 核心请求循环
-        api_url = (override_base_url or target_base_url or "").rstrip("/")
-        api_key = target_api_key or ""
+        api_url = ""
+        api_key = ""
 
-        if not api_url:
-            return "OpenAI 兼容通道 URL 配置缺失，请检查配置。"
-        if not api_key:
-            return "OpenAI 兼容通道 API Key 配置缺失，请检查配置。"
+        if is_deepseek_model:
+            api_url = (override_base_url or target_base_url or "").rstrip("/")
+            api_key = target_api_key or ""
 
-        if override_base_url:
-            log.info(f"🧪 一次性调试已生效：OpenAI 兼容通道临时改用 URL: {api_url}")
+            if not api_url:
+                return "OpenAI 兼容通道 URL 配置缺失，请检查配置。"
+            if not api_key:
+                return "OpenAI 兼容通道 API Key 配置缺失，请检查配置。"
 
-        if not api_url.endswith("/chat/completions"):
-            api_url += "/chat/completions"
+            if override_base_url:
+                log.info(f"🧪 一次性调试已生效：OpenAI 兼容通道临时改用 URL: {api_url}")
+
+            api_url = self._build_chat_completions_url(api_url)
+        elif override_base_url:
+            log.info(f"🧪 一次性调试已生效：Kimi 通道临时改用 URL: {override_base_url}")
 
         gen_config = app_config.MODEL_GENERATION_CONFIG.get(
             effective_model_name, app_config.MODEL_GENERATION_CONFIG["default"]
@@ -860,12 +1235,15 @@ class OpenAIService:
         bad_format_retries = 0
         deep_vision_used = False
         tool_image_context_list = self._build_tool_image_context_list(images)
+        switched_to_official_notified = False
 
         try:
             async with httpx.AsyncClient(timeout=120.0) as http_client:
                 for i in range(max_calls):
+                    request_model_name = effective_model_name
+
                     payload = {
-                        "model": effective_model_name,
+                        "model": request_model_name,
                         "messages": openai_messages,
                         "stream": False,
                         "temperature": gen_config.get("temperature", 1.3),
@@ -873,33 +1251,148 @@ class OpenAIService:
                         "max_tokens": gen_config.get("max_output_tokens", 8192),
                     }
 
-                    if effective_model_name == "kimi-k2.5":
+                    if not is_deepseek_model:
                         payload["thinking"] = {"type": "disabled"}
 
                     if openai_tools:
                         payload["tools"] = openai_tools
 
-                    response = await http_client.post(
-                        api_url,
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json=payload,
-                    )
+                    used_api_url = api_url
+                    used_slot_label = "deepseek"
+                    used_kimi_slot_id: Optional[str] = None
+                    used_kimi_key_tail = "N/A"
+                    used_kimi_model_name = request_model_name
 
-                    if response.is_error:
-                        response_body_preview = response.text[:4000] if response.text else ""
-                        log.error(
-                            "[OpenAI兼容] 请求失败 | status=%s | model=%s | url=%s | body=%s",
-                            response.status_code,
-                            effective_model_name,
+                    if is_deepseek_model:
+                        response = await http_client.post(
                             api_url,
-                            response_body_preview,
+                            headers={
+                                "Authorization": f"Bearer {api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json=payload,
                         )
 
+                        if response.is_error:
+                            response_body_preview = response.text[:4000] if response.text else ""
+                            log.error(
+                                "[OpenAI兼容] 请求失败 | status=%s | model=%s | url=%s | body=%s",
+                                response.status_code,
+                                effective_model_name,
+                                api_url,
+                                response_body_preview,
+                            )
+                    else:
+                        (
+                            response,
+                            used_api_url,
+                            used_slot_label,
+                            used_kimi_slot_id,
+                            used_kimi_key_tail,
+                            used_kimi_model_name,
+                        ) = await self._post_kimi_with_rotation(
+                            http_client=http_client,
+                            payload=payload,
+                            override_base_url=override_base_url,
+                        )
+
+                        if log_detailed:
+                            log.info(
+                                "[Kimi] 本次请求使用来源=%s, url=%s, model=%s",
+                                used_slot_label,
+                                used_api_url,
+                                used_kimi_model_name,
+                            )
+
                     response.raise_for_status()
-                    result = response.json()
+
+                    try:
+                        result = response.json()
+                    except json.JSONDecodeError:
+                        response_text = (response.text or "").strip()
+                        lowered_response_text = response_text.lower()
+
+                        if not is_deepseek_model and used_kimi_slot_id:
+                            if used_slot_label == "moonshot" and (
+                                response.status_code == 429
+                                or "429 too many requests" in lowered_response_text
+                            ):
+                                await self._notify_kimi_alert("当前官方key出现429报错")
+                                stage, until_ts = await self.kimi_key_rotation.report_429(
+                                    used_kimi_slot_id
+                                )
+                                until_dt = datetime.fromtimestamp(
+                                    until_ts, ZoneInfo("Asia/Shanghai")
+                                )
+                                reason_preview = response_text[:1000] if response_text else "<empty>"
+                                if stage == "temporary_cooldown":
+                                    log.warning(
+                                        "[Kimi] Key ...%s 在响应体中命中 429 文本，临时禁用至 %s，自动重试。reason=%s",
+                                        used_kimi_key_tail,
+                                        until_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                                        reason_preview,
+                                    )
+                                else:
+                                    log.error(
+                                        "[Kimi] Key ...%s 在响应体中二次命中 429 文本，封禁至次日重置: %s。reason=%s",
+                                        used_kimi_key_tail,
+                                        until_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                                        reason_preview,
+                                    )
+                                continue
+
+                            if used_slot_label == "custom":
+                                is_quota_exhausted = self._is_custom_quota_exhausted(
+                                    response.status_code,
+                                    response_text,
+                                )
+                                stage, until_ts = await self.kimi_key_rotation.report_custom_error(
+                                    used_kimi_slot_id,
+                                    daily_disabled=is_quota_exhausted,
+                                )
+                                until_dt = datetime.fromtimestamp(
+                                    until_ts, ZoneInfo("Asia/Shanghai")
+                                )
+                                reason_preview = response_text[:1000] if response_text else "<empty>"
+                                if stage == "custom_daily_disabled":
+                                    log.error(
+                                        "[Kimi] 公益 key 非 JSON 且疑似额度耗尽，封禁至次日 | key_tail=%s | until=%s | reason=%s",
+                                        used_kimi_key_tail,
+                                        until_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                                        reason_preview,
+                                    )
+                                else:
+                                    log.warning(
+                                        "[Kimi] 公益 key 返回非 JSON，临时冷却并切换下一个 | key_tail=%s | until=%s | reason=%s",
+                                        used_kimi_key_tail,
+                                        until_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                                        reason_preview,
+                                    )
+
+                                await self._notify_kimi_alert("当前公益站key出现报错，开始尝试下一个")
+                                switched_to_official_notified = await self._notify_switched_to_official_if_needed(
+                                    switched_to_official_notified
+                                )
+                                continue
+
+                        if not is_deepseek_model:
+                            body_preview = response_text[:1200] if response_text else "<empty>"
+                            content_type = response.headers.get("content-type", "<none>")
+                            server = response.headers.get("server", "<none>")
+                            log.error(
+                                "[Kimi] 返回非 JSON 响应 | status=%s | content_type=%s | server=%s | "
+                                "url=%s | source=%s | key_tail=%s | body=%s",
+                                response.status_code,
+                                content_type,
+                                server,
+                                used_api_url,
+                                used_slot_label,
+                                used_kimi_key_tail,
+                                body_preview,
+                            )
+                            return "Kimi 通道返回了非标准响应（非 JSON），请稍后再试。"
+
+                        raise
 
                     response_message = result["choices"][0]["message"]
                     reasoning_content = response_message.get("reasoning_content")
@@ -1166,6 +1659,11 @@ class OpenAIService:
                 self.last_called_tools = called_tool_names
                 return "哎呀，我好像陷入了一个复杂的思考循环里，换个话题聊聊吧！"
 
+        except NoAvailableKimiKeyError:
+            log.error("[Kimi] 所有 Key 当前不可用（可能均在冷却或次日封禁中）。")
+            await self._notify_kimi_alert("所有key均失效")
+            return "目前全部key均已失效"
+
         except httpx.HTTPStatusError as e:
             error_info = f"{type(e).__name__}: {str(e)}"
             response_text = ""
@@ -1180,6 +1678,26 @@ class OpenAIService:
 
             short_detail = response_text[:500] if response_text else "无响应体"
             return f"{channel_label} 连接失败: {error_info}。详情: {short_detail}"
+
+        except httpx.RequestError as e:
+            err_fields = self._build_request_error_log_fields(e)
+            log.error(
+                "[%s] 网络层请求失败 | exc_type=%s | exc_repr=%s | exc_str=%s | "
+                "cause_type=%s | cause_repr=%s | request_method=%s | request_url=%s",
+                channel_label,
+                err_fields["exc_type"],
+                err_fields["exc_repr"],
+                err_fields["exc_str"],
+                err_fields["cause_type"],
+                err_fields["cause_repr"],
+                err_fields["request_method"],
+                err_fields["request_url"],
+                exc_info=True,
+            )
+            return (
+                f"{channel_label} 连接失败: {err_fields['exc_type']}。"
+                "请检查网关地址、DNS/TLS 与网络连通性。"
+            )
 
         except Exception as e:
             error_info = f"{type(e).__name__}: {str(e)}"

@@ -40,6 +40,33 @@ class AIChatCog(commands.Cog):
         text_without_emojis = re.sub(emoji_pattern, "", text)
         return len(text_without_emojis)
 
+    async def _send_long_response_in_channel(
+        self, message: discord.Message, response_text: str
+    ) -> None:
+        """将超长回复拆分后在当前频道连续发送，避免截断或私信。"""
+        max_len = 1900
+        chunks = []
+        remaining = response_text
+
+        while remaining:
+            if len(remaining) <= max_len:
+                chunks.append(remaining)
+                break
+
+            split_pos = remaining.rfind("\n", 0, max_len)
+            if split_pos == -1 or split_pos < max_len // 2:
+                split_pos = max_len
+
+            chunks.append(remaining[:split_pos].rstrip())
+            remaining = remaining[split_pos:].lstrip()
+
+        if not chunks:
+            return
+
+        await message.reply(chunks[0], mention_author=True)
+        for chunk in chunks[1:]:
+            await message.channel.send(chunk)
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """
@@ -167,14 +194,26 @@ class AIChatCog(commands.Cog):
                 except discord.errors.HTTPException as e:
                     log.warning(f"发送回复时发生HTTP错误: {e}")
                     # 处理 400 Bad Request (error code: 50035): Invalid Form Body (Must be 2000 or fewer in length)
-                    if e.status == 400 and e.code == 50035 and "Must be 2000 or fewer in length" in str(e):
+                    if (
+                        e.status == 400
+                        and e.code == 50035
+                        and "Must be 2000 or fewer in length" in str(e)
+                    ):
                         try:
-                            truncated_response = response_text[:1950] + "\n\n(提示：由于消息过长，后半部分已被截断。)"
-                            await message.author.send(truncated_response)
-                            log.info(f"因消息超长且在频道内发送失败，已截断并私信发送给 {message.author.display_name}")
-                        except discord.Forbidden:
-                            log.warning(f"无法通过私信发送截断后的消息给 {message.author.display_name}")
-                            await message.reply("由于回复内容过长且无法私信，发送失败啦！", mention_author=True)
+                            await self._send_long_response_in_channel(
+                                message, response_text
+                            )
+                            log.info(
+                                f"因消息超长，已在原频道分段发送给 {message.author.display_name}"
+                            )
+                        except Exception as split_error:
+                            log.error(
+                                f"消息分段发送失败: {split_error}", exc_info=True
+                            )
+                            await message.reply(
+                                "由于回复内容过长，分段发送也失败啦！",
+                                mention_author=True,
+                            )
                     return
 
                 except Exception as e:
