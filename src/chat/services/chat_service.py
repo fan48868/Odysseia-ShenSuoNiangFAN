@@ -132,6 +132,7 @@ class ChatService:
         user_content = processed_data["user_content"]
         replied_content = processed_data["replied_content"]
         image_data_list = processed_data["image_data_list"]
+        video_data_list = processed_data.get("video_data_list", [])
 
         try:
             # 2. --- 上下文与知识库检索 ---
@@ -209,6 +210,7 @@ class ChatService:
                 channel=message.channel,
                 replied_message=replied_content,
                 images=image_data_list if image_data_list else None,
+                videos=video_data_list if video_data_list else None,
                 user_name=author.display_name,
                 channel_context=channel_context,
                 world_book_entries=world_book_entries,

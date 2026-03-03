@@ -553,6 +553,7 @@ class GeminiService:
         location_name: str = "未知位置",
         model_name: Optional[str] = None,
         user_id_for_settings: Optional[str] = None,
+        videos: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
         AI 回复生成的分发器。
@@ -586,6 +587,7 @@ class GeminiService:
                 model_name=model_name,
                 user_id_for_settings=user_id_for_settings,
                 override_base_url=one_time_debug_base_url,
+                videos=videos,
             )
             self.last_called_tools = list(self.openai_service.last_called_tools)
             return result

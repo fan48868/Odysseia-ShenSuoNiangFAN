@@ -131,6 +131,17 @@ class PromptService:
 
         return display_name
 
+    @staticmethod
+    def _should_keep_raw_gif_for_kimi(
+        model_name: Optional[str], image_data: Optional[Dict[str, Any]]
+    ) -> bool:
+        if model_name != "kimi-k2.5" or not isinstance(image_data, dict):
+            return False
+
+        mime_type = str(image_data.get("mime_type", "")).lower()
+        image_bytes = image_data.get("data")
+        return mime_type == "image/gif" and isinstance(image_bytes, (bytes, bytearray))
+
     async def build_chat_prompt(
         self,
         user_name: str,
@@ -397,13 +408,23 @@ class PromptService:
                 # 2. 添加表情图片
                 emoji_name = match.group(1)
                 if emoji_name in emoji_map:
-                    try:
-                        pil_image = Image.open(
-                            io.BytesIO(emoji_map[emoji_name]["data"])
+                    emoji_data = emoji_map[emoji_name]
+                    if self._should_keep_raw_gif_for_kimi(model_name, emoji_data):
+                        processed_parts.append(
+                            {
+                                "type": "image",
+                                "mime_type": "image/gif",
+                                "data": bytes(emoji_data["data"]),
+                                "source": emoji_data.get("source", "emoji"),
+                                "name": emoji_name,
+                            }
                         )
-                        processed_parts.append(pil_image)
-                    except Exception as e:
-                        log.error(f"Pillow 无法打开表情图片 {emoji_name}。错误: {e}。")
+                    else:
+                        try:
+                            pil_image = Image.open(io.BytesIO(emoji_data["data"]))
+                            processed_parts.append(pil_image)
+                        except Exception as e:
+                            log.error(f"Pillow 无法打开表情图片 {emoji_name}。错误: {e}。")
 
                 last_end = match.end()
 
@@ -460,6 +481,17 @@ class PromptService:
 
         # 追加所有附件图片到末尾
         for img_data in attachment_images:
+            if self._should_keep_raw_gif_for_kimi(model_name, img_data):
+                current_user_parts.append(
+                    {
+                        "type": "image",
+                        "mime_type": "image/gif",
+                        "data": bytes(img_data["data"]),
+                        "source": img_data.get("source", "attachment"),
+                    }
+                )
+                continue
+
             try:
                 pil_image = Image.open(io.BytesIO(img_data["data"]))
                 current_user_parts.append(pil_image)

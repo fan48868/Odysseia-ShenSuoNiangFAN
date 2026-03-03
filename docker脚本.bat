@@ -49,7 +49,7 @@ goto loop
 :op1
 echo.
 echo [状态] 正在全量编译并启动所有容器...
-docker compose up -d 
+docker compose up -d --build
 goto end_action
 
 :op2

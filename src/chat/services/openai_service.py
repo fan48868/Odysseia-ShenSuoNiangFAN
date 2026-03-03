@@ -243,7 +243,23 @@ class OpenAIService:
 
                 if part.inline_data and part.inline_data.data:
                     mime_type = part.inline_data.mime_type or "image/png"
-                    image_b64 = base64.b64encode(part.inline_data.data).decode("utf-8")
+                    image_bytes = bytes(part.inline_data.data)
+
+                    if mime_type.lower() == "image/gif":
+                        max_gif_size_mb = float(
+                            app_config.IMAGE_PROCESSING_CONFIG.get("MAX_GIF_SIZE_MB", 8)
+                        )
+                        max_gif_size_bytes = int(max_gif_size_mb * 1024 * 1024)
+                        if len(image_bytes) > max_gif_size_bytes:
+                            content_blocks.append(
+                                {
+                                    "type": "text",
+                                    "text": "（收到一张 GIF，但体积超过限制，已跳过）",
+                                }
+                            )
+                            continue
+
+                    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
                     content_blocks.append(
                         {
                             "type": "image_url",
@@ -297,6 +313,26 @@ class OpenAIService:
                                 image_bytes = None
 
                 if image_bytes:
+                    if mime_type.lower() == "image/gif":
+                        source = str(part.get("source", "attachment"))
+                        image_cfg = app_config.IMAGE_PROCESSING_CONFIG
+                        if source == "emoji":
+                            max_gif_size_mb = float(
+                                image_cfg.get("MAX_ANIMATED_EMOJI_SIZE_MB", 2)
+                            )
+                        else:
+                            max_gif_size_mb = float(image_cfg.get("MAX_GIF_SIZE_MB", 8))
+                        max_gif_size_bytes = int(max_gif_size_mb * 1024 * 1024)
+
+                        if len(image_bytes) > max_gif_size_bytes:
+                            content_blocks.append(
+                                {
+                                    "type": "text",
+                                    "text": "（收到一张 GIF，但体积超过限制，已跳过）",
+                                }
+                            )
+                            continue
+
                     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
                     content_blocks.append(
                         {
@@ -314,6 +350,88 @@ class OpenAIService:
             fallback_text = str(part).strip()
             if fallback_text:
                 content_blocks.append({"type": "text", "text": fallback_text})
+
+        return content_blocks
+
+    @staticmethod
+    def _extract_video_bytes_from_dict(video: Dict[str, Any]) -> Optional[bytes]:
+        direct_bytes = video.get("data") or video.get("bytes")
+        if isinstance(direct_bytes, (bytes, bytearray)):
+            return bytes(direct_bytes)
+
+        base64_candidates = [
+            video.get("video_base64"),
+            video.get("data_base64"),
+            video.get("data_preview"),
+        ]
+        for candidate in base64_candidates:
+            if not isinstance(candidate, str) or not candidate.strip():
+                continue
+            raw_value = candidate.strip()
+            try:
+                return base64.b64decode(raw_value)
+            except Exception:
+                try:
+                    return bytes.fromhex(raw_value)
+                except Exception:
+                    continue
+
+        return None
+
+    def _build_kimi_video_content_blocks(
+        self, videos: Optional[List[Dict[str, Any]]]
+    ) -> List[Dict[str, Any]]:
+        if not videos:
+            return []
+
+        config = app_config.VIDEO_PROCESSING_CONFIG
+        max_videos = int(config.get("MAX_VIDEOS_PER_MESSAGE", 1))
+        max_size_mb = float(config.get("MAX_VIDEO_SIZE_MB", 20))
+        max_size_bytes = int(max_size_mb * 1024 * 1024)
+        allowed_mime_types = {
+            str(m).lower() for m in config.get("ALLOWED_VIDEO_MIME_TYPES", set())
+        }
+
+        content_blocks: List[Dict[str, Any]] = []
+        for idx, video in enumerate(videos[:max_videos], start=1):
+            if not isinstance(video, dict):
+                continue
+
+            mime_type = str(video.get("mime_type", "video/mp4")).lower()
+            if allowed_mime_types and mime_type not in allowed_mime_types:
+                log.warning(
+                    "[Kimi] 视频 MIME 不在白名单内，已跳过第 %s 个视频: %s",
+                    idx,
+                    mime_type,
+                )
+                continue
+
+            video_bytes = self._extract_video_bytes_from_dict(video)
+            if not video_bytes:
+                log.warning("[Kimi] 第 %s 个视频解析失败，已跳过。", idx)
+                continue
+
+            if len(video_bytes) > max_size_bytes:
+                log.warning(
+                    "[Kimi] 第 %s 个视频大小超限，已跳过: %s bytes > %s bytes",
+                    idx,
+                    len(video_bytes),
+                    max_size_bytes,
+                )
+                continue
+
+            try:
+                video_b64 = base64.b64encode(video_bytes).decode("utf-8")
+            except Exception as e:
+                log.warning("[Kimi] 第 %s 个视频 Base64 编码失败，已跳过: %s", idx, e)
+                continue
+
+            content_blocks.append(
+                {
+                    "type": "video_url",
+                    "video_url": {"url": f"data:{mime_type};base64,{video_b64}"},
+                }
+            )
 
         return content_blocks
 
@@ -578,6 +696,7 @@ class OpenAIService:
         model_name: Optional[str],
         user_id_for_settings: Optional[str] = None,
         override_base_url: Optional[str] = None,
+        videos: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
         OpenAI 兼容专用通道（DeepSeek / Kimi）。
@@ -1086,6 +1205,35 @@ class OpenAIService:
                     is_first_user = False
                 else:
                     openai_messages.append({"role": "user", "content": content_blocks})
+
+        if is_deepseek_model and videos:
+            log.info("[DeepSeek] 收到视频输入，但当前仅 Kimi 分支支持视频解析，已忽略。")
+
+        if not is_deepseek_model and videos:
+            video_blocks = self._build_kimi_video_content_blocks(videos)
+            if video_blocks:
+                appended_to_existing_user = False
+                for msg in reversed(openai_messages):
+                    if msg.get("role") != "user":
+                        continue
+
+                    msg_content = msg.get("content")
+                    if isinstance(msg_content, list):
+                        msg_content.extend(video_blocks)
+                    elif isinstance(msg_content, str):
+                        msg["content"] = [{"type": "text", "text": msg_content}, *video_blocks]
+                    else:
+                        msg["content"] = list(video_blocks)
+
+                    appended_to_existing_user = True
+                    break
+
+                if not appended_to_existing_user:
+                    openai_messages.append({"role": "user", "content": list(video_blocks)})
+
+                log.info("[Kimi] 已注入 %s 个视频 block 到本轮请求。", len(video_blocks))
+            else:
+                log.info("[Kimi] 收到视频输入，但无可用视频 block（可能被限制策略过滤）。")
 
         def _truncate_data_uri_for_log(url: str) -> str:
             if not isinstance(url, str):
