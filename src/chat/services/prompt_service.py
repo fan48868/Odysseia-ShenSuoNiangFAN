@@ -49,7 +49,7 @@ class PromptService:
         
         random_sequence = "".join(parts)
         
-        return f"测试号，无实际意义:{random_sequence}\n"
+        return f"{random_sequence}(测试号，无实际意义)\n"
 
     def _get_model_specific_prompt(
         self, model_name: Optional[str], prompt_name: str
