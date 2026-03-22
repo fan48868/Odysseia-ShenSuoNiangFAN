@@ -166,10 +166,25 @@ configure_gemini_endpoint() {
     echo ""
     say_hello "（可选）自定义 Gemini API 端点"
     say_wait "用于AI对话功能"
-    say_warning "如果不配置，将无法使用AI对话功能"
-    
-    CUSTOM_GEMINI_URL=$(ask_question "自定义端点 URL" "" "true")
+    say_warning "如果先不配置也没关系，想晚点再给类脑娘加上也可以哦"
+
+    CUSTOM_GEMINI_URL=$(ask_question "自定义端点 URL" "" "false")
     CUSTOM_GEMINI_API_KEY=$(ask_question "自定义端点的 API 密钥（如需要）" "" "false")
+}
+
+# 配置 OpenAI 格式端点
+configure_openai_endpoints() {
+    echo ""
+    say_hello "（可选）再给类脑娘准备一点额外的 AI 端点吧～"
+    say_wait "这些都是额外选项呀，想配就配，不想配直接回车跳过就好"
+
+    DEEPSEEK_URL=$(ask_question "DeepSeek 端点 URL" "https://api.deepseek.com/" "false")
+    DEEPSEEK_API_KEY=$(ask_question "DeepSeek API 密钥（可留空）" "" "false")
+
+    say_hello "Moonshot 也可以先留空哦～"
+    MOONSHOT_URL=$(ask_question "Moonshot 端点 URL" "https://api.moonshot.cn/v1" "false")
+    say_wait "如果你有多个 Moonshot key，用英文逗号隔开就好啦～"
+    MOONSHOT_API_KEY=$(ask_question "Moonshot API 密钥（可留空）" "" "false")
 }
 
 # 配置数据库
@@ -266,6 +281,12 @@ ADMIN_ROLE_IDS="$ADMIN_ROLE_IDS"
 CUSTOM_GEMINI_URL="$CUSTOM_GEMINI_URL"
 CUSTOM_GEMINI_API_KEY="$CUSTOM_GEMINI_API_KEY"
 
+# OpenAI 格式端点（可选）
+DEEPSEEK_URL="$DEEPSEEK_URL"
+DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY"
+MOONSHOT_URL="$MOONSHOT_URL"
+MOONSHOT_API_KEY="$MOONSHOT_API_KEY"
+
 # RAG检索用的API密钥
 GOOGLE_API_KEYS_LIST="$GOOGLE_API_KEYS"
 
@@ -322,7 +343,7 @@ ask_start_service() {
 wait_for_db() {
     local max_attempts=30
     local attempt=1
-    local db_host="db"
+    local db_host="127.0.0.1"
     local db_port="5432"
 
     say_wait "等待数据库启动..."
@@ -343,6 +364,88 @@ wait_for_db() {
     echo ""
     say_oops "数据库启动超时，请检查 Docker 容器状态"
     docker compose ps db
+    exit 1
+}
+
+# 等待数据库迁移完成
+wait_for_migration() {
+    local max_attempts=60
+    local attempt=1
+    local migrate_container_id=""
+    local status=""
+    local exit_code=""
+
+    say_wait "等待类脑娘把数据库的小房间整理好..."
+    echo ""
+
+    while [ $attempt -le $max_attempts ]; do
+        migrate_container_id=$(docker compose ps -aq db_migrate 2>/dev/null | tr -d '\r')
+
+        if [ -n "$migrate_container_id" ]; then
+            status=$(docker inspect -f '{{.State.Status}}' "$migrate_container_id" 2>/dev/null | tr -d '\r')
+            exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$migrate_container_id" 2>/dev/null | tr -d '\r')
+
+            if [ "$status" = "exited" ]; then
+                if [ "$exit_code" = "0" ]; then
+                    say_success "数据库已经整理好啦～"
+                    echo ""
+                    return 0
+                fi
+
+                say_oops "数据库整理失败了..."
+                docker compose logs db_migrate
+                exit 1
+            fi
+        fi
+
+        printf "\r  整理中... ($attempt/$max_attempts)" >&2
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+
+    echo ""
+    say_oops "等待数据库整理超时了..."
+    docker compose ps
+    exit 1
+}
+
+# 等待 bot 正式上线
+wait_for_bot_app() {
+    local max_attempts=60
+    local attempt=1
+    local bot_container_id=""
+    local status=""
+
+    say_wait "再等类脑娘梳梳毛，马上就上线啦..."
+    echo ""
+
+    while [ $attempt -le $max_attempts ]; do
+        bot_container_id=$(docker compose ps -q bot_app 2>/dev/null | tr -d '\r')
+
+        if [ -n "$bot_container_id" ]; then
+            status=$(docker inspect -f '{{.State.Status}}' "$bot_container_id" 2>/dev/null | tr -d '\r')
+
+            if [ "$status" = "running" ]; then
+                say_success "类脑娘已经乖乖地上线啦～"
+                echo ""
+                return 0
+            fi
+
+            if [ "$status" = "exited" ] || [ "$status" = "dead" ]; then
+                say_oops "类脑娘好像没有顺利起床呢..."
+                docker compose logs bot_app
+                exit 1
+            fi
+        fi
+
+        printf "\r  启动中... ($attempt/$max_attempts)" >&2
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+
+    echo ""
+    say_oops "等待类脑娘上线超时了..."
+    docker compose ps
     exit 1
 }
 
@@ -384,14 +487,9 @@ start_service() {
     # 等待数据库就绪
     wait_for_db
 
-    # 初始化数据库
-    say_wait "帮类脑娘整理一下房间（初始化数据库）..."
-    if docker compose exec -T bot_app alembic upgrade head; then
-        say_success "房间整理完毕～"
-    else
-        say_oops "整理房间出问题了..."
-        exit 1
-    fi
+    # 等待数据库迁移和 bot 启动
+    wait_for_migration
+    wait_for_bot_app
 
     # 显示状态
     echo ""
@@ -426,6 +524,7 @@ main() {
     # 配置各项
     configure_required
     configure_gemini_endpoint
+    configure_openai_endpoints
     configure_database
     configure_discord
     configure_features
@@ -442,9 +541,7 @@ main() {
         echo ""
         say_hello "想找类脑娘的时候，运行这些命令就好："
         echo ""
-        echo -e "${CYAN}  docker compose build${NC}"
-        echo -e "${CYAN}  docker compose up -d${NC}"
-        echo -e "${CYAN}  docker compose exec bot_app alembic upgrade head${NC}"
+        echo -e "${CYAN}  docker compose up -d --build${NC}"
         echo ""
     fi
 }

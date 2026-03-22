@@ -6,6 +6,8 @@ services:
       - .env
     environment:
       - RUNNING_IN_DOCKER=true
+      - DB_HOST=db
+      - DB_PORT=5432
 
     # --- 部署方式二选一 ---
     # 方式一 (推荐): 从本地源代码构建
@@ -29,7 +31,30 @@ services:
     networks:
       - bot_network
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      db_migrate:
+        condition: service_completed_successfully
+
+  db_migrate:
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      - RUNNING_IN_DOCKER=true
+      - DB_HOST=db
+      - DB_PORT=5432
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - .:/app
+    command: alembic upgrade head
+    networks:
+      - bot_network
+    depends_on:
+      db:
+        condition: service_healthy
 
   #  config_web:
   #    build:
@@ -67,6 +92,12 @@ services:
     volumes:
       # 数据持久化到本地 ./pgdata 目录，并使用 PG16 的标准数据路径
       - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
     networks:
       - bot_network
 
