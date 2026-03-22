@@ -1,0 +1,872 @@
+# -*- coding: utf-8 -*-
+
+import asyncio
+import base64
+import copy
+import io
+import json
+import logging
+import os
+import re
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
+from PIL import Image
+
+from src.chat.services.moonshot_vision_service import moonshot_vision_service
+
+log = logging.getLogger(__name__)
+
+
+class CustomModelClient:
+    """Custom OpenAI 兼容通道客户端：负责配置管理、请求发送与 Custom 专属解析。"""
+
+    def __init__(self) -> None:
+        self._api_keys: List[str] = []
+        self._active_api_key_index = 0
+        self._key_rotation_lock = asyncio.Lock()
+        self.raw_api_key: Optional[str] = None
+        runtime_config = self.refresh_from_env()
+
+        if (
+            runtime_config["base_url"]
+            and runtime_config["api_key"]
+            and runtime_config["model_name"]
+        ):
+            log.info(
+                "✅ [CustomModelClient] 已加载 Custom OpenAI 配置。URL: %s, Model: %s, Vision: %s, Video Input: %s",
+                runtime_config["base_url"],
+                runtime_config["model_name"],
+                runtime_config["enable_vision"],
+                runtime_config["enable_video_input"],
+            )
+
+    @staticmethod
+    def _normalize_bool_flag(raw_value: Optional[str]) -> bool:
+        return str(raw_value or "").strip().lower() in {"true", "1", "yes"}
+
+    @staticmethod
+    def _normalize_positive_float(
+        raw_value: Optional[str], *, default: float
+    ) -> float:
+        try:
+            parsed = float(str(raw_value or "").strip())
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            pass
+        return default
+
+    @staticmethod
+    def _split_api_keys(raw_api_keys: Optional[str]) -> List[str]:
+        raw = str(raw_api_keys or "").strip()
+        if not raw:
+            return []
+
+        parts = re.split(r"[,\n\r\uFF0C]+", raw)
+        normalized: List[str] = []
+        seen = set()
+
+        for part in parts:
+            key = part.strip().strip('"').strip("'").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            normalized.append(key)
+
+        return normalized
+
+    @staticmethod
+    def _mask_key_tail(api_key: Optional[str]) -> str:
+        if not api_key:
+            return "N/A"
+        return api_key[-4:]
+
+    @staticmethod
+    def _is_payment_required_error(
+        status_code: int, combined_error_text: str
+    ) -> bool:
+        lowered_error_text = str(combined_error_text or "").lower()
+        return status_code == 402 or "402 payment required" in lowered_error_text
+
+    def _sync_api_key_state(self, raw_api_key: Optional[str]) -> List[str]:
+        keys = self._split_api_keys(raw_api_key)
+        current_key: Optional[str] = None
+
+        if self._api_keys and 0 <= self._active_api_key_index < len(self._api_keys):
+            current_key = self._api_keys[self._active_api_key_index]
+
+        self._api_keys = keys
+
+        if not keys:
+            self._active_api_key_index = 0
+            self.api_key = None
+            return keys
+
+        if current_key in keys:
+            self._active_api_key_index = keys.index(current_key)
+        else:
+            self._active_api_key_index = 0
+
+        self.api_key = keys[self._active_api_key_index]
+        return keys
+
+    def _get_active_api_key_snapshot(
+        self, runtime_config: Dict[str, Any]
+    ) -> Tuple[str, int, int]:
+        keys = self._sync_api_key_state(runtime_config.get("api_key"))
+        if not keys:
+            return "", 0, 0
+
+        active_index = min(max(self._active_api_key_index, 0), len(keys) - 1)
+        active_key = keys[active_index]
+        self._active_api_key_index = active_index
+        self.api_key = active_key
+        return active_key, active_index, len(keys)
+
+    async def _rotate_to_next_api_key(
+        self,
+        *,
+        failed_api_key: str,
+        failed_index: int,
+        total_keys: int,
+        reason_preview: str,
+    ) -> bool:
+        if total_keys <= 1:
+            return False
+
+        async with self._key_rotation_lock:
+            if len(self._api_keys) <= 1:
+                return False
+
+            active_index = min(
+                max(self._active_api_key_index, 0), len(self._api_keys) - 1
+            )
+            active_key = self._api_keys[active_index]
+
+            if active_key == failed_api_key and active_index == failed_index:
+                next_index = (active_index + 1) % len(self._api_keys)
+                self._active_api_key_index = next_index
+                next_key = self._api_keys[next_index]
+                self.api_key = next_key
+                log.warning(
+                    "[Custom] Key ...%s hit 402 Payment Required, switching to key ...%s (%s/%s) | reason=%s",
+                    self._mask_key_tail(failed_api_key),
+                    self._mask_key_tail(next_key),
+                    next_index + 1,
+                    len(self._api_keys),
+                    reason_preview,
+                )
+                return True
+
+            self.api_key = active_key
+            log.info(
+                "[Custom] Key ...%s hit 402 Payment Required, but active key is already ...%s; will retry with the current active key.",
+                self._mask_key_tail(failed_api_key),
+                self._mask_key_tail(active_key),
+            )
+            return True
+
+    @classmethod
+    def get_runtime_config(cls) -> Dict[str, Any]:
+        base_url = str(os.environ.get("CUSTOM_MODEL_URL", "") or "").strip()
+        api_key = (
+            str(os.environ.get("CUSTOM_MODEL_API_KEY", "") or "").strip()
+            or str(os.environ.get("CUSTON_MODEL_API_KEY", "") or "").strip()
+        )
+        model_name = str(os.environ.get("CUSTOM_MODEL_NAME", "") or "").strip()
+        enable_vision = cls._normalize_bool_flag(
+            os.environ.get("CUSTOM_MODEL_ENABLE_VISION")
+        )
+        enable_video_input = cls._normalize_bool_flag(
+            os.environ.get("CUSTOM_MODEL_ENABLE_VIDEO_INPUT")
+        )
+        stream_idle_timeout_ms_raw = os.environ.get("CUSTOM_MODEL_STREAM_IDLE_TIMEOUT_MS")
+        if stream_idle_timeout_ms_raw is not None:
+            stream_idle_timeout_seconds = (
+                cls._normalize_positive_float(
+                    stream_idle_timeout_ms_raw,
+                    default=5000.0,
+                )
+                / 1000.0
+            )
+        else:
+            stream_idle_timeout_seconds = cls._normalize_positive_float(
+                os.environ.get("CUSTOM_MODEL_STREAM_IDLE_TIMEOUT_SECONDS"),
+                default=5.0,
+            )
+        return {
+            "base_url": base_url,
+            "api_key": api_key,
+            "model_name": model_name,
+            "enable_vision": enable_vision,
+            "enable_video_input": enable_video_input,
+            "stream_idle_timeout_seconds": stream_idle_timeout_seconds,
+        }
+
+    def refresh_from_env(self) -> Dict[str, Any]:
+        runtime_config = self.get_runtime_config()
+        self.raw_api_key = runtime_config["api_key"] or None
+        self._sync_api_key_state(self.raw_api_key)
+        self.base_url = runtime_config["base_url"] or None
+        self.model_name = runtime_config["model_name"] or None
+        self.enable_vision = bool(runtime_config["enable_vision"])
+        self.enable_video_input = bool(runtime_config["enable_video_input"])
+        self.stream_idle_timeout_seconds = float(
+            runtime_config["stream_idle_timeout_seconds"]
+        )
+        return runtime_config
+
+    @staticmethod
+    def _build_chat_completions_url(base_url: str) -> str:
+        normalized = (base_url or "").rstrip("/")
+        if not normalized.endswith("/chat/completions"):
+            normalized += "/chat/completions"
+        return normalized
+
+    @staticmethod
+    def _has_meaningful_sse_output(payload: Dict[str, Any]) -> bool:
+        choices = payload.get("choices")
+        if not isinstance(choices, list):
+            return False
+
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+
+            for block_key in ("delta", "message"):
+                block = choice.get(block_key)
+                if not isinstance(block, dict):
+                    continue
+
+                if isinstance(block.get("content"), str) and block["content"]:
+                    return True
+                if (
+                    isinstance(block.get("reasoning_content"), str)
+                    and block["reasoning_content"]
+                ):
+                    return True
+                if isinstance(block.get("tool_calls"), list) and block["tool_calls"]:
+                    return True
+
+        return False
+
+    @classmethod
+    def _is_meaningful_sse_data_line(cls, line: str) -> bool:
+        stripped = str(line or "").strip()
+        if not stripped.startswith("data:"):
+            return False
+
+        payload_str = stripped[5:].strip()
+        if not payload_str or payload_str == "[DONE]":
+            return False
+
+        try:
+            payload = json.loads(payload_str)
+        except json.JSONDecodeError:
+            return False
+
+        return cls._has_meaningful_sse_output(payload)
+
+    @staticmethod
+    def _build_buffered_response(
+        response: httpx.Response, body_text: str
+    ) -> httpx.Response:
+        return httpx.Response(
+            status_code=response.status_code,
+            headers=response.headers,
+            content=body_text.encode(response.encoding or "utf-8"),
+            request=response.request,
+            history=list(response.history),
+            extensions=dict(response.extensions),
+        )
+
+    @staticmethod
+    def _build_moonshot_image_payload_from_pil(image: Image.Image) -> Dict[str, Any]:
+        """将 PIL 图片转换为 Moonshot 识别所需 payload。"""
+        mime_type = "image/webp"
+        buffered = io.BytesIO()
+        try:
+            image.save(buffered, format="WEBP")
+        except Exception:
+            mime_type = "image/png"
+            buffered = io.BytesIO()
+            image.save(buffered, format="PNG")
+
+        image_bytes = buffered.getvalue()
+        return {
+            "type": "image",
+            "mime_type": mime_type,
+            "data_size": len(image_bytes),
+            "data_preview": image_bytes.hex(),
+        }
+
+    async def build_turn_content(
+        self, parts: List[Any], *, enable_vision: Optional[bool] = None
+    ) -> str:
+        """
+        构建单条消息在 Custom 通道中的文本内容。
+
+        当 CUSTOM_MODEL_ENABLE_VISION=true 时：
+        - 对图片调用 Moonshot 进行识别
+        - 将所有【图片识别结果】统一追加到该条消息文本末尾（仿 deepseek）
+        """
+        if enable_vision is None:
+            runtime_config = self.refresh_from_env()
+            enable_vision = bool(runtime_config["enable_vision"])
+
+        content_chunks: List[str] = []
+        vision_chunks: List[str] = []
+
+        # 额外注入“当前用户输入”到识图请求中（放在图片前），帮助视觉模型理解提问意图：
+        # - 只传入输入本身，不包含“上下文提示/引用回复”等前缀
+        # - 若该轮只有图片（无文本输入），则不注入
+        user_input_text_for_vision: Optional[str] = None
+        try:
+            text_fragments: List[str] = []
+            for part in parts or []:
+                if hasattr(part, "thought") and getattr(part, "thought", False):
+                    continue
+
+                if isinstance(part, Image.Image) or (
+                    isinstance(part, dict) and part.get("type") == "image"
+                ):
+                    continue
+
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    text_fragments.append(part["text"])
+                else:
+                    text_fragments.append(str(part))
+
+            combined_text_for_vision = "".join(text_fragments).strip()
+            if combined_text_for_vision:
+                marker = "以下是当前输入内容:"
+                candidate = (
+                    combined_text_for_vision.split(marker, 1)[-1].strip()
+                    if marker in combined_text_for_vision
+                    else combined_text_for_vision
+                )
+
+                matches = list(re.finditer(r"\[[^\]]+\]:(?:\s*)", candidate))
+                if matches:
+                    candidate = candidate[matches[-1].end() :].strip()
+                    if candidate and "用户消息:(图片消息)" not in candidate:
+                        user_input_text_for_vision = candidate
+        except Exception:
+            user_input_text_for_vision = None
+
+        first_effective_part_seen = False
+        first_effective_part_is_image = False
+
+        for part in parts or []:
+            if hasattr(part, "thought") and getattr(part, "thought", False):
+                continue
+
+            if not first_effective_part_seen:
+                first_effective_part_seen = True
+                first_effective_part_is_image = isinstance(part, Image.Image) or (
+                    isinstance(part, dict) and part.get("type") == "image"
+                )
+
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                content_chunks.append(part["text"])
+                continue
+
+            # 未开启识图：直接跳过图片
+            if not enable_vision:
+                if isinstance(part, Image.Image) or (
+                    isinstance(part, dict) and part.get("type") == "image"
+                ):
+                    continue
+                content_chunks.append(str(part))
+                continue
+
+            if isinstance(part, Image.Image):
+                try:
+                    image_payload = self._build_moonshot_image_payload_from_pil(part)
+                    vision_text = await moonshot_vision_service.recognize_image(
+                        image_payload,
+                        user_input_text=user_input_text_for_vision,
+                    )
+                except Exception as e:
+                    log.error("[Custom] Moonshot 图片识别流程异常: %s", e, exc_info=True)
+                    vision_text = "（图片识别失败：处理流程异常）"
+
+                vision_chunks.append(str(vision_text))
+                continue
+
+            if isinstance(part, dict) and part.get("type") == "image":
+                try:
+                    vision_text = await moonshot_vision_service.recognize_image(
+                        part,
+                        user_input_text=user_input_text_for_vision,
+                    )
+                except Exception as e:
+                    log.error("[Custom] Moonshot 图片字典识别异常: %s", e, exc_info=True)
+                    vision_text = "（图片识别失败：处理流程异常）"
+
+                vision_chunks.append(str(vision_text))
+                continue
+
+            content_chunks.append(str(part))
+
+        base_text = "".join(content_chunks).strip()
+
+        vision_items: List[str] = []
+        for vision_text in vision_chunks:
+            cleaned = str(vision_text).strip()
+            if not cleaned:
+                continue
+            vision_items.append(f"【图片识别结果】{cleaned}")
+
+        if not vision_items:
+            return base_text
+
+        ocr_text = "   ".join(vision_items)
+
+        if not base_text:
+            return ocr_text
+
+        combined = f"{base_text}   {ocr_text}"
+        if first_effective_part_is_image:
+            combined = "\n" + combined
+        return combined
+
+    async def post_process_tool_response(
+        self, raw_response: Any, *, enable_vision: Optional[bool] = None
+    ) -> Any:
+        """
+        Custom 专属工具结果后处理（仿 DeepSeek）：
+
+        - 对 get_user_profile 返回的头像/横幅图片做识图摘要（仅 CUSTOM_MODEL_ENABLE_VISION=true 时）
+        - 移除原始 base64，避免将大字段回传给模型
+        """
+        if enable_vision is None:
+            runtime_config = self.refresh_from_env()
+            enable_vision = bool(runtime_config["enable_vision"])
+
+        clean_response = copy.deepcopy(raw_response)
+
+        if not isinstance(clean_response, dict):
+            return clean_response
+
+        result_data = clean_response.get("result", {})
+        if not isinstance(result_data, dict):
+            return clean_response
+
+        profile = result_data.get("profile", {})
+        if not isinstance(profile, dict):
+            return clean_response
+
+        image_fields = [
+            (
+                "avatar_image_base64",
+                "avatar_mime_type",
+                "avatar",
+                "请识别这张用户头像图片，简洁描述可见人物、风格、配色与关键元素。",
+                "头像",
+            ),
+            (
+                "banner_image_base64",
+                "banner_mime_type",
+                "banner",
+                "请识别这张用户横幅图片，简洁描述画面内容、风格、配色与关键信息。",
+                "横幅",
+            ),
+        ]
+
+        for (
+            image_key,
+            mime_key,
+            label,
+            vision_prompt,
+            label_cn,
+        ) in image_fields:
+            image_b64 = profile.get(image_key)
+            if not (isinstance(image_b64, str) and image_b64.strip()):
+                continue
+
+            # 未开启识图：仅做裁剪，避免把 base64 回灌给模型
+            if not enable_vision:
+                profile.pop(image_key, None)
+                profile.setdefault(f"{label}_note", f"（{label_cn}原始图片数据已省略）")
+                continue
+
+            try:
+                image_bytes = base64.b64decode(image_b64)
+                image_mime_type = profile.get(mime_key, "image/png")
+                if not isinstance(image_mime_type, str) or not image_mime_type:
+                    image_mime_type = "image/png"
+
+                image_payload = {
+                    "type": "image",
+                    "mime_type": image_mime_type,
+                    "data_size": len(image_bytes),
+                    "data_preview": image_bytes.hex(),
+                }
+                image_vision_text = await moonshot_vision_service.recognize_image(
+                    image_payload,
+                    prompt=vision_prompt,
+                )
+                profile[f"{label}_image_vision"] = image_vision_text
+            except Exception as e:
+                log.error(
+                    "[Custom] 处理 get_user_profile %s识图失败: %s",
+                    label_cn,
+                    e,
+                    exc_info=True,
+                )
+                profile[f"{label}_image_vision"] = f"（{label_cn}识图失败：处理异常）"
+            finally:
+                profile.pop(image_key, None)
+                profile.setdefault(
+                    f"{label}_note",
+                    f"（{label_cn}原始图片数据已省略，已提供识图摘要）",
+                )
+
+        return clean_response
+
+    def get_validation_error(
+        self, runtime_config: Optional[Dict[str, Any]] = None
+    ) -> Optional[str]:
+        if runtime_config is None:
+            runtime_config = self.refresh_from_env()
+
+        if (
+            runtime_config["base_url"]
+            and runtime_config["api_key"]
+            and runtime_config["model_name"]
+        ):
+            return None
+
+        log.warning(
+            "请求使用 custom 但未配置 CUSTOM_MODEL_URL / CUSTOM_MODEL_API_KEY / CUSTOM_MODEL_NAME。"
+        )
+        return "custom 配置缺失，请检查 CUSTOM_MODEL_URL、CUSTOM_MODEL_API_KEY、CUSTOM_MODEL_NAME。"
+
+    def get_request_model_name(
+        self,
+        fallback_model_name: str,
+        runtime_config: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if runtime_config is None:
+            runtime_config = self.refresh_from_env()
+        return str(runtime_config["model_name"] or fallback_model_name)
+
+    @staticmethod
+    def is_sse_chat_completion_response(response: httpx.Response) -> bool:
+        content_type = (response.headers.get("content-type") or "").lower()
+        response_text = (response.text or "").lstrip()
+        return "text/event-stream" in content_type or response_text.startswith("data:")
+
+    @staticmethod
+    def parse_streaming_chat_completion_body(body: str) -> Optional[Dict[str, Any]]:
+        if not body or "data:" not in body:
+            return None
+
+        response_id: Optional[str] = None
+        model_name: Optional[str] = None
+        created_ts: Optional[int] = None
+        usage_payload: Optional[Dict[str, Any]] = None
+        latest_finish_reason: Optional[str] = None
+
+        content_chunks: List[str] = []
+        reasoning_chunks: List[str] = []
+        tool_call_map: Dict[int, Dict[str, Any]] = {}
+
+        def _upsert_tool_call(
+            tool_call_payload: Dict[str, Any], fallback_index: int, from_delta: bool
+        ) -> None:
+            index = tool_call_payload.get("index", fallback_index)
+            if not isinstance(index, int):
+                index = fallback_index
+
+            existing = tool_call_map.setdefault(
+                index,
+                {
+                    "id": "",
+                    "type": "function",
+                    "function": {"name": "", "arguments": ""},
+                },
+            )
+
+            tool_call_id = tool_call_payload.get("id")
+            if isinstance(tool_call_id, str) and tool_call_id:
+                existing["id"] = tool_call_id
+
+            tool_call_type = tool_call_payload.get("type")
+            if isinstance(tool_call_type, str) and tool_call_type:
+                existing["type"] = tool_call_type
+
+            function_payload = tool_call_payload.get("function")
+            if not isinstance(function_payload, dict):
+                return
+
+            name_value = function_payload.get("name")
+            if isinstance(name_value, str) and name_value:
+                if from_delta:
+                    existing["function"]["name"] += name_value
+                else:
+                    existing["function"]["name"] = name_value
+
+            arguments_value = function_payload.get("arguments")
+            if isinstance(arguments_value, str):
+                if from_delta:
+                    existing["function"]["arguments"] += arguments_value
+                else:
+                    existing["function"]["arguments"] = arguments_value
+            elif isinstance(arguments_value, (dict, list)):
+                existing["function"]["arguments"] = json.dumps(
+                    arguments_value, ensure_ascii=False
+                )
+
+        for raw_line in body.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue
+
+            payload_str = line[5:].strip()
+            if not payload_str or payload_str == "[DONE]":
+                continue
+
+            try:
+                payload = json.loads(payload_str)
+            except json.JSONDecodeError:
+                continue
+
+            if response_id is None and isinstance(payload.get("id"), str):
+                response_id = payload["id"]
+            if model_name is None and isinstance(payload.get("model"), str):
+                model_name = payload["model"]
+            if created_ts is None and isinstance(payload.get("created"), int):
+                created_ts = payload["created"]
+
+            if isinstance(payload.get("usage"), dict):
+                usage_payload = payload["usage"]
+
+            choices = payload.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+
+            first_choice = choices[0]
+            if not isinstance(first_choice, dict):
+                continue
+
+            finish_reason = first_choice.get("finish_reason")
+            if isinstance(finish_reason, str) and finish_reason:
+                latest_finish_reason = finish_reason
+
+            delta = first_choice.get("delta")
+            if isinstance(delta, dict):
+                delta_content = delta.get("content")
+                if isinstance(delta_content, str):
+                    content_chunks.append(delta_content)
+
+                delta_reasoning = delta.get("reasoning_content")
+                if isinstance(delta_reasoning, str):
+                    reasoning_chunks.append(delta_reasoning)
+
+                delta_tool_calls = delta.get("tool_calls")
+                if isinstance(delta_tool_calls, list):
+                    for idx, tool_call_delta in enumerate(delta_tool_calls):
+                        if isinstance(tool_call_delta, dict):
+                            _upsert_tool_call(
+                                tool_call_delta, fallback_index=idx, from_delta=True
+                            )
+
+            message_block = first_choice.get("message")
+            if isinstance(message_block, dict):
+                message_content = message_block.get("content")
+                if isinstance(message_content, str) and message_content and not content_chunks:
+                    content_chunks.append(message_content)
+
+                message_reasoning = message_block.get("reasoning_content")
+                if (
+                    isinstance(message_reasoning, str)
+                    and message_reasoning
+                    and not reasoning_chunks
+                ):
+                    reasoning_chunks.append(message_reasoning)
+
+                message_tool_calls = message_block.get("tool_calls")
+                if isinstance(message_tool_calls, list):
+                    for idx, tool_call_message in enumerate(message_tool_calls):
+                        if isinstance(tool_call_message, dict):
+                            _upsert_tool_call(
+                                tool_call_message, fallback_index=idx, from_delta=False
+                            )
+
+        final_content = "".join(content_chunks).strip()
+        final_reasoning = "".join(reasoning_chunks).strip()
+        final_tool_calls = [
+            tool_call_map[idx]
+            for idx in sorted(tool_call_map.keys())
+            if tool_call_map[idx].get("function", {}).get("name")
+        ]
+
+        if not final_content and not final_reasoning and not final_tool_calls:
+            return None
+
+        message: Dict[str, Any] = {"role": "assistant", "content": final_content}
+        if final_reasoning:
+            message["reasoning_content"] = final_reasoning
+        if final_tool_calls:
+            message["tool_calls"] = final_tool_calls
+
+        final_finish_reason = latest_finish_reason or (
+            "tool_calls" if final_tool_calls else "stop"
+        )
+
+        result: Dict[str, Any] = {
+            "id": response_id or "custom-sse-reconstructed",
+            "object": "chat.completion",
+            "created": created_ts or int(datetime.now().timestamp()),
+            "model": model_name or "",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": final_finish_reason,
+                }
+            ],
+        }
+        if usage_payload:
+            result["usage"] = usage_payload
+
+        return result
+
+    async def send(
+        self,
+        http_client: httpx.AsyncClient,
+        payload: Dict[str, Any],
+        override_base_url: Optional[str] = None,
+        runtime_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if runtime_config is None:
+            runtime_config = self.refresh_from_env()
+
+        api_url = (override_base_url or runtime_config["base_url"] or "").rstrip("/")
+        api_key, _, total_api_keys = self._get_active_api_key_snapshot(runtime_config)
+
+        if not api_url:
+            raise ValueError("OpenAI 兼容通道 URL 配置缺失，请检查配置。")
+        if not api_key:
+            raise ValueError("OpenAI 兼容通道 API Key 配置缺失，请检查配置。")
+
+        api_url = self._build_chat_completions_url(api_url)
+        request_payload = dict(payload)
+        request_payload["stream"] = True
+        idle_timeout_seconds = float(
+            runtime_config.get("stream_idle_timeout_seconds", 5.0) or 5.0
+        )
+        headers = {
+            "Content-Type": "application/json",
+        }
+
+        used_streaming = False
+        response: Optional[httpx.Response] = None
+        max_key_attempts = max(total_api_keys, 1)
+
+        for attempt in range(max_key_attempts):
+            api_key, api_key_index, total_api_keys = self._get_active_api_key_snapshot(
+                runtime_config
+            )
+            headers["Authorization"] = f"Bearer {api_key}"
+
+            async with http_client.stream(
+                "POST",
+                api_url,
+                headers=headers,
+                json=request_payload,
+            ) as current_response:
+                if current_response.is_error:
+                    await current_response.aread()
+                    response_text = current_response.text or ""
+                    combined_error_text = (
+                        f"{current_response.status_code} {current_response.reason_phrase}"
+                    )
+                    if response_text:
+                        combined_error_text = (
+                            f"{combined_error_text} | {response_text}"
+                        )
+
+                    if self._is_payment_required_error(
+                        current_response.status_code, combined_error_text
+                    ):
+                        rotated = await self._rotate_to_next_api_key(
+                            failed_api_key=api_key,
+                            failed_index=api_key_index,
+                            total_keys=total_api_keys,
+                            reason_preview=combined_error_text[:1000],
+                        )
+                        if (
+                            rotated
+                            and total_api_keys > 1
+                            and attempt < max_key_attempts - 1
+                        ):
+                            continue
+
+                    current_response.raise_for_status()
+
+                body_lines: List[str] = []
+                line_iterator = current_response.aiter_lines()
+                saw_non_sse_payload = False
+                used_streaming = False
+
+                while True:
+                    try:
+                        line = await asyncio.wait_for(
+                            line_iterator.__anext__(),
+                            timeout=idle_timeout_seconds,
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError as exc:
+                        raise httpx.ReadTimeout(
+                            (
+                                "[Custom] Stream idle timeout: no meaningful output "
+                                f"received within {idle_timeout_seconds:.1f}s"
+                            ),
+                            request=current_response.request,
+                        ) from exc
+
+                    body_lines.append(line)
+                    stripped = line.strip()
+
+                    if not stripped or stripped.startswith(":"):
+                        continue
+
+                    if not stripped.startswith("data:"):
+                        saw_non_sse_payload = True
+                        break
+
+                    used_streaming = True
+
+                if saw_non_sse_payload and not used_streaming:
+                    log.info(
+                        "[Custom] Upstream returned non-SSE payload after stream request | model=%s | url=%s",
+                        str(request_payload.get("model", "")),
+                        api_url,
+                    )
+
+                response = self._build_buffered_response(
+                    current_response,
+                    "\n".join(body_lines),
+                )
+                break
+
+        if response is None:
+            raise RuntimeError("[Custom] Request completed without a valid response.")
+
+        return {
+            "response": response,
+            "used_api_url": api_url,
+            "used_slot_label": "custom",
+            "used_slot_id": None,
+            "used_key_tail": self._mask_key_tail(api_key),
+            "used_model_name": str(request_payload.get("model", "")),
+            "stream_enabled": used_streaming,
+            "stream_idle_timeout_seconds": idle_timeout_seconds,
+            "skip_custom_site_for_this_turn": False,
+        }

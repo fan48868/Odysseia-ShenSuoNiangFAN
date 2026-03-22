@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
+import asyncio
 import logging
 import re
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Optional
 
 from sqlalchemy import text
 from src.database.database import AsyncSessionLocal
@@ -20,10 +21,14 @@ class KnowledgeSearchService:
         log.info("KnowledgeSearchService 已初始化")
         # 在未来可以从配置中加载参数
         self.config = {
-            "TOP_K_VECTOR": 10,
-            "TOP_K_FTS": 10,
+            "TOP_K_VECTOR": 30,  # 增加召回量，防止指令词(如"开始xx模式")导致核心词排名下降
+            "TOP_K_FTS": 30,     # 增加召回量，提高关键字匹配的容错率
             "RRF_K": 60,
-            "HYBRID_SEARCH_FINAL_K": 5,
+            "HYBRID_SEARCH_FINAL_K": 5, # 返回更多结果给上层，避免过早截断
+            "VECTOR_DISTANCE_THRESHOLD": 0.5, # 向量搜索距离阈值，过滤不相关结果
+            "KEYWORD_WEIGHT": 3.0, # 关键字搜索权重，提高精确匹配的重要性
+            "EMBEDDING_TIMEOUT_SECONDS": 7.0, # embedding 生成超时保护
+            "HYBRID_SEARCH_TIMEOUT_SECONDS": 9.0, # 数据库混合检索超时保护
         }
 
     def _clean_fts_query(self, query: str) -> str:
@@ -46,34 +51,46 @@ class KnowledgeSearchService:
         # SQL 查询同时搜索两个 chunks 表
         sql_query = text(
             """
-            WITH semantic_search AS (
+            WITH vector_candidates AS (
                 -- 社区成员向量搜索
                 (SELECT
                     'community' as source_table,
-                    profile_id as document_id,
+                    id as chunk_id,
+                    profile_id as parent_id,
                     chunk_text,
-                    RANK() OVER (ORDER BY embedding <=> :query_vector) as rank
+                    (embedding <=> :query_vector) as distance
                 FROM community.member_chunks
-                ORDER BY embedding <=> :query_vector
+                WHERE (embedding <=> :query_vector) < :max_distance
+                ORDER BY distance ASC
                 LIMIT :top_k_vector)
                 UNION ALL
                 -- 通用知识向量搜索
                 (SELECT
                     'general_knowledge' as source_table,
-                    document_id,
+                    id as chunk_id,
+                    document_id as parent_id,
                     chunk_text,
-                    RANK() OVER (ORDER BY embedding <=> :query_vector) as rank
+                    (embedding <=> :query_vector) as distance
                 FROM general_knowledge.knowledge_chunks
-                ORDER BY embedding <=> :query_vector
+                WHERE (embedding <=> :query_vector) < :max_distance
+                ORDER BY distance ASC
                 LIMIT :top_k_vector)
             ),
-            keyword_search AS (
+            semantic_search AS (
+                -- 对合并后的结果进行全局排名
+                SELECT 
+                    *,
+                    ROW_NUMBER() OVER (ORDER BY distance ASC) as rank
+                FROM vector_candidates
+            ),
+            keyword_candidates AS (
                 -- 社区成员 BM25 搜索 (使用 paradedb.score)
                 (SELECT
                     'community' as source_table,
-                    id as document_id, -- 统一ID字段名
+                    id as chunk_id,
+                    profile_id as parent_id,
                     chunk_text,
-                    RANK() OVER (ORDER BY paradedb.score(id) DESC) as rank
+                    paradedb.score(id) as bm25_score
                 FROM community.member_chunks
                 WHERE chunk_text @@@ :query_text
                 LIMIT :top_k_fts)
@@ -81,22 +98,31 @@ class KnowledgeSearchService:
                 -- 通用知识 BM25 搜索 (使用 paradedb.score)
                 (SELECT
                     'general_knowledge' as source_table,
-                    id as document_id, -- 统一ID字段名
+                    id as chunk_id,
+                    document_id as parent_id,
                     chunk_text,
-                    RANK() OVER (ORDER BY paradedb.score(id) DESC) as rank
+                    paradedb.score(id) as bm25_score
                 FROM general_knowledge.knowledge_chunks
                 WHERE chunk_text @@@ :query_text
                 LIMIT :top_k_fts)
             ),
+            keyword_search AS (
+                -- 对合并后的结果进行全局排名
+                SELECT 
+                    *,
+                    ROW_NUMBER() OVER (ORDER BY bm25_score DESC) as rank
+                FROM keyword_candidates
+            ),
             -- 使用 RRF (Reciprocal Rank Fusion) 融合排名
             fused_ranks AS (
                 SELECT
-                    COALESCE(s.document_id, k.document_id) as document_id,
+                    COALESCE(s.chunk_id, k.chunk_id) as chunk_id,
+                    COALESCE(s.parent_id, k.parent_id) as document_id,
                     COALESCE(s.source_table, k.source_table) as source_table,
                     COALESCE(s.chunk_text, k.chunk_text) as chunk_text,
-                    (COALESCE(1.0 / (:rrf_k + s.rank), 0.0) + COALESCE(1.0 / (:rrf_k + k.rank), 0.0)) as rrf_score
+                    (COALESCE(1.0 / (:rrf_k + s.rank), 0.0) + COALESCE(:keyword_weight / (:rrf_k + k.rank), 0.0)) as rrf_score
                 FROM semantic_search s
-                FULL OUTER JOIN keyword_search k ON s.document_id = k.document_id AND s.chunk_text = k.chunk_text
+                FULL OUTER JOIN keyword_search k ON s.chunk_id = k.chunk_id AND s.source_table = k.source_table
             )
             SELECT *
             FROM fused_ranks
@@ -113,53 +139,118 @@ class KnowledgeSearchService:
                 "top_k_fts": self.config["TOP_K_FTS"],
                 "rrf_k": self.config["RRF_K"],
                 "final_k": self.config["HYBRID_SEARCH_FINAL_K"],
+                "max_distance": self.config["VECTOR_DISTANCE_THRESHOLD"],
+                "keyword_weight": self.config["KEYWORD_WEIGHT"],
             },
         )
         # SQLAlchemy 2.x 的 Row 对象需要通过 ._mapping 转换为字典
         return [dict(row._mapping) for row in result.fetchall()]
 
-    async def search(self, query: str) -> List[Dict[str, Any]]:
+    async def search(
+        self,
+        query: str,
+        user_id: Optional[int] = None,
+        query_embedding: Optional[List[float]] = None,
+    ) -> List[Dict[str, Any]]:
         """
         执行完整的 RAG 混合搜索流程。
-        1. 生成查询嵌入。
+        1. 生成查询嵌入（支持外部传入 query_embedding，传入则不再调用 embedding API）。
         2. 在 chunks 表中进行混合搜索。
         3. (暂定)直接返回 chunks 内容，因为我们的场景下，chunk 可能就是全部。
         """
-        log.info(f"收到知识库混合搜索请求: '{query}'")
+        # log.info(f"收到知识库混合搜索请求: '{query}'")
 
-        try:
-            query_embedding = await gemini_service.generate_embedding(
-                text=query, task_type="retrieval_query"
-            )
-            if not query_embedding:
-                raise ValueError("Embedding 生成失败，返回为空。")
-        except Exception as e:
-            log.error(f"为查询 '{query}' 生成 embedding 时出错: {e}", exc_info=True)
-            return []
+        # 1) 生成/复用查询向量
+        if query_embedding is None:
+            try:
+                query_embedding = await asyncio.wait_for(
+                    gemini_service.generate_embedding(text=query, task_type="retrieval_query"),
+                    timeout=self.config["EMBEDDING_TIMEOUT_SECONDS"],
+                )
+                if not query_embedding or not isinstance(query_embedding, list):
+                    raise ValueError(
+                        f"Embedding 生成失败，返回为空或类型错误: {type(query_embedding)}"
+                    )
+            except asyncio.TimeoutError:
+                log.warning(
+                    f"为查询生成 embedding 超时（>{self.config['EMBEDDING_TIMEOUT_SECONDS']:.1f}s），触发熔断并返回空结果。"
+                )
+                return []
+            except Exception as e:
+                log.error(f"为查询生成 embedding 时出错: {e}", exc_info=True)
+                return []
+        else:
+            if not isinstance(query_embedding, list) or not query_embedding:
+                return []
 
         search_results = []
         try:
             # 清理用于全文搜索的查询文本
             cleaned_fts_query = self._clean_fts_query(query)
 
+            user_card_chunk = None
             async with AsyncSessionLocal() as session:
-                search_results = await self._hybrid_search_chunks(
-                    session, cleaned_fts_query, query_embedding
-                )
-                log.info(f"混合搜索 RRF 结果: {search_results}")
+                # 如果提供了 user_id，尝试获取该用户的名片并强制置顶
+                if user_id:
+                    try:
+                        user_card_query = text("""
+                            SELECT 
+                                c.id as chunk_id,
+                                c.profile_id as parent_id,
+                                c.chunk_text,
+                                'community' as source_table
+                            FROM community.member_chunks c
+                            JOIN community.member_profiles p ON c.profile_id = p.id
+                            WHERE p.discord_id = :user_id OR p.source_metadata->>'uploaded_by' = :user_id
+                            LIMIT 1
+                        """)
+                        result = await session.execute(user_card_query, {"user_id": str(user_id)})
+                        row = result.fetchone()
+                        if row:
+                            user_card_chunk = dict(row._mapping)
+                            log.info(f"成功获取并置顶用户 {user_id} 的名片")
+                    except Exception as e:
+                        log.error(f"获取用户 {user_id} 名片失败: {e}")
 
+                search_results = await asyncio.wait_for(
+                    self._hybrid_search_chunks(
+                        session, cleaned_fts_query, query_embedding
+                    ),
+                    timeout=self.config["HYBRID_SEARCH_TIMEOUT_SECONDS"],
+                )
+                # log.info(f"混合搜索 RRF 结果: {search_results}")
+
+        except asyncio.TimeoutError:
+            log.warning(
+                f"数据库混合搜索超时（>{self.config['HYBRID_SEARCH_TIMEOUT_SECONDS']:.1f}s），触发熔断并返回空结果。"
+            )
+            return []
         except Exception as e:
             log.error(f"在数据库中执行混合搜索时出错: {e}", exc_info=True)
             return []
 
-        if not search_results:
-            log.info(f"知识库混合搜索未找到 '{query}' 的相关文档。")
+        if not search_results and not user_card_chunk:
+            log.info(f"知识库混合搜索未找到的相关文档。")
             return []
 
         # 转换为 world_book_service 期望的格式
         # 'content' 字段直接使用 chunk_text
         formatted_results = []
+
+        # 1. 首先添加用户自己的名片（如果存在）
+        if user_card_chunk:
+            formatted_results.append({
+                "id": user_card_chunk.get("parent_id"),
+                "content": user_card_chunk.get("chunk_text"),
+                "distance": 0.0,  # 强制置顶，相关性设为最高
+                "metadata": {"source_table": "community", "is_user_card": True},
+            })
+
         for res in search_results:
+            # 去重：如果搜索结果中包含用户自己的名片，则跳过
+            if user_card_chunk and str(res.get("document_id")) == str(user_card_chunk.get("parent_id")):
+                continue
+
             rrf_score = float(res["rrf_score"])  # 确保为浮点数
             formatted_results.append(
                 {

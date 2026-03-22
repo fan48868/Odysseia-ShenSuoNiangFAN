@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 
+import asyncio
 import discord
 import logging
-from typing import Dict, Any, Optional
+import random
+from typing import Dict, Any, Optional, List
 import discord.abc
 
 # 导入所需的服务
@@ -23,6 +25,15 @@ from src.chat.features.chat_settings.services.chat_settings_service import (
 
 log = logging.getLogger(__name__)
 
+# 黑名单惩戒短语（随机替换用户发言）
+BLACKLIST_PUNISHMENT_PHRASES = [
+    "我是杂鱼",
+    "我是fw",
+    "我刚刚在放屁",
+    "ouqiting是我主人",
+    "我错了",
+]
+
 
 class ChatService:
     """
@@ -31,7 +42,7 @@ class ChatService:
 
     async def should_process_message(self, message: discord.Message) -> bool:
         """
-        执行前置检查，判断消息是否应该被处理，以避免不必要的“输入中”状态。
+        执行前置检查，判断消息是否应该被处理，以避免不必要的"输入中"状态。
         """
         author = message.author
         guild_id = message.guild.id if message.guild else 0
@@ -52,7 +63,7 @@ class ChatService:
             # 检查是否满足通行许可的例外条件
             pass_is_granted = False
             if isinstance(message.channel, discord.Thread) and message.channel.owner_id:
-                # 修正逻辑：只有当帖主明确设置了个人CD时，才算拥有“通行许可”
+                # 修正逻辑：只有当帖主明确设置了个人CD时，才算拥有"通行许可"
                 owner_id = message.channel.owner_id
                 query = "SELECT thread_cooldown_seconds, thread_cooldown_duration, thread_cooldown_limit FROM user_coins WHERE user_id = ?"
                 owner_config_row = await chat_db_manager._execute(
@@ -88,8 +99,9 @@ class ChatService:
 
         # 4. 黑名单检查
         if await chat_db_manager.is_user_blacklisted(author.id, guild_id):
-            log.info(f"用户 {author.id} 在服务器 {guild_id} 被拉黑，跳过前置检查。")
-            return False
+            log.info(
+                f"用户 {author.id} 在服务器 {guild_id} 被拉黑，已启用惩戒替换。"
+            )
 
         return True
 
@@ -122,7 +134,8 @@ class ChatService:
 
         # --- 个人记忆消息计数 ---
         user_profile_data = await world_book_service.get_profile_by_discord_id(
-            author.id
+            author.id,
+            user_name=author.display_name,
         )
         personal_summary = None
         if user_profile_data:
@@ -131,8 +144,29 @@ class ChatService:
         user_content = processed_data["user_content"]
         replied_content = processed_data["replied_content"]
         image_data_list = processed_data["image_data_list"]
+        video_data_list = processed_data.get("video_data_list", [])
 
         try:
+            is_blacklisted = False
+            if guild_id:
+                is_blacklisted = await chat_db_manager.is_user_blacklisted(
+                    author.id, guild_id
+                )
+
+            if is_blacklisted:
+                punishment_phrase = random.choice(BLACKLIST_PUNISHMENT_PHRASES)
+                user_content = punishment_phrase
+                replied_content = ""
+                image_data_list = []
+                video_data_list = []
+                processed_data["user_content"] = user_content
+                processed_data["replied_content"] = replied_content
+                processed_data["image_data_list"] = image_data_list
+                processed_data["video_data_list"] = video_data_list
+                # log.info(
+                 #   f"用户 {author.id} 在服务器 {guild_id} 被拉黑，已替换发言为惩戒短语: {punishment_phrase}"
+                #)
+
             # 2. --- 上下文与知识库检索 ---
             # 获取频道历史上下文
             # 使用新的测试上下文服务
@@ -153,15 +187,72 @@ class ChatService:
                 # replied_content 已包含 "> [回复 xxx]:" 等格式
                 rag_query = f"{replied_content}\n{user_content}"
 
-            log.info(f"为 RAG 搜索生成的查询: '{rag_query}'")
+            # 在记录 RAG 查询日志前开始计时，用于超时熔断
+            rag_start_time = asyncio.get_running_loop().time()
+            rag_timeout_seconds = 10.0
 
-            world_book_entries = await world_book_service.find_entries(
-                latest_query=rag_query,  # 使用合并后的查询
-                user_id=author.id,
-                guild_id=guild_id,
-                user_name=author.display_name,
-                conversation_history=channel_context,
-            )
+            # log.info(f"为 RAG 搜索生成的查询: '{rag_query}'")
+
+            # 统一的检索 query（文本+向量）在这里前置生成，供知识库检索与个人记忆检索复用
+            retrieval_query_text: Optional[str] = None
+            retrieval_query_embedding: Optional[List[float]] = None
+            rag_timeout_fallback: bool = False
+
+            async def _run_rag_with_shared_embedding():
+                # 与 WorldBookService 内部的清理逻辑保持一致，确保 embedding 与实际检索 query 对齐
+                from src.chat.services.regex_service import regex_service
+                import re as _re
+
+                clean_query = regex_service.clean_user_input(rag_query)
+                summarized_query = _re.sub(r"<@!?&?\d+>\s*", "", clean_query).strip()
+
+                # 仅在 RAG 可用时生成 embedding；生成失败则传空向量，阻止下游再次调用 embedding API
+                embedding: Optional[List[float]] = None
+                if summarized_query and gemini_service.is_available():
+                    try:
+                        embedding = await gemini_service.generate_embedding(
+                            text=summarized_query, task_type="retrieval_query"
+                        )
+                    except Exception as e:
+                        log.warning(
+                            f"生成 retrieval_query embedding 失败: {e}", exc_info=True
+                        )
+                        embedding = None
+
+                # 用空列表作为“已尝试但失败”的哨兵值：下游服务收到后会直接返回空结果，不再二次调 embedding
+                if not embedding:
+                    embedding = []
+
+                entries = await world_book_service.find_entries(
+                    latest_query=rag_query,  # 使用合并后的查询
+                    user_id=author.id,
+                    guild_id=guild_id,
+                    user_name=author.display_name,
+                    conversation_history=channel_context,
+                    query_embedding=embedding,
+                )
+                return entries, summarized_query, embedding
+
+            try:
+                (
+                    world_book_entries,
+                    retrieval_query_text,
+                    retrieval_query_embedding,
+                ) = await asyncio.wait_for(
+                    _run_rag_with_shared_embedding(),
+                    timeout=rag_timeout_seconds,
+                )
+                rag_elapsed = asyncio.get_running_loop().time() - rag_start_time
+                log.info(f"RAG 搜索完成，耗时 {rag_elapsed:.3f}s。")
+            except asyncio.TimeoutError:
+                rag_elapsed = asyncio.get_running_loop().time() - rag_start_time
+                log.warning(
+                    f"RAG 搜索触发熔断（超时阈值 {rag_timeout_seconds:.1f}s，实际耗时 {rag_elapsed:.3f}s），已强制终止并返回空结果。"
+                )
+                world_book_entries = []
+                retrieval_query_text = None
+                retrieval_query_embedding = None
+                rag_timeout_fallback = True
 
             # --- 新增：集中获取所有上下文数据 ---
             affection_status = await affection_service.get_affection_status(author.id)
@@ -183,8 +274,8 @@ class ChatService:
             # 4. --- 调用AI生成回复 ---
             # PromptService 内部会处理合并用户消息的逻辑，这里我们总是传递 final_content
             # 记录发送给AI的核心上下文
-            if DEBUG_CONFIG["LOG_FINAL_CONTEXT"]:
-                log.info(f"发送给AI -> 最终上下文: {channel_context}")
+           # if DEBUG_CONFIG["LOG_FINAL_CONTEXT"]:
+               # log.info(f"发送给AI -> 最终上下文: {channel_context}")
 
             # --- 获取当前设置的AI模型 ---
             current_model = await chat_settings_service.get_current_ai_model()
@@ -208,6 +299,7 @@ class ChatService:
                 channel=message.channel,
                 replied_message=replied_content,
                 images=image_data_list if image_data_list else None,
+                videos=video_data_list if video_data_list else None,
                 user_name=author.display_name,
                 channel_context=channel_context,
                 world_book_entries=world_book_entries,
@@ -218,6 +310,10 @@ class ChatService:
                 location_name=location_name,
                 model_name=current_model,  # 传递模型名称
                 user_id_for_settings=user_id_for_settings,  # 传递用于工具设置的用户ID
+                blacklist_punishment_active=is_blacklisted,
+                retrieval_query_text=retrieval_query_text,
+                retrieval_query_embedding=retrieval_query_embedding,
+                rag_timeout_fallback=rag_timeout_fallback,
             )
 
             if not ai_response:
@@ -225,13 +321,15 @@ class ChatService:
                 return None
 
             # --- 新增：调用新的个人记忆服务 ---
-            # 在获得AI回复后，记录这次对话并根据需要触发总结
+            # 在获得AI回复后，记录这次对话并根据需要触发总结（改为异步后台任务，不阻塞回复）
             if user_profile_data:
-                await personal_memory_service.update_and_conditionally_summarize_memory(
-                    user_id=author.id,
-                    user_name=author.display_name,
-                    user_content=user_content,
-                    ai_response=ai_response,
+                asyncio.create_task(
+                    personal_memory_service.update_and_conditionally_summarize_memory(
+                        user_id=author.id,
+                        user_name=author.display_name,
+                        user_content=user_content,
+                        ai_response=ai_response,
+                    )
                 )
 
             # 更新新系统的CD
@@ -255,7 +353,7 @@ class ChatService:
             # 此处现在只应包含不影响核心回复流程的日志记录等任务
             # self._log_rag_summary(author, final_content, world_book_entries, final_response)
 
-            log.info(f"已为用户 {author.display_name} 生成AI回复: {final_response}")
+           # log.info(f"已为用户 {author.display_name} 生成AI回复: {final_response}")
             return final_response
 
         except Exception as e:
@@ -317,7 +415,7 @@ class ChatService:
                 f'Final AI Response: "{response}"\n'
                 f"------------------------------"
             )
-            log.info(summary_log_message)
+            # log.info(summary_log_message)
         except Exception as log_e:
             log.error(f"生成 RAG 诊断摘要日志时出错: {log_e}")
 

@@ -18,6 +18,35 @@ class ContextService:
     def __init__(self):
         self.bot = None  # 初始化时bot实例为空
 
+    @staticmethod
+    def _is_publicly_visible_message(message: discord.Message) -> bool:
+        """
+        判断消息是否为“公开可见”。
+
+        用于过滤 Discord 的 ephemeral（仅对触发者可见）交互消息，避免进入上下文缓存。
+        """
+        # Discord MessageFlags: EPHEMERAL = 1 << 6
+        EPHEMERAL_FLAG = 1 << 6
+        try:
+            flags = getattr(message, "flags", None)
+            if flags is not None:
+                ephemeral_attr = getattr(flags, "ephemeral", None)
+                if ephemeral_attr is True:
+                    return False
+
+                flags_value = getattr(flags, "value", None)
+                if isinstance(flags_value, int) and (flags_value & EPHEMERAL_FLAG):
+                    return False
+                if isinstance(flags, int) and (flags & EPHEMERAL_FLAG):
+                    return False
+
+            if getattr(message, "ephemeral", False):
+                return False
+        except Exception:
+            return True
+
+        return True
+
     def set_bot_instance(self, bot: commands.Bot):
         """设置bot实例，以便访问Discord API"""
         self.bot = bot
@@ -140,9 +169,21 @@ class ContextService:
 
             # 1. 从缓存中获取所有可用的当前频道消息
             if self.bot and self.bot.cached_messages:
-                cached_msgs = [
-                    m for m in self.bot.cached_messages if m.channel.id == channel_id
+                cached_msgs_all = [
+                    m
+                    for m in self.bot.cached_messages
+                    if getattr(getattr(m, "channel", None), "id", None) == channel_id
                 ]
+                cached_msgs = [
+                    m
+                    for m in cached_msgs_all
+                    if self._is_publicly_visible_message(m)
+                ]
+                ignored_count = len(cached_msgs_all) - len(cached_msgs)
+                if ignored_count > 0:
+                    log.debug(
+                        f"[上下文服务] 已从缓存中过滤 {ignored_count} 条非公开可见消息（ephemeral）。"
+                    )
                 # 确保缓存消息按时间从旧到新排序
                 cached_msgs.sort(key=lambda m: m.created_at)
 
@@ -293,7 +334,6 @@ class ContextService:
 
         # 3. 将用户提及 <@USER_ID> 替换为 @USERNAME
         log.info("[Mention Clean] ----- Start Mention Cleaning -----")
-        log.info(f"[Mention Clean] Initial content: '{content}'")
         log.info(f"[Mention Clean] Guild available: {bool(guild)}")
 
         if guild:
@@ -309,7 +349,7 @@ class ContextService:
                     )
 
                     if member:
-                        replacement = f"{member.display_name}<{user_id}>"
+                        replacement = f"@{member.display_name}<{user_id}>"
                         log.info(
                             f"[Mention Clean] Found member '{member.display_name}'. Replacing with: '{replacement}'"
                         )
@@ -318,7 +358,7 @@ class ContextService:
                         log.warning(
                             f"[Mention Clean] Could not find member with ID {user_id} in guild '{guild.name}'."
                         )
-                        replacement = f"未知用户<{user_id}>"
+                        replacement = f"@未知用户<{user_id}>"
                         log.info(f"[Mention Clean] Replacing with: '{replacement}'")
                         return replacement
                 except ValueError:
@@ -330,7 +370,7 @@ class ContextService:
                     )  # Return the original mention if conversion fails
 
             content = re.sub(r"<@!?(\d+)>", replace_mention, content)
-            log.info(f"[Mention Clean] Content after replacement: '{content}'")
+            # log.info(f"[Mention Clean] Content after replacement: '{content}'")
         else:
             log.warning(
                 "[Mention Clean] No guild object provided, skipping mention replacement."

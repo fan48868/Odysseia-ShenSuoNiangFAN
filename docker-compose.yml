@@ -10,13 +10,13 @@ services:
     # --- 部署方式二选一 ---
     # 方式一 (推荐): 从本地源代码构建
     # 优点: 使用最新代码、方便调试
-    # build:
-    #   context: .
-    #   dockerfile: .devcontainer/Dockerfile
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
 
     # 方式二: 直接使用 Docker Hub 上的公共镜像
     # 优点: 快速、简单、无需本地构建。使用此方式时，请注释掉上面的 'build' 部分，并取消下方 'image' 行的注释。
-    image: echoni0n/braingirl:latest
+    #image: echoni0n/braingirl:latest
 
     container_name: Odysseia_Guidance
     volumes:
@@ -28,28 +28,6 @@ services:
     command: python3 -u -m src.main
     networks:
       - bot_network
-    depends_on:
-      - db
-
-  blackjack_web:
-    # build:
-    #   context: .
-    #   dockerfile: .devcontainer/Dockerfile
-    image: echoni0n/braingirl:latest
-    container_name: blackjack_web
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      - RUNNING_IN_DOCKER=true
-    ports:
-      - "${BLACKJACK_PORT:-8000}:8000"
-    volumes:
-      - .:/app
-      - ./data:/app/data
-    networks:
-      - bot_network
-    command: uvicorn src.chat.features.games.blackjack-web.app:app --host 0.0.0.0 --port 8000
     depends_on:
       - db
 
@@ -76,7 +54,7 @@ services:
 
   db:
     # 使用官方打包好的 ParadeDB 镜像，它基于 PG16
-    image: paradedb/paradedb:latest-pg16
+    image: paradedb/paradedb@sha256:23079f9f0a2dbb427e413179a056a93cb892e9b6d3627dad82c12cedd22be39e
     container_name: odysseia_pg_db # 保持与项目其余部分一致的命名
     restart: unless-stopped # 保持与项目其余部分一致的重启策略
     environment:
@@ -84,9 +62,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-odysseia_db}
       POSTGRES_USER: ${POSTGRES_USER:-user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
-    #    ports:
-    #      # 沿用变量端口映射，方便在不同环境中部署
-    #      - "${DB_PORT:-5432}:5432"
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
     volumes:
       # 数据持久化到本地 ./pgdata 目录，并使用 PG16 的标准数据路径
       - ./pgdata:/var/lib/postgresql/data

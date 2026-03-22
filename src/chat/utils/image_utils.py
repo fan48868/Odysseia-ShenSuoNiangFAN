@@ -1,27 +1,61 @@
 import io
 import logging
 from PIL import Image
-from typing import Tuple
+from typing import Optional, Tuple
 
 log = logging.getLogger(__name__)
 
 
 # --- 压缩策略常量 ---
-NO_COMPRESSION_THRESHOLD_BYTES = 10 * 1024 * 1024  # 10 MB (小于此值不执行迭代压缩)
+TARGET_IMAGE_SIZE_BYTES = 7 * 1024 * 1024  # 7 MB (目标大小上限)
 MAX_IMAGE_SIZE_BYTES = 15 * 1024 * 1024  # 15 MB (硬性物理上限)
-TARGET_IMAGE_SIZE_BYTES = 4 * 1024 * 1024  # 4 MB  (大于10MB的图片期望压缩到的目标大小)
 MAX_IMAGE_DIMENSION = 4096  # 4096 像素 (最大尺寸)
-HIGH_QUALITY = 95  # 用于10MB以下图片的保存质量
-INITIAL_QUALITY = 85  # 用于10MB以上图片的初始保存质量
+MAX_QUALITY = 100  # 可尝试的最高质量
 MIN_QUALITY = 50  # 最低可接受质量
-QUALITY_STEP = 10  # 每次迭代降低的质量值
+QUALITY_STEP = 5  # 每次迭代降低的质量值
+WEBP_METHOD = 4  # 在编码速度与压缩率之间取平衡
+PASSTHROUGH_MIME_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+
+FORMAT_TO_MIME_TYPE = {
+    "JPEG": "image/jpeg",
+    "JPG": "image/jpeg",
+    "PNG": "image/png",
+    "WEBP": "image/webp",
+}
+
+
+def _get_image_mime_type(image_format: Optional[str]) -> str:
+    return FORMAT_TO_MIME_TYPE.get((image_format or "").upper(), "image/png")
+
+
+def _has_alpha_channel(img: Image.Image) -> bool:
+    if "A" in img.getbands():
+        return True
+    if img.mode == "P":
+        return "transparency" in img.info
+    return False
+
+
+def _encode_webp(img: Image.Image, *, quality: Optional[int] = None) -> bytes:
+    output_buffer = io.BytesIO()
+    try:
+        save_kwargs = {"format": "WEBP", "method": WEBP_METHOD}
+        save_kwargs["quality"] = quality if quality is not None else MAX_QUALITY
+        img.save(output_buffer, **save_kwargs)
+        return output_buffer.getvalue()
+    finally:
+        output_buffer.close()
 
 
 def sanitize_image(image_bytes: bytes) -> Tuple[bytes, str]:
     """
     对输入的图片字节数据进行智能预处理和压缩。
-    - **如果图片 < 10MB**: 只进行必要的尺寸调整和格式统一，以高质量保存。
-    - **如果图片 >= 10MB**: 执行"尽力压缩"策略，尝试将图片压缩至 4MB 以下。
+    - **如果图片已满足要求**: 在无需缩放时保留原始编码，避免无意义重压缩。
+    - **如果需要重新编码**: 直接查找满足 7MB 的最高质量 WebP，避免慢速无损编码阻塞。
     - **最终检查**: 任何情况下，处理后的图片都不能超过 15MB 的物理上限。
 
     内存优化：确保所有 BytesIO 缓冲区在使用后立即关闭，防止内存泄漏。
@@ -33,14 +67,15 @@ def sanitize_image(image_bytes: bytes) -> Tuple[bytes, str]:
     log.info(f"开始处理图片，原始大小: {original_byte_size / 1024:.2f} KB。")
 
     input_buffer = None
-    output_buffer = None
-
     try:
         # 使用上下文管理器确保输入缓冲区被正确关闭
         input_buffer = io.BytesIO(image_bytes)
 
         with Image.open(input_buffer) as img:
             # --- 1. 尺寸调整 (对所有图片都执行) ---
+            original_format = img.format
+            original_mime_type = _get_image_mime_type(original_format)
+            resized = False
             if img.width > MAX_IMAGE_DIMENSION or img.height > MAX_IMAGE_DIMENSION:
                 log.info(
                     f"图片尺寸 {img.size} 超过最大限制 {MAX_IMAGE_DIMENSION}px，将进行缩放。"
@@ -48,50 +83,47 @@ def sanitize_image(image_bytes: bytes) -> Tuple[bytes, str]:
                 img.thumbnail(
                     (MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), Image.Resampling.LANCZOS
                 )
+                resized = True
                 log.info(f"图片已缩放至: {img.size}")
 
-            # --- 2. 格式转换 (对所有图片都执行) ---
-            if img.mode != "RGBA":
-                img = img.convert("RGBA")
+            # --- 2. 已满足目标时优先保留原始编码 ---
+            if (
+                not resized
+                and original_byte_size <= TARGET_IMAGE_SIZE_BYTES
+                and original_mime_type in PASSTHROUGH_MIME_TYPES
+            ):
+                log.info("图片已满足大小要求且无需缩放，保留原始编码。")
+                return image_bytes, original_mime_type
 
+            # --- 3. 仅在确有需要时重新编码 ---
+            target_mode = "RGBA" if _has_alpha_channel(img) else "RGB"
+            if img.mode != target_mode:
+                img = img.convert(target_mode)
+
+            # --- 3. 从高到低查找满足目标的最高质量 ---
+            log.info("图片需要重新编码，开始寻找满足限制的最高质量版本。")
             processed_bytes = b""
+            selected_quality = None
+            for quality in range(MAX_QUALITY, MIN_QUALITY - 1, -QUALITY_STEP):
+                candidate_bytes = _encode_webp(img, quality=quality)
 
-            # --- 3. 根据原始大小选择不同策略 ---
-            if original_byte_size < NO_COMPRESSION_THRESHOLD_BYTES:
-                # --- 策略A: 小于10MB，高质量保存 ---
-                log.info("图片小于10MB，执行高质量保存。")
-                output_buffer = io.BytesIO()
-                img.save(output_buffer, format="WEBP", quality=HIGH_QUALITY)
-                processed_bytes = output_buffer.getvalue()
-                output_buffer.close()
-                output_buffer = None
-            else:
-                # --- 策略B: 大于等于10MB，尽力压缩 ---
-                log.info("图片大于等于10MB，执行迭代压缩。")
-                quality = INITIAL_QUALITY
-                while quality >= MIN_QUALITY:
-                    output_buffer = io.BytesIO()
-                    img.save(output_buffer, format="WEBP", quality=quality)
-                    processed_bytes = output_buffer.getvalue()
-                    output_buffer.close()
-                    output_buffer = None
+                log.debug(
+                    f"尝试使用质量 {quality} 进行压缩，大小为: {len(candidate_bytes) / 1024:.2f} KB。"
+                )
 
-                    log.debug(
-                        f"尝试使用质量 {quality} 进行压缩，大小为: {len(processed_bytes) / 1024:.2f} KB。"
+                processed_bytes = candidate_bytes
+                if len(candidate_bytes) <= TARGET_IMAGE_SIZE_BYTES:
+                    selected_quality = quality
+                    log.info(
+                        f"压缩成功，找到满足目标要求的最高质量版本。最终质量: {quality}。"
                     )
+                    break
 
-                    if len(processed_bytes) <= NO_COMPRESSION_THRESHOLD_BYTES:
-                        log.info(
-                            f"压缩成功，文件大小满足目标要求。最终质量: {quality}。"
-                        )
-                        break
-
-                    quality -= QUALITY_STEP
-                else:
-                    log.warning(
-                        f"即便使用最低质量 {MIN_QUALITY}，文件大小 ({len(processed_bytes) / 1024:.2f} KB) "
-                        f"仍未达到 {NO_COMPRESSION_THRESHOLD_BYTES / 1024 / 1024:.2f} MB 的目标。"
-                    )
+            if selected_quality is None:
+                log.warning(
+                    f"即便使用最低质量 {MIN_QUALITY}，文件大小 ({len(processed_bytes) / 1024:.2f} KB) "
+                    f"仍未达到 {TARGET_IMAGE_SIZE_BYTES / 1024 / 1024:.2f} MB 的目标。"
+                )
 
             # --- 4. 最终检查 (对所有图片都执行) ---
             if len(processed_bytes) > MAX_IMAGE_SIZE_BYTES:
@@ -114,10 +146,5 @@ def sanitize_image(image_bytes: bytes) -> Tuple[bytes, str]:
         if input_buffer is not None:
             try:
                 input_buffer.close()
-            except Exception:
-                pass
-        if output_buffer is not None:
-            try:
-                output_buffer.close()
             except Exception:
                 pass

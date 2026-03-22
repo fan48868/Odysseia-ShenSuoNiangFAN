@@ -14,7 +14,9 @@ from src.backup.backup_manager import backup_databases
 
 # 在所有其他导入之前，尽早加载环境变量
 # 这样可以确保所有模块在加载时都能访问到 .env 文件中定义的配置
-load_dotenv()
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_DOTENV_PATH = os.path.join(PROJECT_ROOT, ".env")
+load_dotenv(dotenv_path=PROJECT_DOTENV_PATH, override=True, encoding="utf-8")
 
 # 从我们自己的模块中导入
 from src import config
@@ -103,9 +105,8 @@ if sys.platform != "win32":
 
 def setup_logging():
     """
-    配置日志记录器，实现双通道输出：
+    配置日志记录器，仅输出到控制台：
     - 控制台 (stdout/stderr): 默认只显示 INFO 及以上级别的日志。
-    - 日志文件 (bot_debug.log): 记录 DEBUG 及以上级别的所有日志，用于问题排查。
     """
     # 1. 创建一个统一的格式化器
     log_formatter = logging.Formatter(config.LOG_FORMAT, datefmt="%Y-%m-%d %H:%M:%S")
@@ -131,24 +132,6 @@ def setup_logging():
     stderr_handler.setLevel(logging.WARNING)
     stderr_handler.setFormatter(log_formatter)
 
-    # 5. 创建文件处理器，记录所有 DEBUG 及以上级别的日志
-    #    使用 RotatingFileHandler 来自动管理日志文件大小
-    from logging.handlers import RotatingFileHandler
-
-    # 确保日志文件所在的目录存在
-    log_dir = os.path.dirname(config.LOG_FILE_PATH)
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-
-    file_handler = RotatingFileHandler(
-        config.LOG_FILE_PATH,
-        maxBytes=5 * 1024 * 1024,  # 5 MB
-        backupCount=2,
-        encoding="utf-8",
-    )
-    file_handler.setLevel(logging.DEBUG)  # 文件记录 DEBUG 级别
-    file_handler.setFormatter(log_formatter)
-
     # --- webui ---
     web_log_formatter = logging.Formatter(
         "[%(asctime)s.%(msecs)03dZ] [%(levelname)s] [%(name)s] %(message)s",
@@ -165,7 +148,6 @@ def setup_logging():
     # 6. 为根 logger 添加所有处理器
     root_logger.addHandler(stdout_handler)
     root_logger.addHandler(stderr_handler)
-    root_logger.addHandler(file_handler)
     # root_logger.addHandler(queue_handler) # 禁用未使用的WebUI日志队列处理器，防止内存泄漏
 
     # 5. 调整特定库的日志级别，以减少不必要的输出
@@ -273,6 +255,8 @@ class GuidanceBot(commands.Bot):
         self.add_view(PermanentPanelView())
         log.info("已成功重新加载持久化视图 (PermanentPanelView)。")
 
+       
+
         # 2. 加载功能模块 (Cogs)
         log.info("--- 正在加载功能模块 (Cogs) ---")
         from pathlib import Path
@@ -300,10 +284,6 @@ class GuidanceBot(commands.Bot):
                 if file.name.startswith("__"):
                     continue
 
-                # --- 临时禁用抽鬼牌 ---
-                if file.name == "ghost_card_cog.py":
-                    log.warning(f"已跳过加载有问题的模块: {file.name}")
-                    continue
 
                 # --- 临时禁用图像生成 ---
                 if file.name == "image_generation_cog.py":

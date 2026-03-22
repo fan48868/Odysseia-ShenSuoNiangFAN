@@ -47,7 +47,7 @@ class TutorialSearchService:
         log.info("TutorialSearchService 已初始化")
         # 将配置加载到实例属性中，方便访问
         self.config = TUTORIAL_RAG_CONFIG
-        log.info(f"教程 RAG 配置已加载: {self.config}")
+        # log.info(f"教程 RAG 配置已加载: {self.config}")
 
     async def _hybrid_search_with_rrf(
         self,
@@ -64,7 +64,7 @@ class TutorialSearchService:
             WITH semantic_search AS (
                 SELECT
                     kc.id,
-                    RANK() OVER (ORDER BY kc.embedding <=> :query_vector) as rank,
+                    ROW_NUMBER() OVER (ORDER BY kc.embedding <=> :query_vector) as rank,
                     td.thread_id
                 FROM tutorials.knowledge_chunks kc
                 JOIN tutorials.tutorial_documents td ON kc.document_id = td.id
@@ -139,7 +139,7 @@ class TutorialSearchService:
         if not ids:
             return []
 
-        log.info(f"父文档获取：收到排序后的 chunk IDs: {ids}")
+        # log.info(f"父文档获取：收到排序后的 chunk IDs: {ids}")
 
         # 1. 根据 chunk IDs 查询它们所属的父文档 ID。
         # 这里不直接在SQL中使用DISTINCT，因为那可能会丢失我们想要的顺序。
@@ -217,7 +217,7 @@ class TutorialSearchService:
         每个文档是一个包含 title, content, thread_id 的字典。
         """
         trace_log = ["--- RAG TRACE START ---", f"UserID: {user_id}", f"Query: {query}"]
-        log.info(f"收到来自用户 '{user_id}' 的教程知识库搜索请求: '{query}'")
+        # log.info(f"收到来自用户 '{user_id}' 的教程知识库搜索请求: '{query}'")
 
         try:
             from src.chat.services.gemini_service import gemini_service
@@ -229,7 +229,7 @@ class TutorialSearchService:
                 log.info("RAG功能未启用：未配置API密钥，跳过教程检索。")
                 return []
         except Exception as e:
-            log.error(f"为查询 '{query}' 生成 embedding 时出错: {e}", exc_info=True)
+            # log.error(f"为查询 '{query}' 生成 embedding 时出错: {e}", exc_info=True)
             return []
 
         final_parent_docs: List[Dict[str, str]] = []
@@ -245,8 +245,9 @@ class TutorialSearchService:
                 search_results = await self._hybrid_search_with_rrf(
                     session, query, query_embedding, thread_id, current_search_mode
                 )
-                log.info(
-                    f"混合搜索 RRF 结果 (id, is_thread_match, rrf_score): {search_results}"
+                #log.info(
+                    # f"混合搜索 RRF 结果 (id, is_thread_match, rrf_score): {search_results}"
+                log.info("混合搜索 RRF 成功"
                 )
                 best_chunk_ids = [res.id for res in search_results]
 

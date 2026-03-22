@@ -1,30 +1,172 @@
 # -*- coding: utf-8 -*-
 
+import json
 import logging
-from typing import Optional, Dict, List, Any
-import discord
-from discord.ext import commands
+import os
 import re
 from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Set
+
+import discord
+from discord.ext import commands
+
+from src import config
 from src.chat.config import chat_config
 from src.chat.services.regex_service import regex_service
 
 log = logging.getLogger(__name__)
 
 
+@dataclass
+class CachedReplyMessage:
+    message_id: int
+    author_display_name: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Optional["CachedReplyMessage"]:
+        if not isinstance(data, dict):
+            return None
+        message_id = data.get("message_id")
+        try:
+            message_id = int(message_id)
+        except (TypeError, ValueError):
+            return None
+        author_display_name = data.get("author_display_name")
+        if not isinstance(author_display_name, str) or not author_display_name:
+            author_display_name = "未知用户"
+        return cls(message_id=message_id, author_display_name=author_display_name)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "message_id": self.message_id,
+            "author_display_name": self.author_display_name,
+        }
+
+
 class ContextServiceTest:
     """上下文管理服务测试版本，用于对比新的上下文处理逻辑"""
 
+    @staticmethod
+    def _is_publicly_visible_message(message: discord.Message) -> bool:
+        """
+        判断消息是否为“公开可见”。
+
+        目前主要用于过滤 Discord 的 ephemeral（仅对触发者可见）交互消息，避免进入上下文缓存。
+        """
+        # Discord MessageFlags: EPHEMERAL = 1 << 6
+        EPHEMERAL_FLAG = 1 << 6
+        try:
+            flags = getattr(message, "flags", None)
+            if flags is not None:
+                ephemeral_attr = getattr(flags, "ephemeral", None)
+                if ephemeral_attr is True:
+                    return False
+
+                flags_value = getattr(flags, "value", None)
+                if isinstance(flags_value, int) and (flags_value & EPHEMERAL_FLAG):
+                    return False
+                if isinstance(flags, int) and (flags & EPHEMERAL_FLAG):
+                    return False
+
+            # 兼容：某些消息对象可能直接带有 ephemeral 属性
+            if getattr(message, "ephemeral", False):
+                return False
+        except Exception:
+            # 出错时按“公开可见”处理，避免误杀普通消息
+            return True
+
+        return True
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # 初始化一个有序字典作为LRU缓存，用于存储单条消息
-        # 我们设定一个最大值，例如5000，以防止内存无限增长
-        self.message_cache = OrderedDict()
-        self.MAX_CACHE_SIZE = 5000
+        # 按频道缓存被引用消息（LRU），用于避免重复拉取
+        self.message_cache: Dict[int, OrderedDict[int, CachedReplyMessage]] = {}
+        self.loaded_channel_caches: Set[int] = set()
+        self.MAX_CACHE_SIZE = max(
+            1,
+            int(
+                chat_config.CHANNEL_MEMORY_CONFIG.get("formatted_history_limit", 20)
+            ),
+        )
+        self.cache_dir = os.path.join(config.DATA_DIR, "reply_message_cache")
+        os.makedirs(self.cache_dir, exist_ok=True)
         if bot:
             log.info("ContextServiceTest 已通过构造函数设置 bot 实例。")
         else:
             log.warning("ContextServiceTest 初始化时未收到有效的 bot 实例。")
+
+    def _get_cache_file_path(self, channel_id: int) -> str:
+        return os.path.join(self.cache_dir, f"reply_cache_{channel_id}.json")
+
+    def _get_channel_cache(
+        self, channel_id: int
+    ) -> OrderedDict[int, CachedReplyMessage]:
+        if channel_id not in self.message_cache:
+            self.message_cache[channel_id] = OrderedDict()
+        return self.message_cache[channel_id]
+
+    def _ensure_channel_cache_loaded(self, channel_id: int) -> None:
+        if channel_id in self.loaded_channel_caches:
+            return
+        self._load_channel_cache(channel_id)
+        self.loaded_channel_caches.add(channel_id)
+
+    def _load_channel_cache(self, channel_id: int) -> None:
+        channel_cache = self._get_channel_cache(channel_id)
+        channel_cache.clear()
+        cache_file_path = self._get_cache_file_path(channel_id)
+        if not os.path.isfile(cache_file_path):
+            return
+        try:
+            with open(cache_file_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+            if isinstance(data, list):
+                for entry in data:
+                    cached = CachedReplyMessage.from_dict(entry)
+                    if not cached:
+                        continue
+                    if cached.message_id in channel_cache:
+                        continue
+                    channel_cache[cached.message_id] = cached
+        except Exception as e:
+            log.warning(f"[单条消息缓存] 读取频道 {channel_id} 缓存文件失败: {e}")
+            channel_cache.clear()
+
+        while len(channel_cache) > self.MAX_CACHE_SIZE:
+            channel_cache.popitem(last=False)
+
+        if channel_cache:
+            log.info(
+                f"[单条消息缓存] 已加载频道 {channel_id} 缓存: {len(channel_cache)}/{self.MAX_CACHE_SIZE}。"
+            )
+
+    def _save_channel_cache(self, channel_id: int) -> None:
+        channel_cache = self._get_channel_cache(channel_id)
+        cache_file_path = self._get_cache_file_path(channel_id)
+        data = [entry.to_dict() for entry in channel_cache.values()]
+        try:
+            with open(cache_file_path, "w", encoding="utf-8") as file:
+                json.dump(data, file, ensure_ascii=False)
+        except Exception as e:
+            log.warning(f"[单条消息缓存] 写入频道 {channel_id} 缓存文件失败: {e}")
+
+    def _upsert_reference_message(
+        self, channel_id: int, message: discord.Message
+    ) -> None:
+        channel_cache = self._get_channel_cache(channel_id)
+        author_name = message.author.display_name if message.author else "未知用户"
+        entry = CachedReplyMessage(
+            message_id=message.id, author_display_name=author_name
+        )
+        if message.id in channel_cache:
+            channel_cache.pop(message.id, None)
+        channel_cache[message.id] = entry
+        while len(channel_cache) > self.MAX_CACHE_SIZE:
+            removed_item = channel_cache.popitem(last=False)
+            log.info(
+                f"[单条消息缓存] 清理频道 {channel_id} 缓存已满，移除最旧的消息 {removed_item[0]}。"
+            )
 
     async def get_formatted_channel_history_new(
         self,
@@ -66,6 +208,11 @@ class ContextServiceTest:
             )
             return []
 
+        # 读取该频道的本地缓存（如有）
+        self._ensure_channel_cache_loaded(channel_id)
+        channel_cache = self._get_channel_cache(channel_id)
+        cached_reference_map: Dict[int, CachedReplyMessage] = dict(channel_cache)
+
         history_parts = []
         try:
             history_messages = []
@@ -76,9 +223,21 @@ class ContextServiceTest:
 
             # 1. 从缓存中获取所有可用的当前频道消息
             if self.bot and self.bot.cached_messages:
-                cached_msgs = [
-                    m for m in self.bot.cached_messages if m.channel.id == channel_id
+                cached_msgs_all = [
+                    m
+                    for m in self.bot.cached_messages
+                    if getattr(getattr(m, "channel", None), "id", None) == channel_id
                 ]
+                cached_msgs = [
+                    m
+                    for m in cached_msgs_all
+                    if self._is_publicly_visible_message(m)
+                ]
+                ignored_count = len(cached_msgs_all) - len(cached_msgs)
+                if ignored_count > 0:
+                    log.debug(
+                        f"[上下文服务-Test] 已从缓存中过滤 {ignored_count} 条非公开可见消息（ephemeral）。"
+                    )
                 # 确保缓存消息按时间从旧到新排序
                 cached_msgs.sort(key=lambda m: m.created_at)
 
@@ -124,7 +283,7 @@ class ContextServiceTest:
                 for msg in history_messages
                 if msg.reference
                 and msg.reference.message_id
-                and msg.reference.message_id not in self.message_cache
+                and msg.reference.message_id not in cached_reference_map
             }
 
             # 2. 如果有需要获取的消息，则逐一获取
@@ -135,12 +294,20 @@ class ContextServiceTest:
                 successful_fetches = 0
                 for msg_id in ids_to_fetch:
                     # 检查缓存，避免重复获取
-                    if msg_id in self.message_cache:
+                    if msg_id in cached_reference_map:
                         continue
                     try:
                         message = await channel.fetch_message(msg_id)
                         if message:
-                            self.message_cache[message.id] = message
+                            author_name = (
+                                message.author.display_name
+                                if message.author
+                                else "未知用户"
+                            )
+                            cached_reference_map[message.id] = CachedReplyMessage(
+                                message_id=message.id,
+                                author_display_name=author_name,
+                            )
                             successful_fetches += 1
                     except discord.NotFound:
                         log.warning(
@@ -156,15 +323,30 @@ class ContextServiceTest:
 
                 if successful_fetches > 0:
                     log.info(
-                        f"[单条消息缓存] 获取完成: 共成功获取 {successful_fetches}/{len(ids_to_fetch)} 条消息。当前缓存大小: {len(self.message_cache)}/{self.MAX_CACHE_SIZE}。"
+                        f"[单条消息缓存] 获取完成: 共成功获取 {successful_fetches}/{len(ids_to_fetch)} 条消息。"
                     )
 
-                # 3. 检查并清理超出容量的缓存
-                while len(self.message_cache) > self.MAX_CACHE_SIZE:
-                    removed_item = self.message_cache.popitem(last=False)
-                    log.info(
-                        f"[单条消息缓存] 清理: 缓存已满，移除最旧的消息 {removed_item[0]}。"
-                    )
+            # 3. 每次对话仅保留本轮上下文引用，覆盖旧缓存
+            refreshed_cache: OrderedDict[int, CachedReplyMessage] = OrderedDict()
+            for msg in history_messages:
+                if msg.reference and msg.reference.message_id:
+                    ref_msg = cached_reference_map.get(msg.reference.message_id)
+                    if not ref_msg:
+                        continue
+                    if ref_msg.message_id in refreshed_cache:
+                        continue
+                    refreshed_cache[ref_msg.message_id] = ref_msg
+
+            channel_cache.clear()
+            channel_cache.update(refreshed_cache)
+            self._save_channel_cache(channel_id)
+
+            if refreshed_cache:
+                log.info(
+                    f"[单条消息缓存] 频道 {channel_id} 本轮缓存已刷新: {len(channel_cache)}/{self.MAX_CACHE_SIZE}。"
+                )
+            else:
+                log.info(f"[单条消息缓存] 频道 {channel_id} 本轮无引用缓存，已清空。")
 
             # --- 处理历史消息 ---
             # 此时所有需要的被引用消息都应该在缓存中了
@@ -183,9 +365,9 @@ class ContextServiceTest:
                 reply_info = ""
                 if msg.reference and msg.reference.message_id:
                     # 直接从缓存中获取，.get() 方法可以安全地处理获取失败的情况
-                    ref_msg = self.message_cache.get(msg.reference.message_id)
-                    if ref_msg and ref_msg.author:
-                        reply_info = f"[回复 {ref_msg.author.display_name}]"
+                    ref_msg = channel_cache.get(msg.reference.message_id)
+                    if ref_msg:
+                        reply_info = f"[回复 {ref_msg.author_display_name}]"
 
                 # 强制在元信息（用户名和回复）后添加冒号，清晰地分割内容
                 user_meta = f"[{msg.author.display_name}]{reply_info}"

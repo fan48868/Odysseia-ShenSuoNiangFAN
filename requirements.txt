@@ -17,10 +17,12 @@ SQLAlchemy
 asyncpg
 pgvector
 alembic
+gradio_client
 
 # Data Processing & AI
 langchain-text-splitters
 numpy==1.26.4
+edge-tts
 
 # Web UI 依赖
 fastapi
@@ -29,8 +31,6 @@ gunicorn
 eventlet
 docker
 psutil
-cachetools
-httpx
 
 # 测试依赖
 pytest

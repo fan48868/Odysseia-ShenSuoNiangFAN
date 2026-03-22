@@ -10,7 +10,9 @@ from alembic import context
 
 # Add the project root to the Python path so we can import 'src'
 sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), "..")))
-load_dotenv()
+project_root = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
+dotenv_path = os.path.join(project_root, ".env")
+load_dotenv(dotenv_path=dotenv_path, override=True, encoding="utf-8")
 
 from src.database.models import Base
 

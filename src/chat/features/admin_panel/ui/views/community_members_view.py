@@ -17,6 +17,9 @@ from ..modals.search_modals import SearchUserModal, SearchCommunityMemberModal
 from src.chat.features.personal_memory.services.personal_memory_service import (
     personal_memory_service,
 )
+from src.chat.features.personal_memory.services.personal_memory_vector_service import (
+    personal_memory_vector_service,
+)
 from src.chat.features.community_member.ui.community_member_modal import (
     CommunityMemberUploadModal,
 )
@@ -171,6 +174,7 @@ class CommunityMembersView(BaseTableView):
             await interaction.response.defer()
             try:
                 await personal_memory_service.reset_memory_and_delete_history(user_id)
+                await personal_memory_vector_service.delete_vectors_for_user(user_id)
                 log.info(
                     f"管理员 {interaction.user.display_name} 重置了用户 {member_name} ({user_id}) 的记忆和历史。"
                 )

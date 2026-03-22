@@ -42,6 +42,7 @@ class WorldBookService:
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         n_results: int = chat_config.RAG_N_RESULTS_DEFAULT,
         max_distance: float = 0.5,
+        query_embedding: Optional[List[float]] = None,
     ) -> List[Dict[str, Any]]:
         """
         根据用户的最新问题和可选的对话历史，总结查询并查找相关的世界书条目。
@@ -83,7 +84,7 @@ class WorldBookService:
         clean_query = regex_service.clean_user_input(latest_query)
         # 进一步移除 Discord 提及
         summarized_query = re.sub(r"<@!?&?\d+>\s*", "", clean_query).strip()
-        log.info(f"原始查询: '{summarized_query}'")
+        # log.info(f"原始查询: '{summarized_query}'")
 
         # 4. 确保查询字符串不为空
         if not summarized_query.strip():
@@ -97,7 +98,11 @@ class WorldBookService:
                 knowledge_search_service,
             )
 
-            search_results = await knowledge_search_service.search(summarized_query)
+            search_results = await knowledge_search_service.search(
+                summarized_query,
+                user_id=user_id,
+                query_embedding=query_embedding,
+            )
 
             if search_results:
                 search_brief = [
@@ -147,9 +152,6 @@ class WorldBookService:
         Returns:
             bool: 添加成功返回 True，否则返回 False
         """
-        log.info(
-            f"尝试向 ParadeDB 添加通用知识条目: title='{title}', name='{name}', category='{category_name}'"
-        )
 
         # 直接使用 RAG 服务的数据库连接
         conn = incremental_rag_service._get_parade_connection()
@@ -206,8 +208,6 @@ class WorldBookService:
 
             new_id = new_entry["id"]
             conn.commit()
-            log.info(f"成功添加知识条目: ID={new_id} ({title})")
-
             # 异步调用增量RAG服务，使用正确的整数 ID
             log.info(f"正在为新知识条目 ID={new_id} 创建异步向量化任务...")
             asyncio.create_task(
@@ -227,13 +227,18 @@ class WorldBookService:
             # 注意：不在这里关闭连接，因为连接由 RAG 服务管理
 
     async def get_profile_by_discord_id(
-        self, discord_id: int
+        self,
+        discord_id: int,
+        user_name: Optional[str] = None,
+        auto_create: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """
         通过 Discord ID 从 ParadeDB 的 community.member_profiles 表中获取用户档案。
 
         Args:
             discord_id: 用户的 Discord ID。
+            user_name: (可选) 用户名/昵称。用于在未找到档案时自动创建最小名片。
+            auto_create: (可选) 未找到档案时，是否自动创建最小名片。
 
         Returns:
             一个包含用户档案数据的字典，如果找不到则返回 None。
@@ -249,31 +254,59 @@ class WorldBookService:
             from psycopg2.extras import RealDictCursor
             import psycopg2
 
-            # 创建一个新的游标
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(
-                    """
-                    SELECT
-                        discord_id,
-                        title,
-                        personal_summary,
-                        source_metadata
-                    FROM community.member_profiles
-                    WHERE discord_id = %s
-                    """,
-                    (str(discord_id),),  # 查询参数需要是元组
-                )
-                profile = cursor.fetchone()
+            def _flatten_profile(row: Any) -> Dict[str, Any]:
+                profile_dict = dict(row)
+                source_metadata = profile_dict.get("source_metadata")
+                if isinstance(source_metadata, str):
+                    try:
+                        source_metadata = json.loads(source_metadata)
+                        profile_dict["source_metadata"] = source_metadata
+                    except Exception:
+                        source_metadata = None
 
+                if isinstance(source_metadata, dict):
+                    for k in ("name", "personality", "background", "preferences"):
+                        if k in source_metadata and k not in profile_dict:
+                            profile_dict[k] = source_metadata.get(k)
+                return profile_dict
+
+            def _fetch_profile() -> Optional[Dict[str, Any]]:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            discord_id,
+                            title,
+                            personal_summary,
+                            source_metadata
+                        FROM community.member_profiles
+                        WHERE discord_id = %s
+                        """,
+                        (str(discord_id),),
+                    )
+                    row = cursor.fetchone()
+                if not row:
+                    return None
+                return _flatten_profile(row)
+
+            # 创建一个新的游标
+            profile = _fetch_profile()
             if profile:
                 log.info(f"成功找到 discord_id {discord_id} 的用户档案。")
-                # 将 RealDictRow 转换为普通字典以便序列化
-                return dict(profile)
-            else:
-                log.warning(
-                    f"在 ParadeDB 中未找到 discord_id {discord_id} 的用户档案。"
-                )
+                return profile
+
+            log.warning(f"在 ParadeDB 中未找到 discord_id {discord_id} 的用户档案。")
+            if not auto_create:
                 return None
+
+            created = await self._auto_create_minimal_member_profile(
+                discord_id=discord_id,
+                user_name=user_name,
+            )
+            if not created:
+                return None
+
+            return _fetch_profile()
 
         except psycopg2.Error as e:
             log.error(f"从 ParadeDB 查询用户档案时发生数据库错误: {e}", exc_info=True)
@@ -282,6 +315,103 @@ class WorldBookService:
             log.error(f"查询用户档案时发生未知错误: {e}", exc_info=True)
             return None
         # 注意：我们不在这里关闭连接或游标，假设连接池会管理它
+
+    async def _auto_create_minimal_member_profile(
+        self,
+        discord_id: int,
+        user_name: Optional[str] = None,
+    ) -> bool:
+        """
+        自动创建一个最小的 community.member_profiles 名片，用于保证个人记忆功能可写入。
+        - external_id: auto_discord_{discord_id}
+        - title: user_name
+        - personality: 直接复制 user_name
+        - background/preferences 留空
+        """
+        conn = incremental_rag_service._get_parade_connection()
+        if not conn:
+            log.error("ParadeDB 连接不可用，无法自动创建用户名片。")
+            return False
+
+        safe_name = (user_name or "").strip() or f"用户 {discord_id}"
+        personality = safe_name
+        background = ""
+        preferences = ""
+
+        full_text = (
+            f"名称: {safe_name}\n"
+            f"Discord ID: {discord_id}\n"
+            f"性格特点: {personality}\n"
+            f"背景信息: {background}\n"
+            f"喜好偏好: {preferences}"
+        ).strip()
+
+        source_metadata = {
+            "name": safe_name,
+            "discord_id": str(discord_id),
+            "personality": personality,
+            "background": background,
+            "preferences": preferences,
+            "source": "auto_create",
+        }
+
+        external_id = f"auto_discord_{discord_id}"
+
+        try:
+            from psycopg2.extras import RealDictCursor
+            import psycopg2
+
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO community.member_profiles
+                    (external_id, discord_id, title, full_text, source_metadata, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                    ON CONFLICT (discord_id) DO NOTHING
+                    RETURNING id
+                    """,
+                    (
+                        external_id,
+                        str(discord_id),
+                        safe_name,
+                        full_text,
+                        json.dumps(source_metadata, ensure_ascii=False),
+                    ),
+                )
+                row = cursor.fetchone()
+                conn.commit()
+
+            if row and row.get("id"):
+                member_id = str(row["id"])
+                log.info(
+                    f"已自动创建最小名片: discord_id={discord_id}, member_id={member_id}"
+                )
+                asyncio.create_task(
+                    incremental_rag_service.process_community_member(member_id)
+                )
+                return True
+
+            return True
+        except psycopg2.Error as e:
+            log.error(
+                f"自动创建最小名片时发生数据库错误: discord_id={discord_id}, err={e}",
+                exc_info=True,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return False
+        except Exception as e:
+            log.error(
+                f"自动创建最小名片时发生未知错误: discord_id={discord_id}, err={e}",
+                exc_info=True,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return False
 
 
 # 使用已导入的全局服务实例来创建 WorldBookService 的单例

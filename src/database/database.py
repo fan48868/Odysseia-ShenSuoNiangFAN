@@ -9,7 +9,9 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-load_dotenv()
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_DOTENV_PATH = os.path.join(PROJECT_ROOT, ".env")
+load_dotenv(dotenv_path=PROJECT_DOTENV_PATH, override=True, encoding="utf-8")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -33,7 +35,8 @@ if not DATABASE_URL:
         f"postgresql+asyncpg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
     )
 
-engine = create_async_engine(DATABASE_URL, echo=True)
+# 关闭 SQLAlchemy SQL echo，避免向量检索时把原始查询文本和向量参数打印到日志里
+engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = async_sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 

@@ -14,6 +14,9 @@ from src.chat.features.admin_panel.ui.modals.utility_modals import JumpToPageMod
 from src.chat.features.world_book.services.incremental_rag_service import (
     incremental_rag_service,
 )
+from src.chat.features.personal_memory.services.personal_memory_vector_service import (
+    personal_memory_vector_service,
+)
 from src.chat.utils.database import DB_PATH as CHAT_DB_PATH, get_database_url
 from src.database.models import CommunityMemberProfile, GeneralKnowledgeDocument
 
@@ -266,6 +269,12 @@ class BaseTableView(discord.ui.View):
             try:
                 item_to_delete = session.get(model_class, int(item_id))
                 if item_to_delete:
+                    discord_id_for_memory_cleanup = None
+                    if self.current_table == "community.member_profiles":
+                        discord_id_for_memory_cleanup = getattr(
+                            item_to_delete, "discord_id", None
+                        )
+
                     session.delete(item_to_delete)
                     session.commit()
                     log.info(
@@ -281,6 +290,24 @@ class BaseTableView(discord.ui.View):
                             f"删除条目 {item_id} 的向量时出错: {e}", exc_info=True
                         )
                         # 注意：即使向量删除失败，主记录也已删除，这里只记录错误。
+
+                    if discord_id_for_memory_cleanup:
+                        try:
+                            deleted = await personal_memory_vector_service.delete_vectors_for_user(
+                                discord_id_for_memory_cleanup
+                            )
+                            log.info(
+                                "已同步删除个人记忆向量: discord_id=%s, deleted=%s",
+                                discord_id_for_memory_cleanup,
+                                deleted,
+                            )
+                        except Exception as e:
+                            log.error(
+                                "同步删除个人记忆向量失败: discord_id=%s, err=%s",
+                                discord_id_for_memory_cleanup,
+                                e,
+                                exc_info=True,
+                            )
 
                     await interaction.response.edit_message(
                         content=f"🗑️ 记录 `#{item_id}` 已被成功删除。", view=None

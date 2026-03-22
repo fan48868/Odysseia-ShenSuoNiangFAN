@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 
 @tool_metadata(
     name="查询资料",
-    description="查询用户的类脑币余额、头像、角色等信息",
+    description="查询用户的类脑币余额、头像、横幅、角色等信息",
     emoji="👤",
     category="用户信息",
 )
@@ -26,13 +26,14 @@ async def get_user_profile(
     """
     查询用户的个人资料，可选择性地包括多个字段。
     [调用指南]
-    - **自主决策**: 只要认为有必要就可以调用
+    - **自主决策**: 仅当用户规定，或者很有必要时才调用。不要滥用。
     - **按需查询**: 根据上下文，在 `queries` 列表中指定一个或多个需要查询的字段，以获取必要的信息。
     - **查询当前对话用户**: 如果你要查询当然对话用户信息,系统会自动提供用户的数字ID，无需填写 `user_id`,调用工具即可。
+    - **查询机器人自己**: 可将 `user_id` 填写为 `"myself"`，程序会自动解析为当前机器人账号的 ID。
 
     Args:
-        user_id (str): 目标用户的 Discord 数字ID。**注意**: 如果是查询当前对话用户, 此参数将由系统自动填充, 模型无需处理。
-        queries (List[str]): 需要查询的字段列表。有效值: "balance", "avatar", "roles"。
+        user_id (str): 目标用户的 Discord 数字ID，或 `"myself"`（表示机器人自己）。**注意**: 如果是查询当前对话用户, 此参数将由系统自动填充, 模型无需处理。
+        queries (List[str]): 需要查询的字段列表。有效值: "balance", "avatar", "banner", "roles"。(余额，头像，横幅，身份组)。
 
     Returns:
         一个包含查询结果和状态的字典。
@@ -49,10 +50,16 @@ async def get_user_profile(
             f"--- [工具执行]: get_user_profile, user_id={user_id}, queries={queries} ---"
         )
 
-    if not user_id or not user_id.isdigit():
-        return {"error": f"Invalid or missing user_id provided: {user_id}"}
+    normalized_user_id = (user_id or "").strip()
 
-    target_id = int(user_id)
+    if normalized_user_id.lower() == "myself":
+        if not bot.user or not bot.user.id:
+            return {"error": "Bot user is not available for user_id='myself'."}
+        target_id = int(bot.user.id)
+    elif normalized_user_id.isdigit():
+        target_id = int(normalized_user_id)
+    else:
+        return {"error": f"Invalid or missing user_id provided: {user_id}"}
     # 使用集合处理 queries 以提高效率并自动去重
     query_set = set(queries)
 
@@ -97,7 +104,38 @@ async def get_user_profile(
             result["errors"].append(error_msg)
             log.error(error_msg, exc_info=True)
 
-    # 2. 查询角色 (Roles)
+    # 2. 查询横幅 (Banner)
+    if "banner" in query_set:
+        try:
+            user = await bot.fetch_user(target_id)
+            if user and user.banner:
+                banner_url = str(user.banner.url)
+                result["profile"]["banner_url"] = banner_url
+
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(banner_url)
+                    response.raise_for_status()
+                    image_bytes = response.content
+                    result["profile"]["banner_image_base64"] = base64.b64encode(
+                        image_bytes
+                    ).decode("utf-8")
+
+                result["queries_successful"].append("banner")
+                log.info(f"成功获取用户 {target_id} 的横幅 URL 并下载了图片。")
+            else:
+                result["errors"].append("User has no banner.")
+        except discord.NotFound:
+            result["errors"].append("User not found on Discord for banner query.")
+        except httpx.HTTPStatusError as e:
+            error_msg = f"下载横幅时发生HTTP错误: {e}"
+            result["errors"].append(error_msg)
+            log.error(error_msg, exc_info=True)
+        except Exception as e:
+            error_msg = f"获取横幅时发生未知错误: {str(e)}"
+            result["errors"].append(error_msg)
+            log.error(error_msg, exc_info=True)
+
+    # 3. 查询角色 (Roles)
     if "roles" in query_set:
         if not guild:
             result["errors"].append(
@@ -121,7 +159,7 @@ async def get_user_profile(
                 result["errors"].append(error_msg)
                 log.error(error_msg, exc_info=True)
 
-    # 3. 查询余额 (Balance)
+    # 4. 查询余额 (Balance)
     if "balance" in query_set:
         try:
             balance = await coin_service.get_balance(target_id)

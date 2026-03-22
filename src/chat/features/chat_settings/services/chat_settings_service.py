@@ -41,16 +41,6 @@ class ChatSettingsService:
         )
         warm_up_channels = await self.db_manager.get_warm_up_channels(guild_id)
 
-        # api_fallback_enabled 从全局设置读取
-        api_fallback_value = await self.db_manager.get_global_setting(
-            "api_fallback_enabled"
-        )
-        api_fallback_enabled = (
-            api_fallback_value.lower() in ("true", "1", "yes", "on")
-            if api_fallback_value is not None
-            else True
-        )
-
         settings = {
             "global": {
                 "chat_enabled": global_config_row["chat_enabled"]
@@ -59,7 +49,6 @@ class ChatSettingsService:
                 "warm_up_enabled": global_config_row["warm_up_enabled"]
                 if global_config_row
                 else True,
-                "api_fallback_enabled": api_fallback_enabled,
             },
             "channels": {
                 config["entity_id"]: {
@@ -85,12 +74,16 @@ class ChatSettingsService:
         config = await self.db_manager.get_global_chat_config(guild_id)
         return config["warm_up_enabled"] if config else True
 
-    async def is_api_fallback_enabled(self, guild_id: int) -> bool:
-        """检查API fallback功能是否开启（全局设置）。"""
-        value = await self.db_manager.get_global_setting("api_fallback_enabled")
-        if value is not None:
-            return value.lower() in ("true", "1", "yes", "on")
-        return True  # 默认开启
+    async def is_global_dm_enabled(self) -> bool:
+        """检查机器人私信功能是否全局开启。"""
+        value = await self.db_manager.get_global_setting("global_dm_enabled")
+        return value.lower() == "true" if value is not None else True
+
+    async def set_global_dm_enabled(self, enabled: bool) -> None:
+        """设置机器人私信功能的全局开关。"""
+        await self.db_manager.set_global_setting(
+            "global_dm_enabled", "true" if enabled else "false"
+        )
 
     async def get_effective_channel_config(
         self, channel: discord.abc.GuildChannel
@@ -266,8 +259,7 @@ class ChatSettingsService:
 
     def set_winning_faction(self, faction_id: Optional[str]):
         """设置当前活动的获胜派系。"""
-        if faction_id is not None:
-            event_service.set_winning_faction(faction_id)
+        event_service.set_winning_faction(faction_id)
 
     def get_winning_faction(self) -> Optional[str]:
         """获取当前活动的获胜派系。"""

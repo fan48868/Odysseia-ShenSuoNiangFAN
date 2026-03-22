@@ -310,6 +310,53 @@ class CommunityMemberChunk(Base):
         return f"<CommunityMemberChunk(id={self.id}, profile_id={self.profile_id}, chunk_index={self.chunk_index})>"
 
 
+class PersonalMemoryChunk(Base):
+    """
+    代表一个用户的单条个人记忆（长期/近期）及其向量。
+    用于在对话时对个人记忆做向量召回。
+    """
+
+    __tablename__ = "personal_memory_chunks"
+    __table_args__ = (
+        # HNSW 索引用于向量搜索
+        Index(
+            "idx_pm_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding": "halfvec_cosine_ops"},
+        ),
+        # 按用户过滤的高频查询字段
+        Index("idx_pm_discord_id", "discord_id"),
+        {"schema": COMMUNITY_SCHEMA},
+    )
+
+    id = Column(Integer, primary_key=True)
+    discord_id = Column(String, nullable=False, comment="成员的Discord数字ID（字符串）")
+
+    # long_term / recent / unknown
+    memory_type = Column(
+        String,
+        nullable=False,
+        default="unknown",
+        server_default="unknown",
+        comment="记忆类型：long_term/recent/unknown",
+    )
+    memory_text = Column(Text, nullable=False, comment="单条记忆文本")
+
+    embedding = Column(
+        HALFVEC(EMBEDDING_DIMENSION),
+        nullable=False,
+        comment="此记忆条目的半精度嵌入向量",
+    )
+
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    def __repr__(self):
+        return f"<PersonalMemoryChunk(id={self.id}, discord_id='{self.discord_id}', memory_type='{self.memory_type}')>"
+
+
 class TokenUsage(Base):
     """
     记录每天的Token使用情况。
