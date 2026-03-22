@@ -21,6 +21,7 @@ class ChatSettingsService:
         cooldown_seconds: Optional[int],
         cooldown_duration: Optional[int],
         cooldown_limit: Optional[int],
+        active_chat_cache_enabled: Optional[bool],
     ):
         """设置频道或分类的聊天配置，支持所有CD模式。"""
         await self.db_manager.update_channel_config(
@@ -31,6 +32,7 @@ class ChatSettingsService:
             cooldown_seconds=cooldown_seconds,
             cooldown_duration=cooldown_duration,
             cooldown_limit=cooldown_limit,
+            active_chat_cache_enabled=active_chat_cache_enabled,
         )
 
     async def get_guild_settings(self, guild_id: int) -> Dict[str, Any]:
@@ -57,12 +59,37 @@ class ChatSettingsService:
                     "cooldown_seconds": config["cooldown_seconds"],
                     "cooldown_duration": config["cooldown_duration"],
                     "cooldown_limit": config["cooldown_limit"],
+                    "active_chat_cache_enabled": config["active_chat_cache_enabled"],
                 }
                 for config in channel_configs_rows
             },
             "warm_up_channels": warm_up_channels,
         }
         return settings
+
+    async def is_active_chat_cache_enabled(
+        self, channel: discord.abc.GuildChannel | discord.Thread
+    ) -> bool:
+        """检查具体频道是否开启了主动聊天缓存。线程继承父文本频道的开关。"""
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return False
+
+        target_entity_id = getattr(channel, "id", None)
+        parent = getattr(channel, "parent", None)
+        owner_id = getattr(channel, "owner_id", None)
+        if parent is not None and owner_id is not None and getattr(parent, "id", None):
+            target_entity_id = parent.id
+
+        if target_entity_id is None:
+            return False
+
+        config_row = await self.db_manager.get_channel_config(guild.id, target_entity_id)
+        if not config_row:
+            return False
+
+        value = config_row["active_chat_cache_enabled"]
+        return bool(value) if value is not None else False
 
     async def is_chat_globally_enabled(self, guild_id: int) -> bool:
         """检查聊天功能是否在服务器内全局开启。"""

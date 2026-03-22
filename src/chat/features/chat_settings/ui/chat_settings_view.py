@@ -431,11 +431,14 @@ class ChatSettingsView(View):
                 new_view.message = self.message
                 await self.message.edit(content="设置已更新。", view=new_view)
 
+        entity_type_label = "分类" if entity_type == "category" else "频道"
+
         modal = ChatSettingsModal(
-            title=f"编辑 {entity.name} 的设置",
+            title=f"编辑{entity_type_label} {entity.name} 的设置",
             current_config=current_config,
             on_submit_callback=modal_callback,
-            entity_name=entity.name,
+            entity_name=f"{entity_type_label}:{entity.name}",
+            include_active_chat_cache_option=entity_type == "channel",
         )
         await interaction.response.send_modal(modal)
 
@@ -459,6 +462,7 @@ class ChatSettingsView(View):
                 cooldown_seconds=settings.get("cooldown_seconds"),
                 cooldown_duration=settings.get("cooldown_duration"),
                 cooldown_limit=settings.get("cooldown_limit"),
+                active_chat_cache_enabled=settings.get("active_chat_cache_enabled"),
             )
 
             if not self.guild:
@@ -485,12 +489,21 @@ class ChatSettingsView(View):
             if cooldown_duration is not None and cooldown_limit is not None:
                 freq_str = f"{cooldown_duration} 秒内最多 {cooldown_limit} 次"
 
+            active_chat_cache_str = "继承"
+            active_chat_cache_enabled = settings.get("active_chat_cache_enabled")
+            if active_chat_cache_enabled is True:
+                active_chat_cache_str = "✅ 开启"
+            if active_chat_cache_enabled is False:
+                active_chat_cache_str = "❌ 关闭"
+
             feedback = (
                 f"✅ 已成功为 **{entity_name}** ({entity_type}) 更新设置。\n"
                 f"🔹 **聊天总开关**: {enabled_str}\n"
                 f"🔹 **固定冷却(秒)**: {cd_sec_str}\n"
                 f"🔹 **频率限制**: {freq_str}"
             )
+            if entity_type == "channel":
+                feedback += f"\n🔹 **主动聊天缓存**: {active_chat_cache_str}"
 
             # 确保交互未被响应
             if not interaction.response.is_done():

@@ -15,6 +15,7 @@ from src.chat.features.odysseia_coin.service.shop_service import shop_service
 from src.chat.features.chat_settings.services.chat_settings_service import (
     chat_settings_service,
 )
+from src.chat.services.context_service_test import get_context_service
 
 log = logging.getLogger(__name__)
 
@@ -89,9 +90,33 @@ class CoinCog(commands.Cog):
 
         return match.group(0)
 
+    async def _capture_active_chat_cache(self, message: discord.Message) -> None:
+        if not message.guild:
+            return
+
+        if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
+            return
+
+        try:
+            if not await chat_settings_service.is_active_chat_cache_enabled(
+                message.channel
+            ):
+                return
+
+            await get_context_service().record_message_for_active_cache(message)
+        except RuntimeError:
+            log.warning("[主动聊天缓存] ContextServiceTest 尚未初始化，跳过本条消息。")
+        except Exception as e:
+            log.warning(
+                f"[主动聊天缓存] 收集频道 {message.channel.id} 消息时出错: {e}",
+                exc_info=True,
+            )
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """监听用户每日首次发言"""
+        await self._capture_active_chat_cache(message)
+
         if message.author.bot:
             return
 

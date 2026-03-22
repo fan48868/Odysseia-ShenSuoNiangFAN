@@ -343,6 +343,7 @@ class ChatDatabaseManager:
                     entity_type TEXT NOT NULL, -- 'channel' or 'category'
                     is_chat_enabled BOOLEAN, -- 可空，为空则继承上级或全局
                     cooldown_seconds INTEGER, -- 可空
+                    active_chat_cache_enabled BOOLEAN, -- 可空，仅具体频道使用；仅明确为true时开启
                     UNIQUE(guild_id, entity_id)
                 );
             """)
@@ -382,6 +383,13 @@ class ChatDatabaseManager:
                     "ALTER TABLE channel_chat_config ADD COLUMN cooldown_limit INTEGER;"
                 )
                 log.info("已向 channel_chat_config 表添加 cooldown_limit 列。")
+            if "active_chat_cache_enabled" not in column_names_config:
+                cursor.execute(
+                    "ALTER TABLE channel_chat_config ADD COLUMN active_chat_cache_enabled BOOLEAN;"
+                )
+                log.info(
+                    "已向 channel_chat_config 表添加 active_chat_cache_enabled 列。"
+                )
 
             # --- 活动系统表 ---
             cursor.execute("""
@@ -1131,17 +1139,28 @@ class ChatDatabaseManager:
         cooldown_seconds: Optional[int],
         cooldown_duration: Optional[int],
         cooldown_limit: Optional[int],
+        active_chat_cache_enabled: Optional[bool],
     ) -> None:
         """更新或创建频道/分类的聊天配置，支持两种CD模式。"""
         query = """
-            INSERT INTO channel_chat_config (guild_id, entity_id, entity_type, is_chat_enabled, cooldown_seconds, cooldown_duration, cooldown_limit)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO channel_chat_config (
+                guild_id,
+                entity_id,
+                entity_type,
+                is_chat_enabled,
+                cooldown_seconds,
+                cooldown_duration,
+                cooldown_limit,
+                active_chat_cache_enabled
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, entity_id) DO UPDATE SET
                 entity_type = excluded.entity_type,
                 is_chat_enabled = excluded.is_chat_enabled,
                 cooldown_seconds = excluded.cooldown_seconds,
                 cooldown_duration = excluded.cooldown_duration,
-                cooldown_limit = excluded.cooldown_limit;
+                cooldown_limit = excluded.cooldown_limit,
+                active_chat_cache_enabled = excluded.active_chat_cache_enabled;
         """
         params = (
             guild_id,
@@ -1151,6 +1170,7 @@ class ChatDatabaseManager:
             cooldown_seconds,
             cooldown_duration,
             cooldown_limit,
+            active_chat_cache_enabled,
         )
         await self._execute(self._db_transaction, query, params, commit=True)
         log.info(
