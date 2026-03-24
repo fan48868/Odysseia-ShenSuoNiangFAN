@@ -757,6 +757,7 @@ class CustomModelClient:
         api_url = self._build_chat_completions_url(api_url)
         request_payload = dict(payload)
         request_payload["stream"] = True
+        first_token_timeout_seconds = 5.0
         idle_timeout_seconds = float(
             runtime_config.get("stream_idle_timeout_seconds", 5.0) or 5.0
         )
@@ -813,20 +814,65 @@ class CustomModelClient:
                 line_iterator = current_response.aiter_lines()
                 saw_non_sse_payload = False
                 used_streaming = False
+                received_first_meaningful_token = False
+                loop = asyncio.get_running_loop()
+                stream_started_at = loop.time()
+                last_meaningful_output_at = stream_started_at
 
                 while True:
+                    now = loop.time()
+                    if received_first_meaningful_token:
+                        timeout_seconds = max(
+                            idle_timeout_seconds
+                            - (now - last_meaningful_output_at),
+                            0.0,
+                        )
+                    else:
+                        timeout_seconds = max(
+                            first_token_timeout_seconds
+                            - (now - stream_started_at),
+                            0.0,
+                        )
+
+                    if timeout_seconds <= 0:
+                        if received_first_meaningful_token:
+                            raise httpx.ReadTimeout(
+                                (
+                                    "[Custom] Stream idle timeout: no meaningful output "
+                                    f"received within {idle_timeout_seconds:.1f}s"
+                                ),
+                                request=current_response.request,
+                            )
+
+                        raise httpx.ReadTimeout(
+                            (
+                                "[Custom] First token timeout: no meaningful output "
+                                f"received within {first_token_timeout_seconds:.1f}s"
+                            ),
+                            request=current_response.request,
+                        )
+
                     try:
                         line = await asyncio.wait_for(
                             line_iterator.__anext__(),
-                            timeout=idle_timeout_seconds,
+                            timeout=timeout_seconds,
                         )
                     except StopAsyncIteration:
                         break
                     except asyncio.TimeoutError as exc:
+                        if received_first_meaningful_token:
+                            raise httpx.ReadTimeout(
+                                (
+                                    "[Custom] Stream idle timeout: no meaningful output "
+                                    f"received within {idle_timeout_seconds:.1f}s"
+                                ),
+                                request=current_response.request,
+                            ) from exc
+
                         raise httpx.ReadTimeout(
                             (
-                                "[Custom] Stream idle timeout: no meaningful output "
-                                f"received within {idle_timeout_seconds:.1f}s"
+                                "[Custom] First token timeout: no meaningful output "
+                                f"received within {first_token_timeout_seconds:.1f}s"
                             ),
                             request=current_response.request,
                         ) from exc
@@ -842,6 +888,10 @@ class CustomModelClient:
                         break
 
                     used_streaming = True
+
+                    if self._is_meaningful_sse_data_line(stripped):
+                        received_first_meaningful_token = True
+                        last_meaningful_output_at = loop.time()
 
                 if saw_non_sse_payload and not used_streaming:
                     log.info(
