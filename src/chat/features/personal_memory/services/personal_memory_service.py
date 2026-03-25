@@ -9,7 +9,7 @@ from src.database.database import AsyncSessionLocal
 from src.database.models import CommunityMemberProfile
 from src.chat.config.chat_config import (
     PROMPT_CONFIG,
-    SUMMARY_MODEL,
+    get_summary_model,
     GEMINI_SUMMARY_GEN_CONFIG,
     PERSONAL_MEMORY_CONFIG,
 )
@@ -351,7 +351,7 @@ class PersonalMemoryService:
             ai_response = await gemini_service.generate_simple_response(
                 prompt=final_prompt,
                 generation_config=GEMINI_SUMMARY_GEN_CONFIG,
-                model_name=SUMMARY_MODEL,
+                model_name=get_summary_model(),
             )
 
             if ai_response:
@@ -403,7 +403,7 @@ class PersonalMemoryService:
                 selection_response = await gemini_service.generate_simple_response(
                     prompt=selection_prompt,
                     generation_config=GEMINI_SUMMARY_GEN_CONFIG,
-                    model_name=SUMMARY_MODEL,
+                    model_name=get_summary_model(),
                 )
 
                 if selection_response:
@@ -475,7 +475,7 @@ class PersonalMemoryService:
                     force_response = await gemini_service.generate_simple_response(
                         prompt=force_prompt,
                         generation_config=GEMINI_SUMMARY_GEN_CONFIG,
-                        model_name=SUMMARY_MODEL,
+                        model_name=get_summary_model(),
                     )
 
                     if not force_response:

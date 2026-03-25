@@ -40,7 +40,13 @@ HIDDEN_TOOLS = ["issue_user_warning"]
 GEMINI_MODEL = "gemini-2.5-flash"
 
 # 用于个人记忆摘要的模型。
-SUMMARY_MODEL = "custom"
+SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "custom")
+
+
+def get_summary_model() -> str:
+    """Get the current summary model from the live process environment."""
+    summary_model = str(os.environ.get("SUMMARY_MODEL", SUMMARY_MODEL) or "").strip()
+    return summary_model or SUMMARY_MODEL
 
 # --- 自定义 Gemini 端点配置 ---
 # 用于通过自定义 URL (例如公益站) 调用模型

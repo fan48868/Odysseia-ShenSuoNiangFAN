@@ -12,6 +12,7 @@ class AIModelSettingsModal(discord.ui.Modal):
         *,
         title: str,
         current_model: str,
+        current_summary_model: str,
         available_models: List[str],
         on_submit_callback: Callable[[Interaction, Dict[str, Any]], Awaitable[None]],
     ):
@@ -30,7 +31,19 @@ class AIModelSettingsModal(discord.ui.Modal):
         )
         self.add_item(self.model_input)
 
+        self.summary_model_input = TextInput(
+            label="输入记忆摘要模型名称",
+            placeholder=placeholder_text,
+            default=current_summary_model,
+            custom_id="summary_model_input",
+        )
+        self.add_item(self.summary_model_input)
+
     async def on_submit(self, interaction: Interaction):
         entered_model = self.model_input.value.strip()
-        settings = {"ai_model": entered_model}
+        entered_summary_model = self.summary_model_input.value.strip()
+        settings = {
+            "ai_model": entered_model,
+            "summary_model": entered_summary_model,
+        }
         await self.on_submit_callback(interaction, settings)

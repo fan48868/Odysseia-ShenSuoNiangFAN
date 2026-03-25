@@ -518,20 +518,42 @@ class ChatSettingsView(View):
     async def on_ai_model_settings(self, interaction: Interaction):
         """打开AI模型设置模态框。"""
         current_model = await self.service.get_current_ai_model()
+        current_summary_model = await self.service.get_current_summary_model()
         available_models = self.service.get_available_ai_models()
 
         async def modal_callback(
             modal_interaction: Interaction, settings: Dict[str, Any]
         ):
             new_model = (settings.get("ai_model") or "").strip()
+            new_summary_model = (settings.get("summary_model") or "").strip()
             if not new_model:
                 await modal_interaction.response.send_message(
                     "❌ 没有选择任何模型。", ephemeral=True
                 )
                 return
+            if not new_summary_model:
+                await modal_interaction.response.send_message(
+                    "❌ 没有填写记忆摘要模型。", ephemeral=True
+                )
+                return
+
+            normalized_model = "custom" if new_model.lower() == "custom" else new_model
+            normalized_summary_model = (
+                "custom"
+                if new_summary_model.lower() == "custom"
+                else new_summary_model
+            )
+            summary_persisted = await self.service.set_summary_model(
+                normalized_summary_model
+            )
+            summary_persist_note = (
+                "✅ 已写入 `.env` 并立即生效"
+                if summary_persisted
+                else "⚠️ 写入 `.env` 失败，已仅对当前进程生效（重启后可能失效）"
+            )
 
             # custom 模型：立即切换，然后弹出可选配置提示
-            if new_model.lower() == "custom":
+            if normalized_model == "custom":
                 await self.service.set_ai_model("custom")
                 view = CustomModelConfigView(
                     opener_user_id=modal_interaction.user.id,
@@ -539,7 +561,10 @@ class ChatSettingsView(View):
                 )
                 await modal_interaction.response.send_message(
                     (
-                        "✅ 已切换到 **custom** 模型。\n"
+                        "✅ 已切换到 **custom** 聊天模型，并同步更新记忆摘要模型。\n"
+                        f"- 聊天模型: `custom`\n"
+                        f"- 记忆摘要模型: `{normalized_summary_model}`\n"
+                        f"- 摘要模型持久化: {summary_persist_note}\n"
                         "可以配置 `CUSTOM_MODEL_URL` / `CUSTOM_MODEL_API_KEY` / `CUSTOM_MODEL_NAME`。\n"
                         "点击下方按钮打开配置窗口（默认值将从项目根目录 `.env` 读取）。"
                     ),
@@ -548,14 +573,21 @@ class ChatSettingsView(View):
                 )
                 return
 
-            await self.service.set_ai_model(new_model)
+            await self.service.set_ai_model(normalized_model)
             await modal_interaction.response.send_message(
-                f"✅ 已成功将AI模型更换为: **{new_model}**", ephemeral=True
+                (
+                    "✅ 已成功切换模型。\n"
+                    f"- 聊天模型: `{normalized_model}`\n"
+                    f"- 记忆摘要模型: `{normalized_summary_model}`\n"
+                    f"- 摘要模型持久化: {summary_persist_note}"
+                ),
+                ephemeral=True,
             )
 
         modal = AIModelSettingsModal(
             title="更换全局AI模型",
             current_model=current_model,
+            current_summary_model=current_summary_model,
             available_models=available_models,
             on_submit_callback=modal_callback,
         )

@@ -1,9 +1,15 @@
 import discord
+import logging
+import os
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv, set_key
 from src.chat.utils.database import chat_db_manager
 from src.chat.services.event_service import event_service
+from src.chat.config import chat_config as app_config
 from src import config
+
+log = logging.getLogger(__name__)
 
 
 class ChatSettingsService:
@@ -298,6 +304,10 @@ class ChatSettingsService:
         """获取所有可用的AI模型。"""
         return config.AVAILABLE_AI_MODELS
 
+    @staticmethod
+    def _get_env_path() -> str:
+        return os.path.join(config.BASE_DIR, ".env")
+
     async def get_current_ai_model(self) -> str:
         """获取当前设置的全局AI模型。"""
         model = await self.db_manager.get_global_setting("ai_model")
@@ -306,6 +316,34 @@ class ChatSettingsService:
     async def set_ai_model(self, model: str) -> None:
         """设置全局AI模型。"""
         await self.db_manager.set_global_setting("ai_model", model)
+
+    async def get_current_summary_model(self) -> str:
+        """Get the current personal-memory summary model."""
+        return app_config.get_summary_model()
+
+    async def set_summary_model(self, model: str) -> bool:
+        """Persist the summary model to the current process and the root .env file."""
+        normalized_model = str(model or "").strip()
+        if not normalized_model:
+            raise ValueError("SUMMARY_MODEL cannot be empty.")
+
+        os.environ["SUMMARY_MODEL"] = normalized_model
+
+        env_path = self._get_env_path()
+        try:
+            os.makedirs(os.path.dirname(env_path), exist_ok=True)
+            set_key(
+                env_path,
+                "SUMMARY_MODEL",
+                normalized_model,
+                quote_mode="always",
+                encoding="utf-8",
+            )
+            load_dotenv(env_path, override=True, encoding="utf-8")
+            return True
+        except Exception as e:
+            log.warning("写回 .env 失败（将仅本次进程生效）: %s", e, exc_info=True)
+            return False
 
     # --- AI Model Usage ---
 
