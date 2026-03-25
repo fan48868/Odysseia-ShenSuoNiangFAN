@@ -757,9 +757,16 @@ class CustomModelClient:
         api_url = self._build_chat_completions_url(api_url)
         request_payload = dict(payload)
         request_payload["stream"] = True
+        network_timeout_seconds = 5.0
         first_token_timeout_seconds = 5.0
         idle_timeout_seconds = float(
             runtime_config.get("stream_idle_timeout_seconds", 5.0) or 5.0
+        )
+        request_timeout = httpx.Timeout(
+            connect=network_timeout_seconds,
+            read=network_timeout_seconds,
+            write=max(network_timeout_seconds, 10.0),
+            pool=network_timeout_seconds,
         )
         headers = {
             "Content-Type": "application/json",
@@ -768,143 +775,240 @@ class CustomModelClient:
         used_streaming = False
         response: Optional[httpx.Response] = None
         max_key_attempts = max(total_api_keys, 1)
+        loop = asyncio.get_running_loop()
 
         for attempt in range(max_key_attempts):
             api_key, api_key_index, total_api_keys = self._get_active_api_key_snapshot(
                 runtime_config
             )
             headers["Authorization"] = f"Bearer {api_key}"
+            request_started_at = loop.time()
+            stream_phase = "awaiting_response_headers"
+            body_line_count = 0
+            meaningful_line_count = 0
+            used_streaming = False
+            received_first_meaningful_token = False
+            saw_non_sse_payload = False
 
-            async with http_client.stream(
-                "POST",
-                api_url,
-                headers=headers,
-                json=request_payload,
-            ) as current_response:
-                if current_response.is_error:
-                    await current_response.aread()
-                    response_text = current_response.text or ""
-                    combined_error_text = (
-                        f"{current_response.status_code} {current_response.reason_phrase}"
-                    )
-                    if response_text:
+            try:
+                async with http_client.stream(
+                    "POST",
+                    api_url,
+                    headers=headers,
+                    json=request_payload,
+                    timeout=request_timeout,
+                ) as current_response:
+                    stream_phase = "response_headers_received"
+
+                    if current_response.is_error:
+                        stream_phase = "error_response_body"
+                        await current_response.aread()
+                        response_text = current_response.text or ""
                         combined_error_text = (
-                            f"{combined_error_text} | {response_text}"
+                            f"{current_response.status_code} {current_response.reason_phrase}"
                         )
+                        if response_text:
+                            combined_error_text = (
+                                f"{combined_error_text} | {response_text}"
+                            )
 
-                    if self._is_payment_required_error(
-                        current_response.status_code, combined_error_text
-                    ):
-                        rotated = await self._rotate_to_next_api_key(
-                            failed_api_key=api_key,
-                            failed_index=api_key_index,
-                            total_keys=total_api_keys,
-                            reason_preview=combined_error_text[:1000],
-                        )
-                        if (
-                            rotated
-                            and total_api_keys > 1
-                            and attempt < max_key_attempts - 1
+                        if self._is_payment_required_error(
+                            current_response.status_code, combined_error_text
                         ):
-                            continue
+                            rotated = await self._rotate_to_next_api_key(
+                                failed_api_key=api_key,
+                                failed_index=api_key_index,
+                                total_keys=total_api_keys,
+                                reason_preview=combined_error_text[:1000],
+                            )
+                            if (
+                                rotated
+                                and total_api_keys > 1
+                                and attempt < max_key_attempts - 1
+                            ):
+                                continue
 
-                    current_response.raise_for_status()
+                        current_response.raise_for_status()
 
-                body_lines: List[str] = []
-                line_iterator = current_response.aiter_lines()
-                saw_non_sse_payload = False
-                used_streaming = False
-                received_first_meaningful_token = False
-                loop = asyncio.get_running_loop()
-                stream_started_at = loop.time()
-                last_meaningful_output_at = stream_started_at
+                    body_lines: List[str] = []
+                    line_iterator = current_response.aiter_lines()
+                    used_streaming = False
+                    stream_phase = "response_body"
+                    stream_started_at = loop.time()
+                    last_meaningful_output_at = stream_started_at
 
-                while True:
-                    now = loop.time()
-                    if received_first_meaningful_token:
-                        timeout_seconds = max(
-                            idle_timeout_seconds
-                            - (now - last_meaningful_output_at),
-                            0.0,
-                        )
-                    else:
-                        timeout_seconds = max(
-                            first_token_timeout_seconds
-                            - (now - stream_started_at),
-                            0.0,
-                        )
-
-                    if timeout_seconds <= 0:
+                    while True:
+                        now = loop.time()
                         if received_first_meaningful_token:
+                            timeout_seconds = max(
+                                idle_timeout_seconds
+                                - (now - last_meaningful_output_at),
+                                0.0,
+                            )
+                        else:
+                            timeout_seconds = max(
+                                first_token_timeout_seconds
+                                - (now - stream_started_at),
+                                0.0,
+                            )
+
+                        if timeout_seconds <= 0:
+                            elapsed_total_seconds = now - request_started_at
+                            if received_first_meaningful_token:
+                                log.warning(
+                                    "[Custom] Stream idle timeout | attempt=%s/%s | elapsed=%.2fs | "
+                                    "idle_timeout=%.1fs | body_lines=%s | meaningful_lines=%s | "
+                                    "model=%s | url=%s",
+                                    attempt + 1,
+                                    max_key_attempts,
+                                    elapsed_total_seconds,
+                                    idle_timeout_seconds,
+                                    body_line_count,
+                                    meaningful_line_count,
+                                    str(request_payload.get("model", "")),
+                                    api_url,
+                                )
+                                raise httpx.ReadTimeout(
+                                    (
+                                        "[Custom] Stream idle timeout: no meaningful output "
+                                        f"received within {idle_timeout_seconds:.1f}s"
+                                    ),
+                                    request=current_response.request,
+                                )
+
+                            log.warning(
+                                "[Custom] First token timeout | attempt=%s/%s | elapsed=%.2fs | "
+                                "first_token_timeout=%.1fs | body_lines=%s | meaningful_lines=%s | "
+                                "model=%s | url=%s",
+                                attempt + 1,
+                                max_key_attempts,
+                                elapsed_total_seconds,
+                                first_token_timeout_seconds,
+                                body_line_count,
+                                meaningful_line_count,
+                                str(request_payload.get("model", "")),
+                                api_url,
+                            )
                             raise httpx.ReadTimeout(
                                 (
-                                    "[Custom] Stream idle timeout: no meaningful output "
-                                    f"received within {idle_timeout_seconds:.1f}s"
+                                    "[Custom] First token timeout: no meaningful output "
+                                    f"received within {first_token_timeout_seconds:.1f}s"
                                 ),
                                 request=current_response.request,
                             )
 
-                        raise httpx.ReadTimeout(
-                            (
-                                "[Custom] First token timeout: no meaningful output "
-                                f"received within {first_token_timeout_seconds:.1f}s"
-                            ),
-                            request=current_response.request,
-                        )
+                        try:
+                            line = await asyncio.wait_for(
+                                line_iterator.__anext__(),
+                                timeout=timeout_seconds,
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError as exc:
+                            elapsed_total_seconds = loop.time() - request_started_at
+                            if received_first_meaningful_token:
+                                log.warning(
+                                    "[Custom] Stream idle timeout | attempt=%s/%s | elapsed=%.2fs | "
+                                    "idle_timeout=%.1fs | body_lines=%s | meaningful_lines=%s | "
+                                    "model=%s | url=%s",
+                                    attempt + 1,
+                                    max_key_attempts,
+                                    elapsed_total_seconds,
+                                    idle_timeout_seconds,
+                                    body_line_count,
+                                    meaningful_line_count,
+                                    str(request_payload.get("model", "")),
+                                    api_url,
+                                )
+                                raise httpx.ReadTimeout(
+                                    (
+                                        "[Custom] Stream idle timeout: no meaningful output "
+                                        f"received within {idle_timeout_seconds:.1f}s"
+                                    ),
+                                    request=current_response.request,
+                                ) from exc
 
-                    try:
-                        line = await asyncio.wait_for(
-                            line_iterator.__anext__(),
-                            timeout=timeout_seconds,
-                        )
-                    except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError as exc:
-                        if received_first_meaningful_token:
+                            log.warning(
+                                "[Custom] First token timeout | attempt=%s/%s | elapsed=%.2fs | "
+                                "first_token_timeout=%.1fs | body_lines=%s | meaningful_lines=%s | "
+                                "model=%s | url=%s",
+                                attempt + 1,
+                                max_key_attempts,
+                                elapsed_total_seconds,
+                                first_token_timeout_seconds,
+                                body_line_count,
+                                meaningful_line_count,
+                                str(request_payload.get("model", "")),
+                                api_url,
+                            )
                             raise httpx.ReadTimeout(
                                 (
-                                    "[Custom] Stream idle timeout: no meaningful output "
-                                    f"received within {idle_timeout_seconds:.1f}s"
+                                    "[Custom] First token timeout: no meaningful output "
+                                    f"received within {first_token_timeout_seconds:.1f}s"
                                 ),
                                 request=current_response.request,
                             ) from exc
 
-                        raise httpx.ReadTimeout(
-                            (
-                                "[Custom] First token timeout: no meaningful output "
-                                f"received within {first_token_timeout_seconds:.1f}s"
-                            ),
-                            request=current_response.request,
-                        ) from exc
+                        body_lines.append(line)
+                        body_line_count += 1
+                        stripped = line.strip()
 
-                    body_lines.append(line)
-                    stripped = line.strip()
+                        if not stripped or stripped.startswith(":"):
+                            continue
 
-                    if not stripped or stripped.startswith(":"):
-                        continue
+                        if not stripped.startswith("data:"):
+                            saw_non_sse_payload = True
+                            break
 
-                    if not stripped.startswith("data:"):
-                        saw_non_sse_payload = True
-                        break
+                        used_streaming = True
 
-                    used_streaming = True
+                        if self._is_meaningful_sse_data_line(stripped):
+                            received_first_meaningful_token = True
+                            meaningful_line_count += 1
+                            last_meaningful_output_at = loop.time()
 
-                    if self._is_meaningful_sse_data_line(stripped):
-                        received_first_meaningful_token = True
-                        last_meaningful_output_at = loop.time()
+                    if saw_non_sse_payload and not used_streaming:
+                        log.info(
+                            "[Custom] Upstream returned non-SSE payload after stream request | model=%s | url=%s",
+                            str(request_payload.get("model", "")),
+                            api_url,
+                        )
 
-                if saw_non_sse_payload and not used_streaming:
-                    log.info(
-                        "[Custom] Upstream returned non-SSE payload after stream request | model=%s | url=%s",
-                        str(request_payload.get("model", "")),
-                        api_url,
+                    response = self._build_buffered_response(
+                        current_response,
+                        "\n".join(body_lines),
                     )
-
-                response = self._build_buffered_response(
-                    current_response,
-                    "\n".join(body_lines),
+                    break
+            except httpx.RequestError as exc:
+                elapsed_total_seconds = loop.time() - request_started_at
+                log.warning(
+                    "[Custom] Stream request error | attempt=%s/%s | phase=%s | elapsed=%.2fs | "
+                    "net_timeout(connect/read/write/pool)=%.1f/%.1f/%.1f/%.1f | "
+                    "first_token_timeout=%.1fs | idle_timeout=%.1fs | "
+                    "received_first_meaningful_token=%s | body_lines=%s | meaningful_lines=%s | "
+                    "used_streaming=%s | saw_non_sse_payload=%s | model=%s | url=%s | "
+                    "exc_type=%s | exc=%s",
+                    attempt + 1,
+                    max_key_attempts,
+                    stream_phase,
+                    elapsed_total_seconds,
+                    request_timeout.connect,
+                    request_timeout.read,
+                    request_timeout.write,
+                    request_timeout.pool,
+                    first_token_timeout_seconds,
+                    idle_timeout_seconds,
+                    received_first_meaningful_token,
+                    body_line_count,
+                    meaningful_line_count,
+                    used_streaming,
+                    saw_non_sse_payload,
+                    str(request_payload.get("model", "")),
+                    api_url,
+                    type(exc).__name__,
+                    exc,
                 )
-                break
+                raise
 
         if response is None:
             raise RuntimeError("[Custom] Request completed without a valid response.")
