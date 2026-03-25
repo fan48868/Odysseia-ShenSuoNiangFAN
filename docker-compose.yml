@@ -1,36 +1,33 @@
+x-app-base: &app_base
+  env_file:
+    - .env
+  environment:
+    - RUNNING_IN_DOCKER=true
+    - DB_HOST=db
+    - DB_PORT=5432
+  build:
+    context: .
+    dockerfile: .devcontainer/Dockerfile
+  image: odysseia-guidance-app:latest
+  volumes:
+    - .:/app
+  networks:
+    - bot_network
+
 services:
   bot_app:
-    restart: unless-stopped # 2. 设置重启策略
-    mem_limit: 1g # 1. 设置内存硬限制为 1GB (您可以根据VPS配置调整)
-    env_file:
-      - .env
-    environment:
-      - RUNNING_IN_DOCKER=true
-      - DB_HOST=db
-      - DB_PORT=5432
+    <<: *app_base
+    restart: unless-stopped
+    mem_limit: 1g
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    # --- 部署方式二选一 ---
-    # 方式一 (推荐): 从本地源代码构建
-    # 优点: 使用最新代码、方便调试
-    build:
-      context: .
-      dockerfile: .devcontainer/Dockerfile
-
-    # 方式二: 直接使用 Docker Hub 上的公共镜像
-    # 优点: 快速、简单、无需本地构建。使用此方式时，请注释掉上面的 'build' 部分，并取消下方 'image' 行的注释。
-    #image: echoni0n/braingirl:latest
-
     container_name: Odysseia_Guidance
     volumes:
       - .:/app
       - ./data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
-    # --- DEV请 取消 注释下面的command:sleep命令并且 注释 掉command: python ---
-    #command: sleep infinity
+    # For container debugging, replace this with: sleep infinity
     command: python3 -u -m src.main
-    networks:
-      - bot_network
     depends_on:
       db:
         condition: service_healthy
@@ -38,60 +35,39 @@ services:
         condition: service_completed_successfully
 
   db_migrate:
+    <<: *app_base
     restart: "no"
-    env_file:
-      - .env
-    environment:
-      - RUNNING_IN_DOCKER=true
-      - DB_HOST=db
-      - DB_PORT=5432
-    build:
-      context: .
-      dockerfile: .devcontainer/Dockerfile
-    volumes:
-      - .:/app
     command: alembic upgrade head
-    networks:
-      - bot_network
     depends_on:
       db:
         condition: service_healthy
 
-  #  config_web:
-  #    build:
-  #      context: .
-  #      dockerfile: .devcontainer/Dockerfile
-  #    container_name: config_web
-  #    restart: unless-stopped
-  #    env_file:
-  #      - .env
-  #    ports:
-  #      - "${CONFIG_WEB_PORT:-8080}:80"
-  #    networks:
-  #      - bot_network
-  #    volumes:
-  #      - .:/app
-  #      - /var/run/docker.sock:/var/run/docker.sock
-  #    # --- DEV请 取失 注释下面的command: sleep命令并且 注释 掉command: gunicorn ---
-  #    #command: sleep infinity
-  #    command: gunicorn --chdir ./web --worker-class eventlet -w 1 --bind 0.0.0.0:80 "web-main:web_app"
-  #    depends_on:
-  #      - db
+  # config_web:
+  #   <<: *app_base
+  #   container_name: config_web
+  #   restart: unless-stopped
+  #   ports:
+  #     - "${CONFIG_WEB_PORT:-8080}:80"
+  #   volumes:
+  #     - .:/app
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #   # For container debugging, replace this with: sleep infinity
+  #   command: gunicorn --chdir ./web --worker-class eventlet -w 1 --bind 0.0.0.0:80 "web-main:web_app"
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
 
   db:
-    # 使用官方打包好的 ParadeDB 镜像，它基于 PG16
     image: paradedb/paradedb@sha256:23079f9f0a2dbb427e413179a056a93cb892e9b6d3627dad82c12cedd22be39e
-    container_name: odysseia_pg_db # 保持与项目其余部分一致的命名
-    restart: unless-stopped # 保持与项目其余部分一致的重启策略
+    container_name: odysseia_pg_db
+    restart: unless-stopped
     environment:
-      # 沿用 .env 文件中的变量，更加灵活和安全
       POSTGRES_DB: ${POSTGRES_DB:-odysseia_db}
       POSTGRES_USER: ${POSTGRES_USER:-user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
     ports:
       - "127.0.0.1:${DB_PORT:-5432}:5432"
     volumes:
-      # 数据持久化到本地 ./pgdata 目录，并使用 PG16 的标准数据路径
       - ./pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U $$POSTGRES_USER -d $$POSTGRES_DB"]

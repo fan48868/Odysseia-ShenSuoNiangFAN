@@ -184,6 +184,8 @@ docker compose up -d
 docker compose ps
 ```
 
+说明：当前镜像会包含项目源码，便于首次部署时直接运行；同时 Docker Compose 也会在本地运行时把项目目录挂载到容器内，所以日常代码改动在当前机器上通常不需要重新 build。只有在 `requirements.txt`、Dockerfile 或需要重新打包镜像发布时，才建议重新构建镜像。
+
 **4. 初始化数据库**
 ```bash
 docker compose exec bot_app alembic upgrade head
@@ -202,7 +204,10 @@ docker compose down
 # 重启服务
 docker compose restart bot_app
 
-# 重新构建并启动（代码更新后）
+# 代码更新后直接启动/刷新容器
+docker compose up -d
+
+# 只有依赖或 Dockerfile 变化时才重新构建
 docker compose build && docker compose up -d
 
 # 查看服务状态
