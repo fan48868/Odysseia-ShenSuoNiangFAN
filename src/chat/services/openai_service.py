@@ -1713,8 +1713,8 @@ class OpenAIService:
                 )
                 return self._apply_blacklist_notice(
                     (
-                        f"{channel_label} 连接失败: {err_fields['exc_type']}。"
-                        "请检查网关地址、DNS/TLS 与网络连通性。"
+                        f"哎呀，{channel_label} 网关好像闹别扭了：{err_fields['exc_type']}。"
+                        "等会再试吧。"
                     ),
                     blacklist_punishment_active,
                 )

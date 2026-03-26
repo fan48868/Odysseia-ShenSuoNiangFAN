@@ -40,7 +40,7 @@ HIDDEN_TOOLS = ["issue_user_warning"]
 GEMINI_MODEL = "gemini-2.5-flash"
 
 # 用于个人记忆摘要的模型。
-SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "custom")
+SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "deepseek-chat")
 
 
 def get_summary_model() -> str:
