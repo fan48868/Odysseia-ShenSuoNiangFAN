@@ -59,6 +59,22 @@ class CustomModelClient:
         return default
 
     @staticmethod
+    def _normalize_positive_int(
+        raw_value: Optional[str], *, default: int
+    ) -> int:
+        try:
+            parsed = int(str(raw_value or "").strip())
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            pass
+        return default
+
+    @staticmethod
+    def _clamp_int(value: int, *, minimum: int, maximum: int) -> int:
+        return max(minimum, min(maximum, int(value)))
+
+    @staticmethod
     def _split_api_keys(raw_api_keys: Optional[str]) -> List[str]:
         raw = str(raw_api_keys or "").strip()
         if not raw:
@@ -182,6 +198,17 @@ class CustomModelClient:
         enable_video_input = cls._normalize_bool_flag(
             os.environ.get("CUSTOM_MODEL_ENABLE_VIDEO_INPUT")
         )
+        gateway_provider_timeout_ms = cls._clamp_int(
+            cls._normalize_positive_int(
+                os.environ.get("CUSTOM_MODEL_GATEWAY_PROVIDER_TIMEOUT_MS"),
+                default=4000,
+            ),
+            minimum=1000,
+            maximum=789000,
+        )
+        gateway_provider_name = str(
+            os.environ.get("CUSTOM_MODEL_GATEWAY_PROVIDER_NAME", "") or ""
+        ).strip()
         stream_idle_timeout_ms_raw = os.environ.get("CUSTOM_MODEL_STREAM_IDLE_TIMEOUT_MS")
         if stream_idle_timeout_ms_raw is not None:
             stream_idle_timeout_seconds = (
@@ -202,6 +229,8 @@ class CustomModelClient:
             "model_name": model_name,
             "enable_vision": enable_vision,
             "enable_video_input": enable_video_input,
+            "gateway_provider_timeout_ms": gateway_provider_timeout_ms,
+            "gateway_provider_name": gateway_provider_name,
             "stream_idle_timeout_seconds": stream_idle_timeout_seconds,
         }
 
@@ -213,6 +242,12 @@ class CustomModelClient:
         self.model_name = runtime_config["model_name"] or None
         self.enable_vision = bool(runtime_config["enable_vision"])
         self.enable_video_input = bool(runtime_config["enable_video_input"])
+        self.gateway_provider_timeout_ms = int(
+            runtime_config["gateway_provider_timeout_ms"]
+        )
+        self.gateway_provider_name = (
+            str(runtime_config.get("gateway_provider_name", "") or "").strip() or None
+        )
         self.stream_idle_timeout_seconds = float(
             runtime_config["stream_idle_timeout_seconds"]
         )
@@ -224,6 +259,20 @@ class CustomModelClient:
         if not normalized.endswith("/chat/completions"):
             normalized += "/chat/completions"
         return normalized
+
+    @staticmethod
+    def _resolve_gateway_provider_name(
+        model_name: str, configured_provider_name: Optional[str] = None
+    ) -> str:
+        explicit = str(configured_provider_name or "").strip().lower()
+        if explicit:
+            return explicit
+
+        model = str(model_name or "").strip().lower()
+        if "/" not in model:
+            return ""
+
+        return model.split("/", 1)[0].strip()
 
     @staticmethod
     def _has_meaningful_sse_output(payload: Dict[str, Any]) -> bool:
@@ -771,6 +820,50 @@ class CustomModelClient:
         headers = {
             "Content-Type": "application/json",
         }
+        gateway_provider_timeout_ms = int(
+            runtime_config.get("gateway_provider_timeout_ms", 4000) or 4000
+        )
+        gateway_provider_name = self._resolve_gateway_provider_name(
+            str(request_payload.get("model", "")),
+            runtime_config.get("gateway_provider_name"),
+        )
+        is_vercel_gateway = "ai-gateway.vercel.sh" in api_url.lower()
+        provider_timeout_injected = False
+
+        if is_vercel_gateway and gateway_provider_name and gateway_provider_timeout_ms > 0:
+            provider_options = request_payload.get("providerOptions")
+            if not isinstance(provider_options, dict):
+                provider_options = {}
+
+            gateway_options = provider_options.get("gateway")
+            if not isinstance(gateway_options, dict):
+                gateway_options = {}
+
+            provider_timeouts = gateway_options.get("providerTimeouts")
+            if not isinstance(provider_timeouts, dict):
+                provider_timeouts = {}
+
+            byok_timeouts = provider_timeouts.get("byok")
+            if not isinstance(byok_timeouts, dict):
+                byok_timeouts = {}
+
+            if gateway_provider_name not in byok_timeouts:
+                byok_timeouts[gateway_provider_name] = gateway_provider_timeout_ms
+                provider_timeout_injected = True
+
+            provider_timeouts["byok"] = byok_timeouts
+            gateway_options["providerTimeouts"] = provider_timeouts
+            provider_options["gateway"] = gateway_options
+            request_payload["providerOptions"] = provider_options
+
+            if provider_timeout_injected:
+                log.info(
+                    "[Custom] Injected AI Gateway provider timeout | provider=%s | timeout_ms=%s | model=%s | url=%s",
+                    gateway_provider_name,
+                    gateway_provider_timeout_ms,
+                    str(request_payload.get("model", "")),
+                    api_url,
+                )
 
         used_streaming = False
         response: Optional[httpx.Response] = None
