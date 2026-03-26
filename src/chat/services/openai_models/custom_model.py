@@ -27,6 +27,7 @@ class CustomModelClient:
         self._active_api_key_index = 0
         self._key_rotation_lock = asyncio.Lock()
         self.raw_api_key: Optional[str] = None
+        self._gateway_options_log_once: set[str] = set()
         runtime_config = self.refresh_from_env()
 
         if (
@@ -823,14 +824,24 @@ class CustomModelClient:
         gateway_provider_timeout_ms = int(
             runtime_config.get("gateway_provider_timeout_ms", 4000) or 4000
         )
+        request_model_name = str(request_payload.get("model", ""))
+        normalized_request_model = request_model_name.strip().lower()
         gateway_provider_name = self._resolve_gateway_provider_name(
-            str(request_payload.get("model", "")),
+            request_model_name,
             runtime_config.get("gateway_provider_name"),
         )
         is_vercel_gateway = "ai-gateway.vercel.sh" in api_url.lower()
+        is_kimi_k2_5_model = normalized_request_model == "moonshotai/kimi-k2.5"
+        kimi_k2_5_provider_order = [
+            "fireworks",
+            "togetherai",
+            "moonshotai",
+            "bedrock",
+        ]
         provider_timeout_injected = False
+        provider_order_injected = False
 
-        if is_vercel_gateway and gateway_provider_name and gateway_provider_timeout_ms > 0:
+        if is_vercel_gateway:
             provider_options = request_payload.get("providerOptions")
             if not isinstance(provider_options, dict):
                 provider_options = {}
@@ -847,23 +858,46 @@ class CustomModelClient:
             if not isinstance(byok_timeouts, dict):
                 byok_timeouts = {}
 
-            if gateway_provider_name not in byok_timeouts:
-                byok_timeouts[gateway_provider_name] = gateway_provider_timeout_ms
-                provider_timeout_injected = True
+            if gateway_provider_timeout_ms > 0:
+                if is_kimi_k2_5_model:
+                    for provider_name in kimi_k2_5_provider_order:
+                        if provider_name not in byok_timeouts:
+                            byok_timeouts[provider_name] = gateway_provider_timeout_ms
+                            provider_timeout_injected = True
+                elif gateway_provider_name and gateway_provider_name not in byok_timeouts:
+                    byok_timeouts[gateway_provider_name] = gateway_provider_timeout_ms
+                    provider_timeout_injected = True
+
+            if is_kimi_k2_5_model:
+                existing_order = gateway_options.get("order")
+                if existing_order != kimi_k2_5_provider_order:
+                    gateway_options["order"] = list(kimi_k2_5_provider_order)
+                    provider_order_injected = True
 
             provider_timeouts["byok"] = byok_timeouts
             gateway_options["providerTimeouts"] = provider_timeouts
             provider_options["gateway"] = gateway_options
             request_payload["providerOptions"] = provider_options
 
-            if provider_timeout_injected:
-                log.info(
-                    "[Custom] Injected AI Gateway provider timeout | provider=%s | timeout_ms=%s | model=%s | url=%s",
-                    gateway_provider_name,
-                    gateway_provider_timeout_ms,
-                    str(request_payload.get("model", "")),
-                    api_url,
+            if provider_timeout_injected or provider_order_injected:
+                order_for_log = gateway_options.get("order")
+                if isinstance(order_for_log, list):
+                    order_key = ",".join(str(item) for item in order_for_log)
+                else:
+                    order_key = str(order_for_log)
+                log_key = (
+                    f"{api_url}|{request_model_name}|{gateway_provider_timeout_ms}|"
+                    f"{order_key}"
                 )
+                if log_key not in self._gateway_options_log_once:
+                    self._gateway_options_log_once.add(log_key)
+                    log.info(
+                        "[Custom] Injected AI Gateway provider options | model=%s | order=%s | timeout_ms=%s | url=%s",
+                        request_model_name,
+                        gateway_options.get("order"),
+                        gateway_provider_timeout_ms,
+                        api_url,
+                    )
 
         used_streaming = False
         response: Optional[httpx.Response] = None
