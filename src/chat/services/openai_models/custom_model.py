@@ -911,7 +911,7 @@ class CustomModelClient:
         api_url = self._build_chat_completions_url(api_url)
         request_payload = dict(payload)
         request_payload["stream"] = True
-        network_timeout_seconds = 5.0
+        network_timeout_seconds = 10.0
         first_token_timeout_seconds = 12.0
         idle_timeout_seconds = float(
             runtime_config.get("stream_idle_timeout_seconds", 5.0) or 5.0

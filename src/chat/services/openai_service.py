@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union, get_args, get_origin
@@ -22,6 +23,7 @@ from src.chat.services.openai_models import (
     KimiModelClient,
 )
 from src.chat.services.prompt_service import prompt_service
+from src.chat.utils.image_utils import sanitize_image_to_size_limit
 from src.database.database import AsyncSessionLocal
 from src.database.services.token_usage_service import token_usage_service
 
@@ -53,6 +55,73 @@ class OpenAIService:
             bot_getter=lambda: getattr(self.tool_service, "bot", None),
             alert_user_id=1046310552365973524,
         )
+
+    @staticmethod
+    def _normalize_bool_flag(raw_value: Optional[str]) -> bool:
+        return str(raw_value or "").strip().lower() in {"true", "1", "yes"}
+
+    def _is_vps_mode_enabled(self) -> bool:
+        return self._normalize_bool_flag(os.environ.get("VPS_MODE"))
+
+    def _compress_images_for_vps_mode(
+        self, images: Optional[List[Dict[str, Any]]]
+    ) -> Optional[List[Dict[str, Any]]]:
+        if not images or not self._is_vps_mode_enabled():
+            return images
+
+        target_size_bytes = 1 * 1024 * 1024
+        processed_images: List[Dict[str, Any]] = []
+
+        for idx, image in enumerate(images, start=1):
+            if not isinstance(image, dict):
+                processed_images.append(image)
+                continue
+
+            image_bytes = image.get("data") or image.get("bytes")
+            if not isinstance(image_bytes, (bytes, bytearray)) or not image_bytes:
+                processed_images.append(dict(image))
+                continue
+
+            image_copy = dict(image)
+            original_size = len(image_bytes)
+
+            try:
+                compressed_bytes, compressed_mime_type = sanitize_image_to_size_limit(
+                    bytes(image_bytes),
+                    target_size_bytes=target_size_bytes,
+                    max_image_size_bytes=target_size_bytes,
+                    min_quality=20,
+                )
+                image_copy["data"] = compressed_bytes
+                if "bytes" in image_copy:
+                    image_copy["bytes"] = compressed_bytes
+                image_copy["mime_type"] = compressed_mime_type
+                log.info(
+                    "[OpenAIService] VPS mode image compression applied | index=%s | original_kb=%.2f | compressed_kb=%.2f | mime_type=%s",
+                    idx,
+                    original_size / 1024,
+                    len(compressed_bytes) / 1024,
+                    compressed_mime_type,
+                )
+            except Exception as e:
+                if original_size > target_size_bytes:
+                    log.warning(
+                        "[OpenAIService] VPS mode image compression failed, dropping oversized image | index=%s | size_kb=%.2f | error=%s",
+                        idx,
+                        original_size / 1024,
+                        e,
+                    )
+                    continue
+                log.warning(
+                    "[OpenAIService] VPS mode image compression failed, using original image | index=%s | size_kb=%.2f | error=%s",
+                    idx,
+                    original_size / 1024,
+                    e,
+                )
+
+            processed_images.append(image_copy)
+
+        return processed_images
 
     def _build_tool_image_context_list(
         self, images: Optional[List[Dict[str, Any]]]
@@ -509,6 +578,8 @@ class OpenAIService:
                 message=message,
                 replied_message=replied_message,
             )
+
+        images = self._compress_images_for_vps_mode(images)
 
         await chat_settings_service.increment_model_usage(effective_model_name)
 
