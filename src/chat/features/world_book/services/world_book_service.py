@@ -230,15 +230,15 @@ class WorldBookService:
         self,
         discord_id: int,
         user_name: Optional[str] = None,
-        auto_create: bool = True,
+        auto_create: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         通过 Discord ID 从 ParadeDB 的 community.member_profiles 表中获取用户档案。
 
         Args:
             discord_id: 用户的 Discord ID。
-            user_name: (可选) 用户名/昵称。用于在未找到档案时自动创建最小名片。
-            auto_create: (可选) 未找到档案时，是否自动创建最小名片。
+            user_name: (可选) 用户名/昵称。当前仅为兼容保留，不用于自动创建名片。
+            auto_create: (可选) 兼容参数，当前不生效（不会自动创建最小名片）。
 
         Returns:
             一个包含用户档案数据的字典，如果找不到则返回 None。
@@ -296,17 +296,7 @@ class WorldBookService:
                 return profile
 
             log.warning(f"在 ParadeDB 中未找到 discord_id {discord_id} 的用户档案。")
-            if not auto_create:
-                return None
-
-            created = await self._auto_create_minimal_member_profile(
-                discord_id=discord_id,
-                user_name=user_name,
-            )
-            if not created:
-                return None
-
-            return _fetch_profile()
+            return None
 
         except psycopg2.Error as e:
             log.error(f"从 ParadeDB 查询用户档案时发生数据库错误: {e}", exc_info=True)
