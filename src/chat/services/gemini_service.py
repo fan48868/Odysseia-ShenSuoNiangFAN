@@ -1116,10 +1116,8 @@ class GeminiService:
             except Exception as e:
                 log.warning(f"世界书自动检索失败 (不影响正常对话): {e}")
 
-        # ---------- 用户名处理（放在 RAG 之后，避免影响匹配）----------
-        TARGET_USER_ID = 1449321391412215908  # 软软 ID，可移到配置
-        if user_id != TARGET_USER_ID:
-            user_name = f"【社区朋友】{user_name}"
+        # ---------- 检查用户名处理ID（放在 RAG 之后，避免影响匹配）----------
+        user_name = self.prompt_service._mask_potential_impersonator_name(user_name, user_id)
         # --------------------------------------------------------
         
         # --- 模型使用计数 ---
