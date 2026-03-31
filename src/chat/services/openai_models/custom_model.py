@@ -1110,7 +1110,6 @@ class CustomModelClient:
         content_chunks: List[str] = []
         reasoning_chunks: List[str] = []
         tool_call_map: Dict[int, Dict[str, Any]] = {}
-        reasoning_alias_seen = False
 
         def _upsert_tool_call(
             tool_call_payload: Dict[str, Any], fallback_index: int, from_delta: bool
@@ -1213,8 +1212,6 @@ class CustomModelClient:
                 )
                 if extracted_delta_reasoning:
                     reasoning_chunks.append(extracted_delta_reasoning)
-                    if "reasoning" in delta and "reasoning_content" not in delta:
-                        reasoning_alias_seen = True
 
                 delta_tool_calls = delta.get("tool_calls")
                 if isinstance(delta_tool_calls, list):
@@ -1243,11 +1240,6 @@ class CustomModelClient:
                 )
                 if extracted_message_reasoning and not reasoning_chunks:
                     reasoning_chunks.append(extracted_message_reasoning)
-                    if (
-                        "reasoning" in message_block
-                        and "reasoning_content" not in message_block
-                    ):
-                        reasoning_alias_seen = True
 
                 message_tool_calls = message_block.get("tool_calls")
                 if isinstance(message_tool_calls, list):
@@ -1268,12 +1260,7 @@ class CustomModelClient:
         if not final_content and not final_reasoning and not final_tool_calls:
             return None
 
-        if not final_content and final_reasoning and not final_tool_calls and reasoning_alias_seen:
-            final_content = final_reasoning
-
         message: Dict[str, Any] = {"role": "assistant", "content": final_content}
-        if final_reasoning:
-            message["reasoning_content"] = final_reasoning
         if final_tool_calls:
             message["tool_calls"] = final_tool_calls
 
@@ -1320,6 +1307,8 @@ class CustomModelClient:
         api_url = self._build_chat_completions_url(api_url)
         request_payload = dict(payload)
         request_payload["stream"] = True
+        request_payload["thinking"] = {"type": "disabled"}
+        request_payload.pop("chat_template_kwargs", None)
         network_timeout_seconds = 10.0
         first_token_timeout_seconds = 12.0
         idle_timeout_seconds = float(

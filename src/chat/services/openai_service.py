@@ -346,7 +346,7 @@ class OpenAIService:
             "top_p": gen_config.get("top_p", 0.95),
             "max_tokens": gen_config.get("max_output_tokens", 8192),
         }
-        if is_kimi_model:
+        if is_kimi_model or is_custom_model:
             payload["thinking"] = {"type": "disabled"}
 
         http_client = httpx.AsyncClient(timeout=120.0)
@@ -1337,7 +1337,7 @@ class OpenAIService:
                     "max_tokens": gen_config.get("max_output_tokens", 8192),
                 }
 
-                if is_kimi_model:
+                if is_kimi_model or is_custom_model:
                     payload["thinking"] = {"type": "disabled"}
 
                 if is_deepseek_model or is_custom_model:
