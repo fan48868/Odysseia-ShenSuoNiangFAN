@@ -528,10 +528,7 @@ class CustomModelClient:
                     ignored_keys={"type"},
                 ):
                     return True
-                if (
-                    isinstance(block.get("reasoning_content"), str)
-                    and block["reasoning_content"].strip()
-                ):
+                if cls._extract_reasoning_text_from_block(block):
                     return True
                 if isinstance(block.get("tool_calls"), list) and block["tool_calls"]:
                     return True
@@ -626,6 +623,22 @@ class CustomModelClient:
                 text_chunks.append(nested_content.strip())
 
         return "\n".join(text_chunks).strip()
+
+    @classmethod
+    def _extract_reasoning_text_from_block(cls, block: Any) -> str:
+        if not isinstance(block, dict):
+            return ""
+
+        for key in ("reasoning_content", "reasoning", "reasoning_details"):
+            extracted = cls._extract_text_from_openai_content(block.get(key))
+            if extracted:
+                return extracted
+
+            raw_value = block.get(key)
+            if isinstance(raw_value, str) and raw_value.strip():
+                return raw_value.strip()
+
+        return ""
 
     @classmethod
     def diagnose_streaming_chat_completion_body(cls, body: str) -> Dict[str, Any]:
@@ -738,14 +751,7 @@ class CustomModelClient:
             if isinstance(delta, dict):
                 if cls._extract_text_from_openai_content(delta.get("content")):
                     diagnostics["delta_content_chunk_count"] += 1
-                if cls._extract_text_from_openai_content(
-                    delta.get("reasoning_content")
-                ):
-                    diagnostics["reasoning_chunk_count"] += 1
-                elif (
-                    isinstance(delta.get("reasoning_content"), str)
-                    and delta["reasoning_content"].strip()
-                ):
+                if cls._extract_reasoning_text_from_block(delta):
                     diagnostics["reasoning_chunk_count"] += 1
 
                 delta_tool_calls = delta.get("tool_calls")
@@ -756,14 +762,7 @@ class CustomModelClient:
             if isinstance(message_block, dict):
                 if cls._extract_text_from_openai_content(message_block.get("content")):
                     diagnostics["message_content_chunk_count"] += 1
-                if cls._extract_text_from_openai_content(
-                    message_block.get("reasoning_content")
-                ):
-                    diagnostics["reasoning_chunk_count"] += 1
-                elif (
-                    isinstance(message_block.get("reasoning_content"), str)
-                    and message_block["reasoning_content"].strip()
-                ):
+                if cls._extract_reasoning_text_from_block(message_block):
                     diagnostics["reasoning_chunk_count"] += 1
 
                 message_tool_calls = message_block.get("tool_calls")
@@ -1208,17 +1207,11 @@ class CustomModelClient:
                     if extracted_delta_content:
                         content_chunks.append(extracted_delta_content)
 
-                delta_reasoning = delta.get("reasoning_content")
-                if isinstance(delta_reasoning, str):
-                    reasoning_chunks.append(delta_reasoning)
-                elif isinstance(delta_reasoning, list):
-                    extracted_delta_reasoning = (
-                        CustomModelClient._extract_text_from_openai_content(
-                            delta_reasoning
-                        )
-                    )
-                    if extracted_delta_reasoning:
-                        reasoning_chunks.append(extracted_delta_reasoning)
+                extracted_delta_reasoning = (
+                    CustomModelClient._extract_reasoning_text_from_block(delta)
+                )
+                if extracted_delta_reasoning:
+                    reasoning_chunks.append(extracted_delta_reasoning)
 
                 delta_tool_calls = delta.get("tool_calls")
                 if isinstance(delta_tool_calls, list):
@@ -1242,21 +1235,11 @@ class CustomModelClient:
                     if extracted_message_content:
                         content_chunks.append(extracted_message_content)
 
-                message_reasoning = message_block.get("reasoning_content")
-                if (
-                    isinstance(message_reasoning, str)
-                    and message_reasoning
-                    and not reasoning_chunks
-                ):
-                    reasoning_chunks.append(message_reasoning)
-                elif isinstance(message_reasoning, list) and not reasoning_chunks:
-                    extracted_message_reasoning = (
-                        CustomModelClient._extract_text_from_openai_content(
-                            message_reasoning
-                        )
-                    )
-                    if extracted_message_reasoning:
-                        reasoning_chunks.append(extracted_message_reasoning)
+                extracted_message_reasoning = (
+                    CustomModelClient._extract_reasoning_text_from_block(message_block)
+                )
+                if extracted_message_reasoning and not reasoning_chunks:
+                    reasoning_chunks.append(extracted_message_reasoning)
 
                 message_tool_calls = message_block.get("tool_calls")
                 if isinstance(message_tool_calls, list):
@@ -1278,8 +1261,6 @@ class CustomModelClient:
             return None
 
         message: Dict[str, Any] = {"role": "assistant", "content": final_content}
-        if final_reasoning:
-            message["reasoning_content"] = final_reasoning
         if final_tool_calls:
             message["tool_calls"] = final_tool_calls
 
@@ -1326,6 +1307,8 @@ class CustomModelClient:
         api_url = self._build_chat_completions_url(api_url)
         request_payload = dict(payload)
         request_payload["stream"] = True
+        request_payload["thinking"] = {"type": "disabled"}
+        request_payload.pop("chat_template_kwargs", None)
         network_timeout_seconds = 10.0
         first_token_timeout_seconds = 12.0
         idle_timeout_seconds = float(
