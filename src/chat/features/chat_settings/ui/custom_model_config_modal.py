@@ -92,3 +92,31 @@ class CustomModelConfigModal(discord.ui.Modal):
             ).strip(),
         }
         await self.on_submit_callback(interaction, settings)
+
+
+class CustomModelPresetNameModal(discord.ui.Modal):
+    """保存 custom 模型预设时输入预设名称。"""
+
+    PRESET_NAME_MAX_LENGTH = 80
+
+    def __init__(
+        self,
+        *,
+        title: str,
+        current_name: str = "",
+        on_submit_callback: Callable[[Interaction, str], Awaitable[None]],
+    ):
+        super().__init__(title=title)
+        self.on_submit_callback = on_submit_callback
+        self.name_input = TextInput(
+            label="预设名称",
+            placeholder="输入预设名称",
+            default=current_name or "",
+            required=True,
+            max_length=self.PRESET_NAME_MAX_LENGTH,
+            custom_id="custom_model_preset_name",
+        )
+        self.add_item(self.name_input)
+
+    async def on_submit(self, interaction: Interaction):
+        await self.on_submit_callback(interaction, (self.name_input.value or "").strip())
