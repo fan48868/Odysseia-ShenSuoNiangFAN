@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import logging
+import mimetypes
 import os
 import time
 from dataclasses import dataclass
@@ -189,10 +190,15 @@ class QuotaReservation:
     date_key: str
 
 
-class GrokImagineImageClient:
-    API_URL = "https://ai-gateway.vercel.sh/v1/images/generations"
-    MODEL = "xai/grok-imagine-image"
-    ENV_KEY = "GROK_IMAGINE_API_KEY"
+class GatewayImageClient:
+    IMAGE_API_URL = "https://ai-gateway.vercel.sh/v1/images/generations"
+    CHAT_COMPLETIONS_API_URL = "https://ai-gateway.vercel.sh/v1/chat/completions"
+    PRIMARY_ENV_KEY = "IMAGINE_API_KEY"
+    LEGACY_ENV_KEYS = ("GROK_IMAGINE_API_KEY",)
+    GEMINI_PRO_MODEL = "google/gemini-3-pro-image"
+    GEMINI_FLASH_MODEL = "google/gemini-3.1-flash-image-preview"
+    GROK_MODEL = "xai/grok-imagine-image"
+    DEFAULT_MODEL = GEMINI_PRO_MODEL
 
     def __init__(self):
         self._lock = asyncio.Lock()
@@ -203,36 +209,116 @@ class GrokImagineImageClient:
     def _get_env_path() -> str:
         return os.path.join(config.BASE_DIR, ".env")
 
-    def _read_raw_api_key_value(self) -> str:
+    def _read_raw_env_value(self, *env_keys: str) -> str:
         env_path = self._get_env_path()
-        if not os.path.exists(env_path):
-            return str(os.getenv(self.ENV_KEY, "") or "").strip()
+        cleaned_keys = [key.strip() for key in env_keys if key and key.strip()]
+        if not cleaned_keys:
+            return ""
 
-        try:
-            with open(env_path, "r", encoding="utf-8") as env_file:
-                for raw_line in env_file:
-                    line = raw_line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
+        parsed_values: dict[str, str] = {}
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as env_file:
+                    for raw_line in env_file:
+                        line = raw_line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
 
-                    key, value = line.split("=", 1)
-                    if key.strip() != self.ENV_KEY:
-                        continue
+                        key, value = line.split("=", 1)
+                        normalized_key = key.strip()
+                        if normalized_key not in cleaned_keys:
+                            continue
 
-                    return _strip_inline_comment(value)
-        except Exception as exc:
-            log.warning("读取 %s 失败，将回退到进程环境变量: %s", env_path, exc)
+                        parsed_values[normalized_key] = _strip_inline_comment(value)
+            except Exception as exc:
+                log.warning("读取 %s 失败，将回退到进程环境变量: %s", env_path, exc)
 
-        return str(os.getenv(self.ENV_KEY, "") or "").strip()
+        for key in cleaned_keys:
+            value = _strip_wrapping_quotes(parsed_values.get(key, "")).strip()
+            if value:
+                return parsed_values[key]
+
+        for key in cleaned_keys:
+            value = str(os.getenv(key, "") or "").strip()
+            if value:
+                return value
+
+        return ""
 
     def _load_api_keys(self) -> list[str]:
-        raw_value = self._read_raw_api_key_value()
+        raw_value = self._read_raw_env_value(
+            self.PRIMARY_ENV_KEY,
+            *self.LEGACY_ENV_KEYS,
+        )
         cleaned_value = _strip_wrapping_quotes(raw_value)
         return [
             _strip_wrapping_quotes(part)
             for part in cleaned_value.split(",")
             if _strip_wrapping_quotes(part)
         ]
+
+    @classmethod
+    def supported_models(cls) -> tuple[str, ...]:
+        return (
+            cls.GEMINI_PRO_MODEL,
+            cls.GEMINI_FLASH_MODEL,
+            cls.GROK_MODEL,
+        )
+
+    @classmethod
+    def normalize_model_name(cls, model_name: str | None) -> str:
+        normalized = str(model_name or "").strip()
+        if normalized in cls.supported_models():
+            return normalized
+        return cls.DEFAULT_MODEL
+
+    @classmethod
+    def get_next_model(cls, current_model: str | None) -> str:
+        normalized_model = cls.normalize_model_name(current_model)
+        models = cls.supported_models()
+        current_index = models.index(normalized_model)
+        return models[(current_index + 1) % len(models)]
+
+    @classmethod
+    def get_model_label(cls, model_name: str | None) -> str:
+        normalized_model = cls.normalize_model_name(model_name)
+        if normalized_model == cls.GEMINI_PRO_MODEL:
+            return "Gemini Pro"
+        if normalized_model == cls.GEMINI_FLASH_MODEL:
+            return "Gemini 3.1 Flash"
+        if normalized_model == cls.GROK_MODEL:
+            return "Grok"
+        return normalized_model
+
+    @classmethod
+    def uses_chat_completions_api(cls, model_name: str | None) -> bool:
+        normalized_model = cls.normalize_model_name(model_name)
+        return normalized_model in {
+            cls.GEMINI_PRO_MODEL,
+            cls.GEMINI_FLASH_MODEL,
+        }
+
+    @classmethod
+    def _build_request(cls, model_name: str, prompt: str) -> tuple[str, dict[str, Any]]:
+        normalized_model = cls.normalize_model_name(model_name)
+        if cls.uses_chat_completions_api(normalized_model):
+            return (
+                cls.CHAT_COMPLETIONS_API_URL,
+                {
+                    "model": normalized_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "modalities": ["image"],
+                    "stream": False,
+                },
+            )
+
+        return (
+            cls.IMAGE_API_URL,
+            {
+                "model": normalized_model,
+                "prompt": prompt,
+            },
+        )
 
     @staticmethod
     async def _read_response_payload(response: aiohttp.ClientResponse) -> Any:
@@ -259,6 +345,168 @@ class GrokImagineImageClient:
         )
 
     @staticmethod
+    def _build_filename(model_name: str, extension: str = ".png") -> str:
+        suffix = extension if extension.startswith(".") else f".{extension}"
+        safe_model = "".join(
+            char if char.isalnum() else "_" for char in str(model_name or "").lower()
+        ).strip("_")
+        safe_model = safe_model or "generated_image"
+        return f"{safe_model}_{int(time.time())}{suffix}"
+
+    @staticmethod
+    def _guess_extension_from_mime_type(mime_type: str) -> str:
+        normalized_mime_type = str(mime_type or "").split(";", 1)[0].strip().lower()
+        guessed_extension = mimetypes.guess_extension(normalized_mime_type)
+        return guessed_extension or ".png"
+
+    @classmethod
+    def _decode_data_url_image(
+        cls,
+        data_url: str,
+        model_name: str,
+    ) -> tuple[GeneratedImage | None, ImageGenerationError | None]:
+        normalized_data_url = str(data_url or "").strip()
+        if not normalized_data_url.lower().startswith("data:"):
+            return None, ImageGenerationError("图片数据格式不正确。")
+
+        if "," not in normalized_data_url:
+            return None, ImageGenerationError("图片 data URI 缺少数据体。")
+
+        header, encoded_data = normalized_data_url.split(",", 1)
+        if ";base64" not in header.lower():
+            return None, ImageGenerationError("图片 data URI 不是 base64 编码。")
+
+        mime_type = header[5:].split(";", 1)[0].strip() or "image/png"
+        try:
+            image_bytes = base64.b64decode(encoded_data)
+        except Exception as exc:
+            return None, ImageGenerationError(f"解析 data URI 图片失败：{exc}")
+
+        return (
+            GeneratedImage(
+                data=image_bytes,
+                filename=cls._build_filename(
+                    model_name,
+                    cls._guess_extension_from_mime_type(mime_type),
+                ),
+            ),
+            None,
+        )
+
+    @classmethod
+    def _collect_image_candidates(
+        cls,
+        model_name: str,
+        payload: Any,
+    ) -> list[Any]:
+        if not isinstance(payload, dict):
+            return []
+
+        if cls.uses_chat_completions_api(model_name):
+            candidates: list[Any] = []
+            choices = payload.get("choices", [])
+            if not isinstance(choices, list):
+                return candidates
+
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+
+                message = choice.get("message")
+                if not isinstance(message, dict):
+                    continue
+
+                images = message.get("images", [])
+                if isinstance(images, list):
+                    candidates.extend(images)
+
+            return candidates
+
+        data = payload.get("data", [])
+        if isinstance(data, list):
+            return data
+        return []
+
+    @classmethod
+    async def _build_generated_image_from_candidate(
+        cls,
+        session: aiohttp.ClientSession,
+        candidate: Any,
+        model_name: str,
+    ) -> tuple[GeneratedImage | None, ImageGenerationError | None]:
+        image_url = ""
+        image_b64 = ""
+
+        if isinstance(candidate, dict):
+            image_url = str(candidate.get("url") or "").strip()
+            image_b64 = str(candidate.get("b64_json") or "").strip()
+
+            if not image_url:
+                nested_image_url = candidate.get("image_url")
+                if isinstance(nested_image_url, dict):
+                    image_url = str(nested_image_url.get("url") or "").strip()
+                elif isinstance(nested_image_url, str):
+                    image_url = nested_image_url.strip()
+        elif isinstance(candidate, str):
+            image_url = candidate.strip()
+
+        if image_url:
+            if image_url.lower().startswith("data:"):
+                return cls._decode_data_url_image(image_url, model_name)
+
+            return await cls._download_image(
+                session,
+                image_url,
+                cls._build_filename(model_name),
+            )
+
+        if image_b64:
+            try:
+                image_bytes = base64.b64decode(image_b64)
+                return (
+                    GeneratedImage(
+                        data=image_bytes,
+                        filename=cls._build_filename(model_name),
+                    ),
+                    None,
+                )
+            except Exception as exc:
+                return None, ImageGenerationError(f"解析图片数据失败：{exc}")
+
+        return None, None
+
+    async def _extract_generated_image(
+        self,
+        session: aiohttp.ClientSession,
+        model_name: str,
+        response_payload: Any,
+        *,
+        status_code: int | None = None,
+    ) -> tuple[GeneratedImage | None, ImageGenerationError | None]:
+        candidates = self._collect_image_candidates(model_name, response_payload)
+        first_error: ImageGenerationError | None = None
+
+        for candidate in candidates:
+            image, error = await self._build_generated_image_from_candidate(
+                session,
+                candidate,
+                model_name,
+            )
+            if image is not None:
+                return image, None
+            if error is not None and first_error is None:
+                first_error = error
+
+        if first_error is not None:
+            return None, first_error
+
+        return None, ImageGenerationError(
+            "生图接口返回成功，但没有找到可用的图片数据。",
+            status_code=status_code,
+            payload=response_payload,
+        )
+
+    @staticmethod
     async def _download_image(
         session: aiohttp.ClientSession,
         image_url: str,
@@ -266,9 +514,9 @@ class GrokImagineImageClient:
     ) -> tuple[GeneratedImage | None, ImageGenerationError | None]:
         try:
             async with session.get(image_url) as response:
-                if response.status != 200:
-                    payload = await GrokImagineImageClient._read_response_payload(response)
-                    return None, GrokImagineImageClient._build_api_error(
+                if response.status < 200 or response.status >= 300:
+                    payload = await GatewayImageClient._read_response_payload(response)
+                    return None, GatewayImageClient._build_api_error(
                         response.status,
                         payload,
                     )
@@ -283,82 +531,58 @@ class GrokImagineImageClient:
         self,
         api_key: str,
         prompt: str,
+        model_name: str,
     ) -> tuple[GeneratedImage | None, ImageGenerationError | None]:
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        payload = {
-            "model": self.MODEL,
-            "prompt": prompt,
-        }
+        api_url, payload = self._build_request(model_name, prompt)
         timeout = aiohttp.ClientTimeout(total=180)
 
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
-                    self.API_URL,
+                    api_url,
                     headers=headers,
                     json=payload,
                 ) as response:
                     response_payload = await self._read_response_payload(response)
-                    if response.status != 200:
+                    if response.status < 200 or response.status >= 300:
                         return None, self._build_api_error(
                             response.status,
                             response_payload,
                         )
 
-                    items = (
-                        response_payload.get("data", [])
-                        if isinstance(response_payload, dict)
-                        else []
-                    )
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
-
-                        filename = f"grok_imagine_{int(time.time())}.png"
-                        image_url = str(item.get("url") or "").strip()
-                        image_b64 = str(item.get("b64_json") or "").strip()
-
-                        if image_url:
-                            return await self._download_image(session, image_url, filename)
-
-                        if image_b64:
-                            try:
-                                image_bytes = base64.b64decode(image_b64)
-                                return GeneratedImage(data=image_bytes, filename=filename), None
-                            except Exception as exc:
-                                return None, ImageGenerationError(
-                                    f"解析图片数据失败：{exc}"
-                                )
-
-                    return None, ImageGenerationError(
-                        "生图接口返回成功，但没有找到可用的图片数据。",
+                    return await self._extract_generated_image(
+                        session,
+                        model_name,
+                        response_payload,
                         status_code=response.status,
-                        payload=response_payload,
                     )
         except asyncio.TimeoutError:
             return None, ImageGenerationError("请求生图接口超时，请稍后再试。")
         except aiohttp.ClientError as exc:
             return None, ImageGenerationError(f"请求生图接口失败：{exc}")
         except Exception as exc:
-            log.error("调用 Grok Imagine 生图接口时发生未预期错误: %s", exc, exc_info=True)
+            log.error("调用生图接口时发生未预期错误: %s", exc, exc_info=True)
             return None, ImageGenerationError(f"生成图片时发生错误：{exc}")
 
     async def generate_image(
         self,
         prompt: str,
+        model_name: str | None = None,
     ) -> tuple[GeneratedImage | None, ImageGenerationError | None]:
         prompt = (prompt or "").strip()
         if not prompt:
             return None, ImageGenerationError("提示词不能为空。")
 
+        normalized_model = self.normalize_model_name(model_name)
         async with self._lock:
             api_keys = self._load_api_keys()
             if not api_keys:
                 return None, ImageGenerationError(
-                    f"未在 .env 中找到可用的 {self.ENV_KEY} 配置。"
+                    "未在 .env 中找到可用的 IMAGINE_API_KEY 配置。"
                 )
 
             if self._active_key_value and self._active_key_value in api_keys:
@@ -371,7 +595,11 @@ class GrokImagineImageClient:
                 self._active_key_index = key_index
                 self._active_key_value = api_key
 
-                image, error = await self._generate_with_key(api_key, prompt)
+                image, error = await self._generate_with_key(
+                    api_key,
+                    prompt,
+                    normalized_model,
+                )
                 if image is not None:
                     return image, None
 
@@ -384,19 +612,19 @@ class GrokImagineImageClient:
                         self._active_key_index = next_index
                         self._active_key_value = api_keys[next_index]
                         log.warning(
-                            "Grok Imagine 当前 key 触发 402 payment required，切换到下一个 key。"
+                            "生图当前 key 触发 402 payment required，切换到下一个 key。"
                         )
                         continue
 
                     return None, ImageGenerationError(
-                        "所有 GROK_IMAGINE_API_KEY 都已触发 402 payment required，请检查余额。",
+                        "所有 IMAGINE_API_KEY 都已触发 402 payment required，请检查余额。",
                         status_code=402,
                         payload=error.payload,
                     )
 
                 return None, error
 
-            return None, ImageGenerationError("没有可用的 Grok Imagine API key。")
+            return None, ImageGenerationError("没有可用的 IMAGINE_API_KEY。")
 
 
 class GlobalDailyQuotaService:
@@ -597,7 +825,7 @@ class ImageGenerationPanelView(discord.ui.View):
         self,
         *,
         origin_interaction: discord.Interaction,
-        image_client: GrokImagineImageClient,
+        image_client: GatewayImageClient,
         quota_service: GlobalDailyQuotaService,
         is_developer: bool,
     ):
@@ -611,6 +839,7 @@ class ImageGenerationPanelView(discord.ui.View):
         self.prompt = ""
         self.use_spoiler = False
         self.is_generating = False
+        self.selected_model = GatewayImageClient.DEFAULT_MODEL
         self.last_status = "点击按钮输入提示词。"
         self.last_error: str | None = None
         self.last_public_message_url: str | None = None
@@ -650,8 +879,12 @@ class ImageGenerationPanelView(discord.ui.View):
             f"今日全局剩余次数：{self.quota_status.remaining}/{self.quota_status.daily_limit}"
         )
         if self.is_developer:
-            return f"模型：{self.image_client.MODEL} | {remaining_text} | 开发者不限次"
-        return f"模型：{self.image_client.MODEL} | {remaining_text}"
+            return f"模型：{self.selected_model} | {remaining_text} | 开发者不限次"
+        return f"模型：{self.selected_model} | {remaining_text}"
+
+    def _model_button_label(self) -> str:
+        model_label = self.image_client.get_model_label(self.selected_model)
+        return f"模型：{model_label}"
 
     def _can_generate_now(self) -> bool:
         if self.is_generating or not self.prompt:
@@ -707,11 +940,19 @@ class ImageGenerationPanelView(discord.ui.View):
             name=requester.display_name,
             icon_url=requester.display_avatar.url,
         )
-        embed.set_footer(text=f"模型：{self.image_client.MODEL}")
+        embed.set_footer(text=f"模型：{self.selected_model}")
         return embed
 
     def _rebuild_items(self) -> None:
         self.clear_items()
+
+        model_button = discord.ui.Button(
+            label=self._model_button_label(),
+            style=discord.ButtonStyle.secondary,
+            disabled=self.is_generating,
+            row=0,
+        )
+        model_button.callback = self._switch_model
 
         if not self.prompt:
             input_button = discord.ui.Button(
@@ -722,6 +963,7 @@ class ImageGenerationPanelView(discord.ui.View):
             )
             input_button.callback = self._open_prompt_modal
             self.add_item(input_button)
+            self.add_item(model_button)
             return
 
         generate_label = "正在生成..." if self.is_generating else "生成图片"
@@ -758,6 +1000,7 @@ class ImageGenerationPanelView(discord.ui.View):
         )
         spoiler_button.callback = self._toggle_spoiler
         self.add_item(spoiler_button)
+        self.add_item(model_button)
 
     async def refresh_panel(self) -> None:
         await self._sync_quota_status()
@@ -776,6 +1019,17 @@ class ImageGenerationPanelView(discord.ui.View):
         await self._sync_quota_status()
         self.use_spoiler = not self.use_spoiler
         self.last_status = f"遮罩已{'开启' if self.use_spoiler else '关闭'}。"
+        self.last_error = None
+        self._rebuild_items()
+        await interaction.response.edit_message(
+            embed=self._build_panel_embed(),
+            view=self,
+        )
+
+    async def _switch_model(self, interaction: discord.Interaction) -> None:
+        await self._sync_quota_status()
+        self.selected_model = self.image_client.get_next_model(self.selected_model)
+        self.last_status = f"生成模型已切换为 {self.selected_model}。"
         self.last_error = None
         self._rebuild_items()
         await interaction.response.edit_message(
@@ -835,7 +1089,10 @@ class ImageGenerationPanelView(discord.ui.View):
         )
 
         try:
-            image, error = await self.image_client.generate_image(self.prompt)
+            image, error = await self.image_client.generate_image(
+                self.prompt,
+                self.selected_model,
+            )
             if error is not None:
                 self.last_error = error.message
                 self.last_status = "生成失败。"
@@ -872,7 +1129,7 @@ class ImageGenerationPanelView(discord.ui.View):
 class ImageGenerationCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.image_client = GrokImagineImageClient()
+        self.image_client = GatewayImageClient()
         self.quota_service = GlobalDailyQuotaService()
         self.developer_user_ids = _get_developer_user_ids()
 
