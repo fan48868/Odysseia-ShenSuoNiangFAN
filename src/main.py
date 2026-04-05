@@ -5,6 +5,7 @@ import queue
 import sys
 import discord
 import time
+import threading
 import requests
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -46,8 +47,9 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 # --- WebUI_start ---
-log_server_url = "http://config_web:80/api/log"
+log_server_url = os.getenv("WEBUI_LOG_SERVER_URL", "http://config_web:80/api/log")
 heartbeat_interval = 1.0  # 心跳包间隔
+enable_webui = os.getenv("ENABLE_WEBUI", "true").lower() == "true"
 
 log_queue = queue.Queue()
 
@@ -139,16 +141,17 @@ def setup_logging():
     )
     logging.Formatter.converter = time.gmtime
 
-    # queue_handler = QueueHandler(log_queue)
-    # queue_handler.setLevel(
-    #     logging.DEBUG
-    # )  # 这里如果想在WebUI看到仅INFO以上日志，请在这里修改
-    # queue_handler.setFormatter(web_log_formatter)
+    queue_handler = None
+    if enable_webui:
+        queue_handler = QueueHandler(log_queue)
+        queue_handler.setLevel(logging.DEBUG)
+        queue_handler.setFormatter(web_log_formatter)
 
     # 6. 为根 logger 添加所有处理器
     root_logger.addHandler(stdout_handler)
     root_logger.addHandler(stderr_handler)
-    # root_logger.addHandler(queue_handler) # 禁用未使用的WebUI日志队列处理器，防止内存泄漏
+    if queue_handler is not None:
+        root_logger.addHandler(queue_handler)
 
     # 5. 调整特定库的日志级别，以减少不必要的输出
     #    例如，google-generativeai 库在 INFO 级别会打印很多网络请求相关的日志
@@ -406,10 +409,11 @@ async def main():
         log.error(f"设置 asyncio 异常处理器失败: {e}", exc_info=True)
 
     # --- webui心跳启动进程 --
-    # log.info("启用webui心跳包")
-    # sender_thread = threading.Thread(target=heartbeat_sender,daemon=True)
-    # sender_thread.start()
-    # log.info("Webui心跳包已启用")
+    if enable_webui:
+        log.info("启用 WebUI 心跳与日志上报")
+        sender_thread = threading.Thread(target=heartbeat_sender, daemon=True)
+        sender_thread.start()
+        log.info("WebUI 心跳与日志上报已启用")
 
     # 3. 异步初始化数据库
     log.info("正在异步初始化数据库...")

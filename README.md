@@ -354,6 +354,21 @@ alembic upgrade head
 alembic downgrade -1
 ```
 
+### PostgreSQL Collation 告警修复
+如果数据库日志里出现 `collation version mismatch`，通常是底层系统的 glibc 排序规则版本变了，而旧数据库仍记录着旧版本。
+
+在停止业务写入后，可执行：
+
+```bash
+python scripts/fix_postgres_collation_warning.py
+```
+
+如果你只想刷新版本标记、不做重建：
+
+```bash
+python scripts/fix_postgres_collation_warning.py --refresh-only
+```
+
 ---
 
 ## 常见问题

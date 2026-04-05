@@ -1,221 +1,723 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Odysseia Bot - Dashboard</title>
-    <!-- 链接到 CSS 文件 -->
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+    <title>Odysseia Guidance Console</title>
+    <link rel="stylesheet" href="/static/css/main.css">
 </head>
 <body>
-    <div class="sidebar">
-        <div class="sidebar-header">
-            <h2>Odysseia</h2>
-        </div>
-        <div class="sidebar-top-controls">
-            <button id="restart-btn" class="sidebar-btn danger-btn">🔄<span>Restart Bot</span></button>
-            <button id="shutdown-btn" class="sidebar-btn danger-btn">🛑<span>Shutdown Bot</span></button>
-        </div>
-        <div class="sidebar-content">
-            <!-- Timezone functionality will be added here -->
-            <div class="timezone-placeholder">
-                <p>Timezone</p>
-                <select id="timezone-selector" class="sidebar-select">
-                    <!-- Options will be populated by JS -->
-                </select>
-            </div>
-        </div>
-        <div class="sidebar-footer">
-            <button id="wallpaper-btn" class="sidebar-btn">Change Wallpaper</button>
-            <a href="/logout" class="logout-btn">Logout</a>
-        </div>
-    </div>
-
-    <div class="main-content">
-        <div class="grid-container">
-            <!-- Top-Left: 控制面板 -->
-            <div class="grid-item panel-a">
-                <!-- Content removed as per request -->
-        </div>
-
-        <!-- Top-Right: 主 Bot 日志 -->
-        <div class="grid-item panel-b" id="bot-log-panel">
-            <header>
-                <h2>Bot Application Logs</h2>
-                <div id="bot-status" class="status-indicator status-loading">LOADING...</div>
-            </header>
-            <div class="log-controls">
-                <input type="date" id="log-date-picker">
-                <select id="bot-log-level-filter">
-                    <option value="ALL">ALL</option>
-                    <option value="DEBUG">DEBUG</option>
-                    <option value="INFO">INFO</option>
-                    <option value="WARNING">WARNING</option>
-                    <option value="ERROR">ERROR</option>
-                    <option value="CRITICAL">CRITICAL</option>
-                </select>
-                <input type="text" id="bot-regex-search" placeholder="Filter logs with Regex...">
-            </div>
-            <pre class="log-container" id="bot-log-container">Loading logs...</pre>
-        </div>
-
-        <!-- Bottom-Left: 系统信息 (占位) -->
-        <div class="grid-item panel-c" id="system-info-panel">
-            <header>
-                <h2>System Information</h2>
-            </header>
-            <div class="sys-info-container">
-                <div class="sys-info-section">
-                    <h4>Current Usage</h4>
-                    <p><strong>CPU:</strong> <span id="cpu-usage-text">Loading...</span></p>
-                    <p><strong>RAM:</strong> <span id="ram-usage-text">Loading...</span></p>
-                    <p><strong>Disk:</strong> <span id="disk-usage-text">Loading...</span></p>
-                    <p><strong>Net Sent:</strong> <span id="net-sent-text">Loading...</span></p>
-                    <p><strong>Net Recv:</strong> <span id="net-recv-text">Loading...</span></p>
-                </div>
-                <div class="sys-info-section">
-                    <h4>24-Hour Stats</h4>
-                    <p><strong>CPU Avg:</strong> <span id="cpu-avg-24h">Loading...</span></p>
-                    <p><strong>CPU Peak:</strong> <span id="cpu-peak-24h">Loading...</span></p>
-                    <p><strong>RAM Avg:</strong> <span id="ram-avg-24h">Loading...</span></p>
-                    <p><strong>RAM Peak:</strong> <span id="ram-peak-24h">Loading...</span></p>
-                    <p><small>(<span id="sample-count-24h">0</span> samples)</small></p>
+    <div class="app-shell">
+        <div class="mobile-sidebar-backdrop" id="mobile-sidebar-backdrop"></div>
+        <aside class="sidebar">
+            <div class="brand-block">
+                <div class="brand-mark">OG</div>
+                <div class="brand-copy">
+                    <strong>Odysseia</strong>
+                    <span>Guidance Console</span>
                 </div>
             </div>
-        </div>
 
-        <!-- Bottom-Right: WebUI 日志 -->
-        <div class="grid-item panel-d">
-            <header>
-                <h2>WebUI Server Logs</h2>
-            </header>
-             <div class="log-controls">
-                <select id="webui-log-level-filter">
-                    <option value="ALL">ALL</option>
-                    <option value="DEBUG">DEBUG</option>
-                    <option value="INFO">INFO</option>
-                    <option value="WARNING">WARNING</option>
-                    <option value="ERROR">ERROR</option>
-                    <option value="CRITICAL">CRITICAL</option>
-                </select>
-                <input type="text" id="webui-regex-search" placeholder="Filter logs with Regex...">
+            <nav class="sidebar-nav" aria-label="功能导航">
+                <button class="nav-item is-active" type="button" data-view="dashboard">
+                    <span class="nav-index">01</span>
+                    <span class="nav-text">
+                        <strong>仪表盘</strong>
+                        <small>核心状态概览</small>
+                    </span>
+                </button>
+                <button class="nav-item" type="button" data-view="controls">
+                    <span class="nav-index">02</span>
+                    <span class="nav-text">
+                        <strong>机器人控制</strong>
+                        <small>启动与停止操作</small>
+                    </span>
+                </button>
+                <button class="nav-item" type="button" data-view="bot-logs">
+                    <span class="nav-index">03</span>
+                    <span class="nav-text">
+                        <strong>Bot 日志</strong>
+                        <small>按日期筛选查看</small>
+                    </span>
+                </button>
+                <button class="nav-item" type="button" data-view="system">
+                    <span class="nav-index">04</span>
+                    <span class="nav-text">
+                        <strong>系统信息</strong>
+                        <small>资源与 24 小时统计</small>
+                    </span>
+                </button>
+                <button class="nav-item" type="button" data-view="webui-logs">
+                    <span class="nav-index">05</span>
+                    <span class="nav-text">
+                        <strong>WebUI 日志</strong>
+                        <small>服务侧运行情况</small>
+                    </span>
+                </button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="sidebar-meta">
+                    <span class="meta-label">当前主题</span>
+                    <strong id="theme-badge">Light Mode</strong>
+                </div>
+                <div class="sidebar-meta">
+                    <span class="meta-label">机器人状态</span>
+                    <strong id="sidebar-status-text">检测中</strong>
+                </div>
+                <a href="/logout" class="logout-link">退出登录</a>
             </div>
-            <pre class="log-container" id="webui-log-container">Loading WebUI logs...</pre>
-        </div>
+        </aside>
+
+        <main class="workspace">
+            <header class="workspace-header">
+                <div class="header-copy">
+                    <button id="mobile-menu-btn" class="mobile-menu-button" type="button" aria-label="打开菜单" title="打开菜单">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                    </button>
+                    <h1 id="page-title">仪表盘</h1>
+                </div>
+                <div class="header-status">
+                    <button id="theme-toggle-btn" class="theme-toggle-button" type="button" aria-label="切换主题" title="切换主题">
+                        <span class="theme-toggle-icon" aria-hidden="true"></span>
+                    </button>
+                    <div class="status-pill status-loading" id="global-status-pill">状态检测中</div>
+                    <div class="header-note" id="last-refresh-text">尚未刷新</div>
+                </div>
+            </header>
+
+            <section class="view-panel is-active" data-view-panel="dashboard">
+                <div class="content-card hero-card">
+                    <div class="hero-copy">
+                        <h2>Web管理面板</h2>
+                    </div>
+                    <div class="hero-actions">
+                        <button class="soft-button" type="button" data-open-view="controls">前往控制页</button>
+                        <button class="soft-button" type="button" data-open-view="bot-logs">查看 Bot 日志</button>
+                    </div>
+                </div>
+
+                <div class="metric-grid">
+                    <article class="metric-card">
+                        <span class="metric-label">机器人状态</span>
+                        <strong class="metric-value" id="dashboard-status-text">检测中</strong>
+                        <span class="metric-meta" id="dashboard-heartbeat-text">等待心跳</span>
+                    </article>
+                    <article class="metric-card">
+                        <span class="metric-label">CPU 使用率</span>
+                        <strong class="metric-value" id="dashboard-cpu-text">--</strong>
+                        <span class="metric-meta" id="dashboard-ram-text">RAM --</span>
+                    </article>
+                    <article class="metric-card">
+                        <span class="metric-label">当前日志日期</span>
+                        <strong class="metric-value" id="dashboard-log-date-text">--</strong>
+                        <span class="metric-meta" id="dashboard-log-lines-text">0 行 Bot 日志</span>
+                    </article>
+                    <article class="metric-card">
+                        <span class="metric-label">WebUI 侧日志</span>
+                        <strong class="metric-value" id="dashboard-webui-count-text">0</strong>
+                        <span class="metric-meta" id="dashboard-webui-state-text">等待刷新</span>
+                    </article>
+                </div>
+
+                <div class="split-grid">
+                    <article class="content-card">
+                        <div class="section-heading">
+                            <div>
+                                <h2>当前概览</h2>
+                            </div>
+                        </div>
+                        <div class="info-list">
+                            <div class="info-row">
+                                <span>容器名称</span>
+                                <strong>Odysseia_Guidance</strong>
+                            </div>
+                            <div class="info-row">
+                                <span>系统刷新</span>
+                                <strong id="dashboard-system-refresh">尚未获取</strong>
+                            </div>
+                            <div class="info-row">
+                                <span>活跃主题</span>
+                                <strong id="dashboard-theme-text">Light Mode</strong>
+                            </div>
+                            <div class="info-row">
+                                <span>当前时区</span>
+                                <strong id="dashboard-timezone-text">未设置</strong>
+                            </div>
+                        </div>
+                    </article>
+
+                    <article class="content-card">
+                        <div class="section-heading">
+                            <div>
+                                <h2>功能入口</h2>
+                            </div>
+                        </div>
+                        <div class="shortcut-list">
+                            <button class="shortcut-card" type="button" data-open-view="controls">
+                                <strong>机器人控制</strong>
+                                <span>重启或停止容器</span>
+                            </button>
+                            <button class="shortcut-card" type="button" data-open-view="system">
+                                <strong>系统信息</strong>
+                                <span>查看 CPU、RAM、磁盘和网络</span>
+                            </button>
+                            <button class="shortcut-card" type="button" data-open-view="webui-logs">
+                                <strong>WebUI 日志</strong>
+                                <span>查看服务自身运行信息</span>
+                            </button>
+                        </div>
+                    </article>
+                </div>
+            </section>
+
+            <section class="view-panel" data-view-panel="controls">
+                <article class="content-card">
+                    <div class="section-heading">
+                        <div>
+                            <h2>机器人控制</h2>
+                        </div>
+                        <div class="inline-status status-loading" id="control-status-badge">状态检测中</div>
+                    </div>
+
+                    <div class="control-layout">
+                        <div class="action-panel">
+                            <button id="restart-btn" class="primary-button" type="button">重启 Bot 容器</button>
+                            <button id="shutdown-btn" class="danger-button" type="button">停止 Bot 容器</button>
+                        </div>
+                        <div class="info-list">
+                            <div class="info-row">
+                                <span>目标容器</span>
+                                <strong>Odysseia_Guidance</strong>
+                            </div>
+                            <div class="info-row">
+                                <span>最近操作</span>
+                                <strong id="control-last-action">尚未执行</strong>
+                            </div>
+                            <div class="info-row">
+                                <span>状态同步</span>
+                                <strong id="control-sync-text">等待轮询</strong>
+                            </div>
+                        </div>
+                    </div>
+                </article>
+            </section>
+
+            <section class="view-panel" data-view-panel="bot-logs">
+                <article class="content-card">
+                    <div class="section-heading">
+                        <div>
+                            <h2>Bot 日志</h2>
+                        </div>
+                    </div>
+
+                    <div class="toolbar-grid">
+                        <label class="field">
+                            <span>日志日期</span>
+                            <input type="date" id="log-date-picker">
+                        </label>
+                        <label class="field">
+                            <span>日志等级</span>
+                            <div id="bot-log-level-filter" class="filter-chip-group">
+                                <label class="filter-chip"><input type="checkbox" value="DEBUG"><span>DEBUG</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="INFO" checked><span>INFO</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="WARNING" checked><span>WARNING</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="ERROR" checked><span>ERROR</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="CRITICAL"><span>CRITICAL</span></label>
+                            </div>
+                        </label>
+                        <label class="field">
+                            <span>显示时区</span>
+                            <select id="timezone-selector"></select>
+                        </label>
+                        <label class="field field-wide">
+                            <span>Regex 过滤</span>
+                            <input type="text" id="bot-regex-search" placeholder="例如: ERROR|backup|guild">
+                        </label>
+                    </div>
+                    <div class="toolbar-actions">
+                        <button id="bot-auto-scroll-toggle" class="soft-button toolbar-toggle" type="button" aria-pressed="false">自动跳转底部</button>
+                    </div>
+
+                    <div class="panel-meta" id="bot-log-summary">等待日志加载</div>
+                    <pre class="log-container" id="bot-log-container">Loading logs...</pre>
+                </article>
+            </section>
+
+            <section class="view-panel" data-view-panel="system">
+                <article class="content-card">
+                    <div class="section-heading">
+                        <div>
+                            <h2>系统信息</h2>
+                        </div>
+                    </div>
+
+                    <div class="stat-grid">
+                        <div class="stat-card">
+                            <span>CPU</span>
+                            <strong id="cpu-usage-text">Loading...</strong>
+                        </div>
+                        <div class="stat-card">
+                            <span>RAM</span>
+                            <strong id="ram-usage-text">Loading...</strong>
+                        </div>
+                        <div class="stat-card">
+                            <span>Disk</span>
+                            <strong id="disk-usage-text">Loading...</strong>
+                        </div>
+                        <div class="stat-card">
+                            <span>Network</span>
+                            <strong id="network-traffic-text">Loading...</strong>
+                        </div>
+                    </div>
+
+                    <div class="split-grid">
+                        <div class="content-block">
+                            <h3>当前资源占用</h3>
+                            <div class="info-list">
+                                <div class="info-row">
+                                    <span>CPU 使用率</span>
+                                    <strong id="system-cpu-current">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>内存占用</span>
+                                    <strong id="system-ram-current">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>磁盘占用</span>
+                                    <strong id="system-disk-current">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>网络发送 / 接收</span>
+                                    <strong id="system-network-current">Loading...</strong>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="content-block">
+                            <h3>24 小时统计</h3>
+                            <div class="info-list">
+                                <div class="info-row">
+                                    <span>CPU 平均</span>
+                                    <strong id="cpu-avg-24h">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>CPU 峰值</span>
+                                    <strong id="cpu-peak-24h">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>RAM 平均</span>
+                                    <strong id="ram-avg-24h">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>RAM 峰值</span>
+                                    <strong id="ram-peak-24h">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>采样数量</span>
+                                    <strong id="sample-count-24h">0</strong>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </article>
+            </section>
+
+            <section class="view-panel" data-view-panel="webui-logs">
+                <article class="content-card">
+                    <div class="section-heading">
+                        <div>
+                            <h2>WebUI 日志</h2>
+                        </div>
+                    </div>
+
+                    <div class="toolbar-grid compact-grid">
+                        <label class="field">
+                            <span>日志等级</span>
+                            <div id="webui-log-level-filter" class="filter-chip-group">
+                                <label class="filter-chip"><input type="checkbox" value="DEBUG"><span>DEBUG</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="INFO" checked><span>INFO</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="WARNING" checked><span>WARNING</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="ERROR" checked><span>ERROR</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="CRITICAL"><span>CRITICAL</span></label>
+                            </div>
+                        </label>
+                        <label class="field field-wide">
+                            <span>Regex 过滤</span>
+                            <input type="text" id="webui-regex-search" placeholder="例如: cleanup|status|login">
+                        </label>
+                    </div>
+                    <div class="toolbar-actions">
+                        <button id="webui-auto-scroll-toggle" class="soft-button toolbar-toggle" type="button" aria-pressed="false">自动跳转底部</button>
+                    </div>
+
+                    <div class="panel-meta" id="webui-log-summary">等待 WebUI 日志加载</div>
+                    <pre class="log-container" id="webui-log-container">Loading WebUI logs...</pre>
+                </article>
+            </section>
+        </main>
     </div>
-</div>
 
 <script>
 document.addEventListener('DOMContentLoaded', () => {
-    // --- DOM Element References ---
-    const botStatusIndicator = document.getElementById('bot-status');
+    const VIEW_META = {
+        dashboard: {
+            title: '仪表盘'
+        },
+        controls: {
+            title: '机器人控制'
+        },
+        'bot-logs': {
+            title: 'Bot 日志'
+        },
+        system: {
+            title: '系统信息'
+        },
+        'webui-logs': {
+            title: 'WebUI 日志'
+        }
+    };
+
+    const pageTitle = document.getElementById('page-title');
+    const globalStatusPill = document.getElementById('global-status-pill');
+    const sidebarStatusText = document.getElementById('sidebar-status-text');
+    const lastRefreshText = document.getElementById('last-refresh-text');
+    const themeBadge = document.getElementById('theme-badge');
+    const themeToggleBtn = document.getElementById('theme-toggle-btn');
+    const dashboardThemeText = document.getElementById('dashboard-theme-text');
+    const dashboardTimezoneText = document.getElementById('dashboard-timezone-text');
+    const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+    const mobileSidebarBackdrop = document.getElementById('mobile-sidebar-backdrop');
+    const sidebar = document.querySelector('.sidebar');
+
+    const navItems = Array.from(document.querySelectorAll('.nav-item'));
+    const panels = Array.from(document.querySelectorAll('.view-panel'));
+    const openViewButtons = Array.from(document.querySelectorAll('[data-open-view]'));
+
     const logDatePicker = document.getElementById('log-date-picker');
     const botLogContainer = document.getElementById('bot-log-container');
     const botRegexInput = document.getElementById('bot-regex-search');
     const botLogLevelFilter = document.getElementById('bot-log-level-filter');
+    const botLogSummary = document.getElementById('bot-log-summary');
+    const botAutoScrollToggle = document.getElementById('bot-auto-scroll-toggle');
+
     const webuiLogContainer = document.getElementById('webui-log-container');
     const webuiLogLevelFilter = document.getElementById('webui-log-level-filter');
     const webuiRegexInput = document.getElementById('webui-regex-search');
+    const webuiLogSummary = document.getElementById('webui-log-summary');
+    const webuiAutoScrollToggle = document.getElementById('webui-auto-scroll-toggle');
+
     const timezoneSelector = document.getElementById('timezone-selector');
-    const wallpaperBtn = document.getElementById('wallpaper-btn');
     const restartBtn = document.getElementById('restart-btn');
     const shutdownBtn = document.getElementById('shutdown-btn');
-    
-    // --- State Variables ---
-    let fullBotLogContent = ""; // Cache full log content for filtering
-    let fullWebUILogContent = ""; // Cache full WebUI log content
-    let isBotLogScrolledToBottom = true; // Auto-scroll state for bot logs
-    let isWebUILogScrolledToBottom = true; // Auto-scroll state for WebUI logs
-    let selectedTimezone = localStorage.getItem('selectedTimezone') || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const controlStatusBadge = document.getElementById('control-status-badge');
+    const controlLastAction = document.getElementById('control-last-action');
+    const controlSyncText = document.getElementById('control-sync-text');
 
-    // --- Utility Functions ---
+    let fullBotLogContent = '';
+    let fullWebUILogContent = '';
+    let selectedTimezone = localStorage.getItem('selectedTimezone') || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    let preferredTheme = localStorage.getItem('preferredTheme') || 'system';
+    let botAutoScrollEnabled = false;
+    let webuiAutoScrollEnabled = false;
+    let mobileSidebarOpen = false;
+
+    const escapeHtml = (text) => text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+
     const formatDateForPicker = (date) => {
         const year = date.getFullYear();
         const month = String(date.getMonth() + 1).padStart(2, '0');
         const day = String(date.getDate()).padStart(2, '0');
         return `${year}-${month}-${day}`;
     };
-    
-    const escapeHtml = (text) => {
-        return text
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&#039;");
+
+    const formatTimestamp = (date = new Date()) =>
+        date.toLocaleString(undefined, {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        });
+
+    const syncThemeToggle = () => {
+        const isDark = document.documentElement.dataset.theme === 'dark'
+            || (preferredTheme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        const themeText = isDark ? 'Dark Mode' : 'Light Mode';
+        themeBadge.textContent = themeText;
+        dashboardThemeText.textContent = themeText;
+        themeToggleBtn.setAttribute('aria-label', isDark ? '切换浅色模式' : '切换深色模式');
+        themeToggleBtn.setAttribute('title', isDark ? '切换浅色模式' : '切换深色模式');
+        themeToggleBtn.classList.toggle('is-dark', isDark);
     };
 
-    const formatLogTimestamp = (line) => {
+    const applyThemePreference = () => {
+        if (preferredTheme === 'system') {
+            delete document.documentElement.dataset.theme;
+        } else {
+            document.documentElement.dataset.theme = preferredTheme;
+        }
+        syncThemeToggle();
+    };
+
+    const applyThemeLabel = () => {
+        if (preferredTheme === 'system') {
+            syncThemeToggle();
+        }
+    };
+
+    const getSelectedLogLevels = (container) =>
+        Array.from(container.querySelectorAll('input[type="checkbox"]:checked')).map((input) => input.value);
+
+    const scrollLogToBottom = (container) => {
+        container.scrollTop = container.scrollHeight;
+    };
+
+    const toggleAutoScroll = (button, enabled) => {
+        button.classList.toggle('is-active', enabled);
+        button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    };
+
+    const isMobileLayout = () => window.matchMedia('(max-width: 768px)').matches;
+
+    const setMobileSidebarOpen = (open) => {
+        mobileSidebarOpen = open;
+        document.body.classList.toggle('mobile-sidebar-open', open);
+        sidebar.classList.toggle('is-mobile-open', open);
+        mobileSidebarBackdrop.classList.toggle('is-visible', open);
+        mobileMenuBtn.setAttribute('aria-label', open ? '关闭菜单' : '打开菜单');
+        mobileMenuBtn.setAttribute('title', open ? '关闭菜单' : '打开菜单');
+        if (!isMobileLayout()) {
+            document.body.classList.remove('mobile-sidebar-open');
+            sidebar.classList.remove('is-mobile-open');
+            mobileSidebarBackdrop.classList.remove('is-visible');
+            mobileSidebarOpen = false;
+        }
+    };
+
+    const updateLastRefresh = () => {
+        const text = `最近刷新 ${formatTimestamp()}`;
+        lastRefreshText.textContent = text;
+        document.getElementById('dashboard-system-refresh').textContent = text;
+    };
+
+    const setActiveView = (viewName) => {
+        navItems.forEach((item) => {
+            item.classList.toggle('is-active', item.dataset.view === viewName);
+        });
+        panels.forEach((panel) => {
+            panel.classList.toggle('is-active', panel.dataset.viewPanel === viewName);
+        });
+
+        const meta = VIEW_META[viewName];
+        pageTitle.textContent = meta.title;
+
+        if (viewName === 'bot-logs') {
+            fetchBotLogs();
+        }
+        if (viewName === 'system') {
+            fetchSystemInfo();
+        }
+        if (viewName === 'webui-logs') {
+            fetchWebUILogs();
+        }
+
+        if (isMobileLayout() && mobileSidebarOpen) {
+            setMobileSidebarOpen(false);
+        }
+    };
+
+    const setStatusAppearance = (status) => {
+        const normalized = status === 'RUNNING' ? 'RUNNING' : 'DOWN';
+        const label = normalized === 'RUNNING' ? '运行中' : '离线';
+        const statusClass = normalized === 'RUNNING' ? 'status-running' : 'status-down';
+
+        globalStatusPill.textContent = `机器人 ${label}`;
+        globalStatusPill.className = `status-pill ${statusClass}`;
+
+        controlStatusBadge.textContent = label;
+        controlStatusBadge.className = `inline-status ${statusClass}`;
+
+        sidebarStatusText.textContent = label;
+        document.getElementById('dashboard-status-text').textContent = label;
+        document.getElementById('dashboard-heartbeat-text').textContent = `状态更新时间 ${formatTimestamp()}`;
+        controlSyncText.textContent = `上次同步 ${formatTimestamp()}`;
+    };
+
+    const populateTimezones = () => {
+        const timezones = [
+            selectedTimezone,
+            'UTC',
+            'Asia/Shanghai',
+            'Asia/Tokyo',
+            'Europe/Berlin',
+            'America/Los_Angeles',
+            'America/New_York'
+        ];
+
+        Array.from(new Set(timezones)).forEach((tz) => {
+            const option = document.createElement('option');
+            option.value = tz;
+            option.textContent = tz;
+            option.selected = tz === selectedTimezone;
+            timezoneSelector.appendChild(option);
+        });
+
+        dashboardTimezoneText.textContent = selectedTimezone;
+    };
+
+    const localizeBotLogTimestamp = (line) => {
         const timestampRegex = /\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)\]/;
         const match = line.match(timestampRegex);
-        if (match) {
-            const utcDate = new Date(match[1]);
-            const localTimestamp = utcDate.toLocaleString(undefined, { timeZone: selectedTimezone, hour12: false });
-            return line.replace(match[1], localTimestamp);
+        if (!match) {
+            return line;
         }
-        return line;
+
+        const utcDate = new Date(match[1]);
+        const localized = utcDate.toLocaleString(undefined, {
+            timeZone: selectedTimezone,
+            hour12: false
+        });
+        return line.replace(match[1], localized);
     };
 
-    // --- Core Functions ---
+    const renderBotLogs = () => {
+        const regexStr = botRegexInput.value.trim();
+        const selectedLevels = getSelectedLogLevels(botLogLevelFilter);
+        let lines = fullBotLogContent.split('\n').filter((line) => line.trim());
+
+        if (!selectedLevels.length) {
+            lines = [];
+        } else {
+            lines = lines.filter((line) => selectedLevels.some((level) => line.includes(`[${level}]`)));
+        }
+
+        if (regexStr) {
+            try {
+                const regex = new RegExp(regexStr, 'i');
+                lines = lines.filter((line) => regex.test(line));
+            } catch (error) {
+                botLogContainer.textContent = 'Invalid Regex...';
+                botLogSummary.textContent = '正则表达式无效';
+                return;
+            }
+        }
+
+        if (!lines.length) {
+            botLogContainer.textContent = 'No matching logs.';
+            botLogSummary.textContent = '当前筛选条件下没有匹配的 Bot 日志';
+            document.getElementById('dashboard-log-lines-text').textContent = '0 行 Bot 日志';
+            return;
+        }
+
+        const html = lines.map((line) => {
+            const localizedLine = escapeHtml(localizeBotLogTimestamp(line));
+            if (localizedLine.includes('[CRITICAL]')) return `<span class="log-critical">${localizedLine}</span>`;
+            if (localizedLine.includes('[ERROR]')) return `<span class="log-error">${localizedLine}</span>`;
+            if (localizedLine.includes('[WARNING]')) return `<span class="log-warning">${localizedLine}</span>`;
+            if (localizedLine.includes('[INFO]')) return `<span class="log-info">${localizedLine}</span>`;
+            if (localizedLine.includes('[DEBUG]')) return `<span class="log-debug">${localizedLine}</span>`;
+            return `<span>${localizedLine}</span>`;
+        }).join('');
+
+        botLogContainer.innerHTML = html;
+        botLogSummary.textContent = `${lines.length} 行日志，时区 ${selectedTimezone}`;
+        document.getElementById('dashboard-log-lines-text').textContent = `${lines.length} 行 Bot 日志`;
+        if (botAutoScrollEnabled) {
+            scrollLogToBottom(botLogContainer);
+        }
+    };
+
+    const renderWebUILogs = () => {
+        const regexStr = webuiRegexInput.value.trim();
+        const selectedLevels = getSelectedLogLevels(webuiLogLevelFilter);
+        let lines = fullWebUILogContent.split('\n').filter((line) => line.trim());
+
+        if (!selectedLevels.length) {
+            lines = [];
+        } else {
+            lines = lines.filter((line) => {
+                const upper = line.toUpperCase();
+                return selectedLevels.some((level) => upper.includes(` ${level} `));
+            });
+        }
+
+        if (regexStr) {
+            try {
+                const regex = new RegExp(regexStr, 'i');
+                lines = lines.filter((line) => regex.test(line));
+            } catch (error) {
+                webuiLogContainer.textContent = 'Invalid Regex...';
+                webuiLogSummary.textContent = '正则表达式无效';
+                return;
+            }
+        }
+
+        if (!lines.length) {
+            webuiLogContainer.textContent = 'No matching logs.';
+            webuiLogSummary.textContent = '当前筛选条件下没有匹配的 WebUI 日志';
+            document.getElementById('dashboard-webui-count-text').textContent = '0';
+            return;
+        }
+
+        const html = lines.map((line) => {
+            const escapedLine = escapeHtml(line);
+            const upper = escapedLine.toUpperCase();
+            if (upper.includes(' CRITICAL ')) return `<span class="log-critical">${escapedLine}</span>`;
+            if (upper.includes(' ERROR ')) return `<span class="log-error">${escapedLine}</span>`;
+            if (upper.includes(' WARNING ')) return `<span class="log-warning">${escapedLine}</span>`;
+            if (upper.includes(' INFO ')) return `<span class="log-info">${escapedLine}</span>`;
+            if (upper.includes(' DEBUG ')) return `<span class="log-debug">${escapedLine}</span>`;
+            return `<span>${escapedLine}</span>`;
+        }).join('');
+
+        webuiLogContainer.innerHTML = html;
+        webuiLogSummary.textContent = `${lines.length} 行 WebUI 日志`;
+        document.getElementById('dashboard-webui-count-text').textContent = String(lines.length);
+        document.getElementById('dashboard-webui-state-text').textContent = `最近刷新 ${formatTimestamp()}`;
+        if (webuiAutoScrollEnabled) {
+            scrollLogToBottom(webuiLogContainer);
+        }
+    };
+
     const fetchBotStatus = async () => {
         try {
             const response = await fetch('/api/status');
             const data = await response.json();
-            botStatusIndicator.textContent = data.status;
-            botStatusIndicator.className = 'status-indicator ' + (data.status === 'RUNNING' ? 'status-running' : 'status-down');
+            setStatusAppearance(data.status);
+            updateLastRefresh();
         } catch (error) {
-            botStatusIndicator.textContent = 'ERROR';
-            botStatusIndicator.className = 'status-indicator status-down';
-            console.error("Failed to fetch status:", error);
-        }
-    };
-
-    const sendControlCommand = async (action) => {
-        const endpoint = action === 'restart' ? '/api/bot/restart' : '/api/bot/shutdown';
-        const confirmationMessage = `Are you sure you want to ${action} the bot?`;
-
-        if (confirm(confirmationMessage)) {
-            try {
-                // Immediately update status visually
-                botStatusIndicator.textContent = 'DOWN';
-                botStatusIndicator.className = 'status-indicator status-down';
-
-                const response = await fetch(endpoint, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                });
-
-                if (!response.ok) {
-                    const errorData = await response.json();
-                    console.error(`Failed to ${action}:`, errorData.message);
-                    // Optionally revert status or show an error message to the user
-                    alert(`Error: ${errorData.message}`);
-                    fetchBotStatus(); // Re-fetch to get the actual status
-                }
-            } catch (error) {
-                console.error(`An error occurred during ${action}:`, error);
-                alert(`An unexpected error occurred. See console for details.`);
-                fetchBotStatus(); // Re-fetch to get the actual status
-            }
+            setStatusAppearance('DOWN');
+            globalStatusPill.textContent = '状态获取失败';
+            sidebarStatusText.textContent = '获取失败';
+            controlSyncText.textContent = '状态轮询失败';
         }
     };
 
     const fetchBotLogs = async () => {
         const selectedDate = logDatePicker.value;
-        if (!selectedDate) return;
+        if (!selectedDate) {
+            return;
+        }
 
         try {
             const response = await fetch(`/api/logs?date=${selectedDate}`);
             const data = await response.json();
-            if (data.logs !== fullBotLogContent) {
-                fullBotLogContent = data.logs;
-                renderBotLogs();
-            }
+            fullBotLogContent = data.logs || '';
+            document.getElementById('dashboard-log-date-text').textContent = data.date || selectedDate;
+            renderBotLogs();
         } catch (error) {
+            fullBotLogContent = '';
             botLogContainer.textContent = `Error fetching logs for ${selectedDate}.`;
-            console.error("Failed to fetch logs:", error);
+            botLogSummary.textContent = 'Bot 日志加载失败';
         }
     };
 
@@ -223,88 +725,12 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch('/api/webui-logs');
             const data = await response.json();
-            if (data.logs !== fullWebUILogContent) {
-                fullWebUILogContent = data.logs;
-                renderWebUILogs();
-            }
+            fullWebUILogContent = data.logs || '';
+            renderWebUILogs();
         } catch (error) {
+            fullWebUILogContent = '';
             webuiLogContainer.textContent = 'Error fetching WebUI logs.';
-            console.error("Failed to fetch WebUI logs:", error);
-        }
-    };
-
-    const renderBotLogs = () => {
-        const regexStr = botRegexInput.value;
-        const logLevel = botLogLevelFilter.value;
-        let lines = fullBotLogContent.split('\n');
-
-        if (logLevel !== 'ALL') {
-            lines = lines.filter(line => line.includes(`[${logLevel}]`));
-        }
-
-        if (regexStr) {
-            try {
-                const regex = new RegExp(regexStr, 'gi');
-                lines = lines.filter(line => line.match(regex));
-            } catch (e) {
-                botLogContainer.textContent = "Invalid Regex...";
-                return;
-            }
-        }
-
-        const formattedHtml = lines.map(line => {
-            const localizedLine = formatLogTimestamp(line);
-            const escapedLine = escapeHtml(localizedLine);
-            if (escapedLine.includes('[INFO]')) return `<span class="log-info">${escapedLine}</span>`;
-            if (escapedLine.includes('[WARNING]')) return `<span class="log-warning">${escapedLine}</span>`;
-            if (escapedLine.includes('[ERROR]')) return `<span class="log-error">${escapedLine}</span>`;
-            if (escapedLine.includes('[CRITICAL]')) return `<span class="log-critical">${escapedLine}</span>`;
-            if (escapedLine.includes('[DEBUG]')) return `<span class="log-debug">${escapedLine}</span>`;
-            return `<span>${escapedLine}</span>`;
-        }).join('');
-
-        botLogContainer.innerHTML = formattedHtml;
-        
-        // Auto-scroll if user was at the bottom
-        if (isBotLogScrolledToBottom) {
-            botLogContainer.scrollTop = botLogContainer.scrollHeight;
-        }
-    };
-
-    const renderWebUILogs = () => {
-        const regexStr = webuiRegexInput.value;
-        const logLevel = webuiLogLevelFilter.value;
-        let lines = fullWebUILogContent.split('\n');
-
-        if (logLevel !== 'ALL') {
-            lines = lines.filter(line => line.toUpperCase().includes(` ${logLevel} `));
-        }
-
-        if (regexStr) {
-            try {
-                const regex = new RegExp(regexStr, 'gi');
-                lines = lines.filter(line => line.match(regex));
-            } catch (e) {
-                webuiLogContainer.textContent = "Invalid Regex...";
-                return;
-            }
-        }
-
-        const formattedHtml = lines.map(line => {
-            const escapedLine = escapeHtml(line);
-            if (escapedLine.toUpperCase().includes(' INFO ')) return `<span class="log-info">${escapedLine}</span>`;
-            if (escapedLine.toUpperCase().includes(' WARNING ')) return `<span class="log-warning">${escapedLine}</span>`;
-            if (escapedLine.toUpperCase().includes(' ERROR ')) return `<span class="log-error">${escapedLine}</span>`;
-            if (escapedLine.toUpperCase().includes(' CRITICAL ')) return `<span class="log-critical">${escapedLine}</span>`;
-            if (escapedLine.toUpperCase().includes(' DEBUG ')) return `<span class="log-debug">${escapedLine}</span>`;
-            return `<span>${escapedLine}</span>`;
-        }).join('');
-
-        webuiLogContainer.innerHTML = formattedHtml;
-
-        // Auto-scroll if user was at the bottom
-        if (isWebUILogScrolledToBottom) {
-            webuiLogContainer.scrollTop = webuiLogContainer.scrollHeight;
+            webuiLogSummary.textContent = 'WebUI 日志加载失败';
         }
     };
 
@@ -312,139 +738,184 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch('/api/system-info');
             const data = await response.json();
-
-            // --- 更新当前使用情况 ---
             const current = data.current;
-            document.getElementById('cpu-usage-text').textContent = `${current.cpu_usage.toFixed(1)}%`;
-            document.getElementById('ram-usage-text').textContent = `${current.ram_usage_percent.toFixed(1)}% (${current.ram_usage_mb.toFixed(2)} MB / ${current.ram_total_mb.toFixed(2)} MB)`;
-            document.getElementById('disk-usage-text').textContent = `${current.disk_usage.percent}% (${current.disk_usage.used} / ${current.disk_usage.total})`;
-            document.getElementById('net-sent-text').textContent = `${(current.net_io.bytes_sent / 1024 / 1024).toFixed(2)} MB`;
-            document.getElementById('net-recv-text').textContent = `${(current.net_io.bytes_recv / 1024 / 1024).toFixed(2)} MB`;
-
-            // --- 更新24小时统计 ---
             const stats = data.stats_24h;
+
+            const cpuText = `${current.cpu_usage.toFixed(1)}%`;
+            const ramText = `${current.ram_usage_percent.toFixed(1)}% (${current.ram_usage_mb.toFixed(2)} MB / ${current.ram_total_mb.toFixed(2)} MB)`;
+            const diskText = `${current.disk_usage.percent}% (${current.disk_usage.used} / ${current.disk_usage.total})`;
+            const networkText = `${(current.net_io.bytes_sent / 1024 / 1024).toFixed(2)} MB / ${(current.net_io.bytes_recv / 1024 / 1024).toFixed(2)} MB`;
+
+            document.getElementById('cpu-usage-text').textContent = cpuText;
+            document.getElementById('ram-usage-text').textContent = ramText;
+            document.getElementById('disk-usage-text').textContent = diskText;
+            document.getElementById('network-traffic-text').textContent = networkText;
+            document.getElementById('system-cpu-current').textContent = cpuText;
+            document.getElementById('system-ram-current').textContent = ramText;
+            document.getElementById('system-disk-current').textContent = diskText;
+            document.getElementById('system-network-current').textContent = networkText;
+
             document.getElementById('cpu-avg-24h').textContent = `${stats.cpu_avg.toFixed(1)}%`;
             document.getElementById('cpu-peak-24h').textContent = `${stats.cpu_peak.toFixed(1)}%`;
             document.getElementById('ram-avg-24h').textContent = `${stats.ram_avg_percent.toFixed(1)}% (${stats.ram_avg_mb.toFixed(2)} MB)`;
             document.getElementById('ram-peak-24h').textContent = `${stats.ram_peak_percent.toFixed(1)}% (${stats.ram_peak_mb.toFixed(2)} MB)`;
-            document.getElementById('sample-count-24h').textContent = stats.sample_count;
+            document.getElementById('sample-count-24h').textContent = String(stats.sample_count);
 
+            document.getElementById('dashboard-cpu-text').textContent = cpuText;
+            document.getElementById('dashboard-ram-text').textContent = `RAM ${current.ram_usage_percent.toFixed(1)}%`;
+            updateLastRefresh();
         } catch (error) {
-            console.error("Failed to fetch system info:", error);
-            // 将所有相关字段都设置为错误状态
-            const fieldsToUpdate = [
-                'cpu-usage-text', 'ram-usage-text', 'disk-usage-text',
-                'net-sent-text', 'net-recv-text', 'cpu-avg-24h',
-                'cpu-peak-24h', 'ram-avg-24h', 'ram-peak-24h'
-            ];
-            fieldsToUpdate.forEach(id => {
-                const el = document.getElementById(id);
-                if (el) el.textContent = 'Error';
+            [
+                'cpu-usage-text',
+                'ram-usage-text',
+                'disk-usage-text',
+                'network-traffic-text',
+                'system-cpu-current',
+                'system-ram-current',
+                'system-disk-current',
+                'system-network-current',
+                'cpu-avg-24h',
+                'cpu-peak-24h',
+                'ram-avg-24h',
+                'ram-peak-24h'
+            ].forEach((id) => {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.textContent = 'Error';
+                }
             });
+            document.getElementById('dashboard-cpu-text').textContent = 'Error';
+            document.getElementById('dashboard-ram-text').textContent = '系统信息获取失败';
         }
     };
 
-    const populateTimezones = () => {
-        const timezones = [];
-        for (let i = -12; i <= 12; i++) {
-            const offset = i >= 0 ? `+${i}` : `${i}`;
-            const tz = `Etc/GMT${i > 0 ? '-' : '+'}${Math.abs(i)}`;
-            timezones.push({value: tz, text: `UTC${offset}`});
+    const sendControlCommand = async (action) => {
+        const endpoint = action === 'restart' ? '/api/bot/restart' : '/api/bot/shutdown';
+        const actionText = action === 'restart' ? '重启' : '停止';
+        const confirmed = confirm(`确认要${actionText} Bot 容器吗？`);
+        if (!confirmed) {
+            return;
         }
-        
-        timezones.forEach(tz => {
-            const option = document.createElement('option');
-            option.value = tz.value;
-            option.textContent = tz.text;
-            if (tz.value === selectedTimezone) {
-                option.selected = true;
+
+        try {
+            controlLastAction.textContent = `${actionText}请求发送中`;
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.message || `${actionText}失败`);
             }
-            timezoneSelector.appendChild(option);
-        });
-    };
 
-    const setWallpaper = (url) => {
-        if (url) {
-            document.body.style.backgroundImage = `url('${url}')`;
-            localStorage.setItem('wallpaperUrl', url);
+            controlLastAction.textContent = `${actionText}成功: ${formatTimestamp()}`;
+            fetchBotStatus();
+        } catch (error) {
+            controlLastAction.textContent = `${actionText}失败: ${error.message}`;
+            alert(error.message);
         }
     };
 
-    const loadWallpaper = () => {
-        const savedUrl = localStorage.getItem('wallpaperUrl');
-        if (savedUrl) {
-            setWallpaper(savedUrl);
+    navItems.forEach((item) => {
+        item.addEventListener('click', () => setActiveView(item.dataset.view));
+    });
+
+    openViewButtons.forEach((button) => {
+        button.addEventListener('click', () => setActiveView(button.dataset.openView));
+    });
+
+    logDatePicker.addEventListener('change', fetchBotLogs);
+    botLogLevelFilter.querySelectorAll('input[type="checkbox"]').forEach((checkbox) => {
+        checkbox.addEventListener('change', renderBotLogs);
+    });
+    botRegexInput.addEventListener('input', renderBotLogs);
+    webuiLogLevelFilter.querySelectorAll('input[type="checkbox"]').forEach((checkbox) => {
+        checkbox.addEventListener('change', renderWebUILogs);
+    });
+    webuiRegexInput.addEventListener('input', renderWebUILogs);
+    timezoneSelector.addEventListener('change', (event) => {
+        selectedTimezone = event.target.value;
+        localStorage.setItem('selectedTimezone', selectedTimezone);
+        dashboardTimezoneText.textContent = selectedTimezone;
+        renderBotLogs();
+    });
+    themeToggleBtn.addEventListener('click', () => {
+        const currentIsDark = document.documentElement.dataset.theme === 'dark'
+            || (preferredTheme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        preferredTheme = currentIsDark ? 'light' : 'dark';
+        localStorage.setItem('preferredTheme', preferredTheme);
+        applyThemePreference();
+    });
+    mobileMenuBtn.addEventListener('click', () => {
+        if (!isMobileLayout()) {
+            return;
         }
-    };
- 
-     // --- Initial setup and Event Listeners ---
-     const initializeDashboard = () => {
-        // 0. Load wallpaper
-        loadWallpaper();
+        setMobileSidebarOpen(!mobileSidebarOpen);
+    });
+    mobileSidebarBackdrop.addEventListener('click', () => {
+        setMobileSidebarOpen(false);
+    });
+    botAutoScrollToggle.addEventListener('click', () => {
+        botAutoScrollEnabled = !botAutoScrollEnabled;
+        toggleAutoScroll(botAutoScrollToggle, botAutoScrollEnabled);
+        if (botAutoScrollEnabled) {
+            scrollLogToBottom(botLogContainer);
+        }
+    });
+    webuiAutoScrollToggle.addEventListener('click', () => {
+        webuiAutoScrollEnabled = !webuiAutoScrollEnabled;
+        toggleAutoScroll(webuiAutoScrollToggle, webuiAutoScrollEnabled);
+        if (webuiAutoScrollEnabled) {
+            scrollLogToBottom(webuiLogContainer);
+        }
+    });
+    restartBtn.addEventListener('click', () => sendControlCommand('restart'));
+    shutdownBtn.addEventListener('click', () => sendControlCommand('shutdown'));
 
-         // 1. Populate Timezones
-        populateTimezones();
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyThemeLabel);
+    window.matchMedia('(max-width: 768px)').addEventListener('change', () => {
+        setMobileSidebarOpen(false);
+    });
 
-        // 2. Configure Date Picker
-        const today = new Date();
-        const sevenDaysAgo = new Date();
-        sevenDaysAgo.setDate(today.getDate() - 7);
+    const today = new Date();
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(today.getDate() - 7);
 
-        logDatePicker.max = formatDateForPicker(today);
-        logDatePicker.min = formatDateForPicker(sevenDaysAgo);
-        logDatePicker.value = logDatePicker.max;
+    logDatePicker.max = formatDateForPicker(today);
+    logDatePicker.min = formatDateForPicker(sevenDaysAgo);
+    logDatePicker.value = logDatePicker.max;
 
-        // 3. Add Event Listeners
-        logDatePicker.addEventListener('change', fetchBotLogs);
-        botRegexInput.addEventListener('keyup', renderBotLogs);
-        botLogLevelFilter.addEventListener('change', renderBotLogs);
-        webuiLogLevelFilter.addEventListener('change', renderWebUILogs);
-        webuiRegexInput.addEventListener('keyup', renderWebUILogs);
-        timezoneSelector.addEventListener('change', (event) => {
-            selectedTimezone = event.target.value;
-            localStorage.setItem('selectedTimezone', selectedTimezone);
-            renderBotLogs();
-        });
+    populateTimezones();
+    applyThemePreference();
+    toggleAutoScroll(botAutoScrollToggle, botAutoScrollEnabled);
+    toggleAutoScroll(webuiAutoScrollToggle, webuiAutoScrollEnabled);
+    fetchBotStatus();
+    fetchBotLogs();
+    fetchWebUILogs();
+    fetchSystemInfo();
 
-        wallpaperBtn.addEventListener('click', () => {
-            const newWallpaperUrl = prompt("Please enter the URL for the new wallpaper:", localStorage.getItem('wallpaperUrl') || '');
-            if (newWallpaperUrl) {
-                setWallpaper(newWallpaperUrl);
-            }
-        });
+    setInterval(fetchBotStatus, 3000);
+    setInterval(fetchSystemInfo, 5000);
+    setInterval(fetchWebUILogs, 5000);
+    setInterval(() => {
+        if (logDatePicker.value === formatDateForPicker(new Date())) {
+            fetchBotLogs();
+        }
+    }, 4000);
+    setInterval(() => {
+        if (botAutoScrollEnabled) {
+            scrollLogToBottom(botLogContainer);
+        }
+        if (webuiAutoScrollEnabled) {
+            scrollLogToBottom(webuiLogContainer);
+        }
+    }, 500);
 
-        restartBtn.addEventListener('click', () => sendControlCommand('restart'));
-        shutdownBtn.addEventListener('click', () => sendControlCommand('shutdown'));
-        
-        // Keep track of user scrolling
-        botLogContainer.addEventListener('scroll', () => {
-            // A small buffer is added to account for fractional pixel values
-            isBotLogScrolledToBottom = botLogContainer.scrollHeight - botLogContainer.clientHeight <= botLogContainer.scrollTop + 1;
-        });
-
-        webuiLogContainer.addEventListener('scroll', () => {
-            isWebUILogScrolledToBottom = webuiLogContainer.scrollHeight - webuiLogContainer.clientHeight <= webuiLogContainer.scrollTop + 1;
-        });
-
-        // 4. Initial Data Fetch and Polling
-        fetchBotStatus();
-        fetchBotLogs();
-        fetchWebUILogs();
-        setInterval(fetchBotStatus, 3000);
-        setInterval(fetchSystemInfo, 2000); // Fetch system info every 2 seconds
-        setInterval(fetchWebUILogs, 5000); // Fetch WebUI logs every 5 seconds
-        setInterval(() => {
-            // Only auto-refresh if viewing today's logs
-            if (logDatePicker.value === formatDateForPicker(new Date())) {
-                fetchBotLogs();
-            }
-        }, 2000);
-        fetchSystemInfo(); // Initial fetch
-    };
-
-    initializeDashboard();
+    setActiveView('dashboard');
 });
 </script>
-
 </body>
 </html>

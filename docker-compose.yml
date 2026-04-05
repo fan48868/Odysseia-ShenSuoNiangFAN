@@ -22,6 +22,17 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     container_name: Odysseia_Guidance
+    environment:
+      RUNNING_IN_DOCKER: true
+      DB_HOST: db
+      DB_PORT: 5432
+      WEBUI_LOG_SERVER_URL: "http://config_web:80/api/log"
+      http_proxy: ${CONTAINER_HTTP_PROXY:-http://host.docker.internal:7890}
+      https_proxy: ${CONTAINER_HTTPS_PROXY:-http://host.docker.internal:7890}
+      HTTP_PROXY: ${CONTAINER_HTTP_PROXY:-http://host.docker.internal:7890}
+      HTTPS_PROXY: ${CONTAINER_HTTPS_PROXY:-http://host.docker.internal:7890}
+      NO_PROXY: ${CONTAINER_NO_PROXY:-localhost,127.0.0.1,db,config_web}
+      no_proxy: ${CONTAINER_NO_PROXY:-localhost,127.0.0.1,db,config_web}
     volumes:
       - .:/app
       - ./data:/app/data
@@ -42,20 +53,20 @@ services:
       db:
         condition: service_healthy
 
-  # config_web:
-  #   <<: *app_base
-  #   container_name: config_web
-  #   restart: unless-stopped
-  #   ports:
-  #     - "${CONFIG_WEB_PORT:-8080}:80"
-  #   volumes:
-  #     - .:/app
-  #     - /var/run/docker.sock:/var/run/docker.sock
-  #   # For container debugging, replace this with: sleep infinity
-  #   command: gunicorn --chdir ./web --worker-class eventlet -w 1 --bind 0.0.0.0:80 "web-main:web_app"
-  #   depends_on:
-  #     db:
-  #       condition: service_healthy
+  config_web:
+    <<: *app_base
+    container_name: config_web
+    restart: unless-stopped
+    ports:
+      - "${CONFIG_WEB_PORT:-8080}:80"
+    volumes:
+      - .:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    command: gunicorn --chdir ./web -k uvicorn.workers.UvicornWorker -w 1 --bind 0.0.0.0:80 "web_main:web_app"
+    depends_on:
+      db:
+        condition: service_healthy
 
   db:
     image: paradedb/paradedb@sha256:23079f9f0a2dbb427e413179a056a93cb892e9b6d3627dad82c12cedd22be39e
@@ -81,3 +92,4 @@ services:
 networks:
   bot_network:
     driver: bridge
+    
