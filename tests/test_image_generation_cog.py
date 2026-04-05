@@ -2,11 +2,14 @@ import base64
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
 from src.chat.features.image_generation.cogs.image_generation_cog import (
     PRESET_CHARACTER_PROMPT,
     GatewayImageClient,
+    PublicGeneratedImageView,
 )
 
 
@@ -114,3 +117,15 @@ def test_collect_grok_b64_payload_candidates():
 def test_preset_character_prompt_contains_both_characters():
     assert "神所娘：" in PRESET_CHARACTER_PROMPT
     assert "类脑娘：" in PRESET_CHARACTER_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_public_generated_image_view_has_permanent_delete_button():
+    view = PublicGeneratedImageView(requester_user_id=123456)
+
+    assert view.timeout is None
+    assert view.requester_user_id == 123456
+    assert len(view.children) == 1
+
+    delete_button = view.children[0]
+    assert delete_button.label == "删除"

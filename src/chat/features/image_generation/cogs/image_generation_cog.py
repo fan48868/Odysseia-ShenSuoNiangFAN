@@ -824,6 +824,53 @@ class PromptInputModal(discord.ui.Modal, title="输入提示词"):
         await self.parent_view.refresh_panel()
 
 
+class PublicGeneratedImageView(discord.ui.View):
+    def __init__(self, requester_user_id: int):
+        super().__init__(timeout=None)
+        self.requester_user_id = requester_user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user and interaction.user.id == self.requester_user_id:
+            return True
+
+        await interaction.response.send_message("只有生成这张图片的人可以删除它。", ephemeral=True)
+        return False
+
+    @discord.ui.button(
+        label="删除",
+        style=discord.ButtonStyle.danger,
+        custom_id="generated_image_delete",
+    )
+    async def delete_generated_message(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if interaction.message is None:
+            await interaction.response.send_message("找不到要删除的图片消息。", ephemeral=True)
+            return
+
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException:
+            pass
+
+        try:
+            await interaction.message.delete()
+            self.stop()
+        except discord.Forbidden:
+            if interaction.response.is_done():
+                await interaction.followup.send("我没有权限删除这条消息。", ephemeral=True)
+            else:
+                await interaction.response.send_message("我没有权限删除这条消息。", ephemeral=True)
+        except discord.HTTPException as exc:
+            error_message = f"删除图片消息失败：{exc}"
+            if interaction.response.is_done():
+                await interaction.followup.send(error_message, ephemeral=True)
+            else:
+                await interaction.response.send_message(error_message, ephemeral=True)
+
+
 class ImageGenerationPanelView(discord.ui.View):
     def __init__(
         self,
@@ -1068,6 +1115,7 @@ class ImageGenerationPanelView(discord.ui.View):
         return await channel.send(
             file=image_file,
             embed=self._build_public_embed(requester),
+            view=PublicGeneratedImageView(requester.id),
         )
 
     async def _generate_image(self, interaction: discord.Interaction) -> None:
