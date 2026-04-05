@@ -17,7 +17,7 @@ from src.backup.backup_manager import backup_databases
 # 这样可以确保所有模块在加载时都能访问到 .env 文件中定义的配置
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT_DOTENV_PATH = os.path.join(PROJECT_ROOT, ".env")
-load_dotenv(dotenv_path=PROJECT_DOTENV_PATH, override=True, encoding="utf-8")
+load_dotenv(dotenv_path=PROJECT_DOTENV_PATH, override=False, encoding="utf-8")
 
 # 从我们自己的模块中导入
 from src import config
@@ -50,6 +50,9 @@ if parent_dir not in sys.path:
 log_server_url = os.getenv("WEBUI_LOG_SERVER_URL", "http://config_web:80/api/log")
 heartbeat_interval = 1.0  # 心跳包间隔
 enable_webui = os.getenv("ENABLE_WEBUI", "true").lower() == "true"
+webui_log_batch_size = int(os.getenv("WEBUI_LOG_BATCH_SIZE", "200"))
+webui_log_timeout = float(os.getenv("WEBUI_LOG_TIMEOUT", "5.0"))
+webui_log_backlog_limit = int(os.getenv("WEBUI_LOG_BACKLOG_LIMIT", "5000"))
 
 log_queue = queue.Queue()
 
@@ -64,26 +67,34 @@ class QueueHandler(logging.Handler):
 
 
 def heartbeat_sender():
+    pending_logs = []
     while 1:
         time.sleep(heartbeat_interval)
-        logs_to_send = []
-        while not log_queue.empty():
+        while len(pending_logs) < webui_log_batch_size and not log_queue.empty():
             try:
-                logs_to_send.append(log_queue.get_nowait())
+                pending_logs.append(log_queue.get_nowait())
             except queue.Empty:
                 break
+
+        if len(pending_logs) > webui_log_backlog_limit:
+            pending_logs = pending_logs[-webui_log_backlog_limit:]
+
+        logs_to_send = pending_logs[:webui_log_batch_size]
 
         try:
             payload = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "logs": logs_to_send,
             }
-            response = requests.post(log_server_url, json=payload, timeout=2.0)
+            response = requests.post(log_server_url, json=payload, timeout=webui_log_timeout)
             if response.status_code != 200:
                 print(
                     f"Heartbeat Error: Received status {response.status_code}",
                     file=sys.stderr,
                 )  # 不适用logging
+            else:
+                if logs_to_send:
+                    pending_logs = pending_logs[len(logs_to_send):]
 
         except requests.exceptions.RequestException as e:
             print(

@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PROJECT_DOTENV_PATH = os.path.join(PROJECT_ROOT, ".env")
-load_dotenv(dotenv_path=PROJECT_DOTENV_PATH, override=True, encoding="utf-8")
+load_dotenv(dotenv_path=PROJECT_DOTENV_PATH, override=False, encoding="utf-8")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 

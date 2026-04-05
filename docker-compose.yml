@@ -26,13 +26,7 @@ services:
       RUNNING_IN_DOCKER: true
       DB_HOST: db
       DB_PORT: 5432
-      WEBUI_LOG_SERVER_URL: "http://config_web:80/api/log"
-      http_proxy: ${CONTAINER_HTTP_PROXY:-http://host.docker.internal:7890}
-      https_proxy: ${CONTAINER_HTTPS_PROXY:-http://host.docker.internal:7890}
-      HTTP_PROXY: ${CONTAINER_HTTP_PROXY:-http://host.docker.internal:7890}
-      HTTPS_PROXY: ${CONTAINER_HTTPS_PROXY:-http://host.docker.internal:7890}
-      NO_PROXY: ${CONTAINER_NO_PROXY:-localhost,127.0.0.1,db,config_web}
-      no_proxy: ${CONTAINER_NO_PROXY:-localhost,127.0.0.1,db,config_web}
+      WEBUI_LOG_SERVER_URL: "http://host.docker.internal:${CONFIG_WEB_PORT:-8080}/api/log"
     volumes:
       - .:/app
       - ./data:/app/data
@@ -64,6 +58,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
 
     command: gunicorn --chdir ./web -k uvicorn.workers.UvicornWorker -w 1 --bind 0.0.0.0:80 "web_main:web_app"
+    networks:
+      - webui_public
     depends_on:
       db:
         condition: service_healthy
@@ -92,4 +88,8 @@ services:
 networks:
   bot_network:
     driver: bridge
+  webui_public:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-webui
     

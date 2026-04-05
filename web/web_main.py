@@ -24,7 +24,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 dotenv_path = os.path.join(project_root, ".env")
-load_dotenv(dotenv_path=dotenv_path, override=True, encoding="utf-8")
+load_dotenv(dotenv_path=dotenv_path, override=False, encoding="utf-8")
 
 from web.log import run_daily_cleanup_if_needed
 
