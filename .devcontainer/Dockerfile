@@ -5,7 +5,9 @@ WORKDIR /opt/pysetup
 COPY requirements.txt .
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --target /opt/pysetup/deps -r requirements.txt
+    pip install --default-timeout=1000 \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    --target /opt/pysetup/deps -r requirements.txt
 
 FROM python:3.11.5-slim
 
