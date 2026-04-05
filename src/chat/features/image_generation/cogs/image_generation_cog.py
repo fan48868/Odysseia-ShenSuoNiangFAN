@@ -22,6 +22,10 @@ from src import config
 
 log = logging.getLogger(__name__)
 
+PRESET_CHARACTER_PROMPT = """主角:
+神所娘：一位动漫少女，拥有及肩的棕色渐变短发，一侧编有麻花辫，辫子上装饰着🤣图标发饰。她有着大而富有表现力的棕色眼睛。身穿白色翻领衬衫、黑色领带和棕色V领毛衣背心。
+类脑娘：和神所娘穿着外貌都相同，唯一不同的是类脑娘辫子上是ai公司claude的橘色菊花图标。"""
+
 
 def _truncate_text(text: str, limit: int) -> str:
     text = (text or "").strip()
@@ -198,7 +202,7 @@ class GatewayImageClient:
     GEMINI_PRO_MODEL = "google/gemini-3-pro-image"
     GEMINI_FLASH_MODEL = "google/gemini-3.1-flash-image-preview"
     GROK_MODEL = "xai/grok-imagine-image"
-    DEFAULT_MODEL = GEMINI_PRO_MODEL
+    DEFAULT_MODEL = GEMINI_FLASH_MODEL
 
     def __init__(self):
         self._lock = asyncio.Lock()
@@ -501,7 +505,7 @@ class GatewayImageClient:
             return None, first_error
 
         return None, ImageGenerationError(
-            "生图接口返回成功，但没有找到可用的图片数据。",
+            "没有在返回结果中找到可用的图片数据。可能是被审核截断。",
             status_code=status_code,
             payload=response_payload,
         )
@@ -962,7 +966,15 @@ class ImageGenerationPanelView(discord.ui.View):
                 row=0,
             )
             input_button.callback = self._open_prompt_modal
+            preset_input_button = discord.ui.Button(
+                label="神所娘&类脑娘",
+                style=discord.ButtonStyle.secondary,
+                disabled=self.is_generating,
+                row=0,
+            )
+            preset_input_button.callback = self._open_preset_prompt_modal
             self.add_item(input_button)
+            self.add_item(preset_input_button)
             self.add_item(model_button)
             return
 
@@ -1013,6 +1025,11 @@ class ImageGenerationPanelView(discord.ui.View):
     async def _open_prompt_modal(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(
             PromptInputModal(self, default_prompt=self.prompt)
+        )
+
+    async def _open_preset_prompt_modal(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(
+            PromptInputModal(self, default_prompt=PRESET_CHARACTER_PROMPT)
         )
 
     async def _toggle_spoiler(self, interaction: discord.Interaction) -> None:

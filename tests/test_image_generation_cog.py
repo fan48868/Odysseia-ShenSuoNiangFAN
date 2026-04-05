@@ -5,12 +5,17 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
 from src.chat.features.image_generation.cogs.image_generation_cog import (
+    PRESET_CHARACTER_PROMPT,
     GatewayImageClient,
 )
 
 
 def test_model_cycle_order():
-    assert GatewayImageClient.DEFAULT_MODEL == GatewayImageClient.GEMINI_PRO_MODEL
+    assert GatewayImageClient.DEFAULT_MODEL == GatewayImageClient.GEMINI_FLASH_MODEL
+    assert (
+        GatewayImageClient.get_next_model(GatewayImageClient.DEFAULT_MODEL)
+        == GatewayImageClient.GROK_MODEL
+    )
     assert (
         GatewayImageClient.get_next_model(GatewayImageClient.GEMINI_PRO_MODEL)
         == GatewayImageClient.GEMINI_FLASH_MODEL
@@ -104,3 +109,8 @@ def test_collect_grok_b64_payload_candidates():
     )
 
     assert candidates == payload["data"]
+
+
+def test_preset_character_prompt_contains_both_characters():
+    assert "神所娘：" in PRESET_CHARACTER_PROMPT
+    assert "类脑娘：" in PRESET_CHARACTER_PROMPT
