@@ -45,6 +45,7 @@ else:
     logger.error("TOKEN Error: TOKEN未设置")
 
 BOT_CONTAINER_NAME = os.getenv("BOT_CONTAINER_NAME", "Odysseia_Guidance")
+WEB_CONTAINER_NAME = os.getenv("WEB_CONTAINER_NAME", "config_web")
 last_heartbeat_time = datetime.utcnow()
 heartbeat_tolerance_seconds = 5.0
 SYSTEM_STATS_HISTORY = deque(maxlen=1440)
@@ -162,7 +163,7 @@ def main_page(request: Request):
 
 @web_app.get("/logout")
 def logout(request: Request):
-    response = RedirectResponse(url="/", status_code=302)
+    response = RedirectResponse(url="/?logged_out=1", status_code=302)
     response.delete_cookie("webui_token", path="/")
     return response
 
@@ -170,7 +171,6 @@ def logout(request: Request):
 @web_app.get("/api/status")
 def get_status():
     global last_heartbeat_time
-    logger.info("API call to /api/status received.")
     time_diff = (datetime.utcnow() - last_heartbeat_time).total_seconds()
     status = "RUNNING" if time_diff < heartbeat_tolerance_seconds else "DOWN"
     return JSONResponse({"status": status})
@@ -222,20 +222,34 @@ def shutdown_bot(request: Request):
         )
 
 
+@web_app.post("/api/web/restart")
+def restart_web(request: Request):
+    if not is_logged_in(request):
+        return unauthorized_response(api=True)
+    try:
+        if docker is None:
+            raise RuntimeError("Python package 'docker' is not installed.")
+        client = docker.from_env()
+        web_container = client.containers.get(WEB_CONTAINER_NAME)
+        web_container.restart()
+        return JSONResponse(
+            {
+                "status": "success",
+                "message": f"Container '{WEB_CONTAINER_NAME}' is restarting.",
+            }
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {"status": "error", "message": str(exc)},
+            status_code=500,
+        )
+
+
 @web_app.get("/api/logs")
 def get_logs(request: Request, date: str | None = None):
     if not is_logged_in(request):
         return unauthorized_response(api=True)
-    date_str = date or datetime.utcnow().strftime("%Y-%m-%d")
     current_date = datetime.utcnow().strftime("%Y-%m-%d")
-    if date_str != current_date:
-        return JSONResponse(
-            {
-                "logs": "仅保留当前运行周期的内存日志，历史文件日志已禁用。",
-                "date": date_str,
-                "tail_lines": BOT_LOG_TAIL_LINES,
-            }
-        )
 
     try:
         tail_lines = list(BOT_LOG_BUFFER)[-BOT_LOG_TAIL_LINES:]
@@ -245,7 +259,7 @@ def get_logs(request: Request, date: str | None = None):
         return JSONResponse(
             {
                 "logs": content,
-                "date": date_str,
+                "date": current_date,
                 "tail_lines": BOT_LOG_TAIL_LINES,
             }
         )

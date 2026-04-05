@@ -111,8 +111,8 @@
                         <span class="metric-meta" id="dashboard-ram-text">RAM --</span>
                     </article>
                     <article class="metric-card">
-                        <span class="metric-label">当前日志日期</span>
-                        <strong class="metric-value" id="dashboard-log-date-text">--</strong>
+                        <span class="metric-label">Bot 日志</span>
+                        <strong class="metric-value" id="dashboard-log-count-text">0</strong>
                         <span class="metric-meta" id="dashboard-log-lines-text">0 行 Bot 日志</span>
                     </article>
                     <article class="metric-card">
@@ -185,6 +185,7 @@
                     <div class="control-layout">
                         <div class="action-panel">
                             <button id="restart-btn" class="primary-button" type="button">重启 Bot 容器</button>
+                            <button id="restart-web-btn" class="soft-button" type="button">重启 Web 容器</button>
                             <button id="shutdown-btn" class="danger-button" type="button">停止 Bot 容器</button>
                         </div>
                         <div class="info-list">
@@ -215,10 +216,6 @@
 
                     <div class="toolbar-grid">
                         <label class="field">
-                            <span>日志日期</span>
-                            <input type="date" id="log-date-picker">
-                        </label>
-                        <label class="field">
                             <span>日志等级</span>
                             <div id="bot-log-level-filter" class="filter-chip-group">
                                 <label class="filter-chip"><input type="checkbox" value="DEBUG"><span>DEBUG</span></label>
@@ -241,7 +238,7 @@
                         <button id="bot-auto-scroll-toggle" class="soft-button toolbar-toggle" type="button" aria-pressed="false">自动跳转底部</button>
                     </div>
 
-                    <div class="panel-meta" id="bot-log-summary">等待日志加载</div>
+                    <div class="panel-meta" id="bot-log-summary">显示当前缓存中的 Bot 日志</div>
                     <pre class="log-container" id="bot-log-container">Loading logs...</pre>
                 </article>
             </section>
@@ -395,7 +392,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const panels = Array.from(document.querySelectorAll('.view-panel'));
     const openViewButtons = Array.from(document.querySelectorAll('[data-open-view]'));
 
-    const logDatePicker = document.getElementById('log-date-picker');
     const botLogContainer = document.getElementById('bot-log-container');
     const botRegexInput = document.getElementById('bot-regex-search');
     const botLogLevelFilter = document.getElementById('bot-log-level-filter');
@@ -410,6 +406,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const timezoneSelector = document.getElementById('timezone-selector');
     const restartBtn = document.getElementById('restart-btn');
+    const restartWebBtn = document.getElementById('restart-web-btn');
     const shutdownBtn = document.getElementById('shutdown-btn');
     const controlStatusBadge = document.getElementById('control-status-badge');
     const controlLastAction = document.getElementById('control-last-action');
@@ -429,13 +426,6 @@ document.addEventListener('DOMContentLoaded', () => {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
-
-    const formatDateForPicker = (date) => {
-        const year = date.getFullYear();
-        const month = String(date.getMonth() + 1).padStart(2, '0');
-        const day = String(date.getDate()).padStart(2, '0');
-        return `${year}-${month}-${day}`;
-    };
 
     const formatTimestamp = (date = new Date()) =>
         date.toLocaleString(undefined, {
@@ -614,6 +604,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!lines.length) {
             botLogContainer.textContent = 'No matching logs.';
             botLogSummary.textContent = '当前筛选条件下没有匹配的 Bot 日志';
+            document.getElementById('dashboard-log-count-text').textContent = '0';
             document.getElementById('dashboard-log-lines-text').textContent = '0 行 Bot 日志';
             return;
         }
@@ -630,6 +621,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         botLogContainer.innerHTML = html;
         botLogSummary.textContent = `${lines.length} 行日志，时区 ${selectedTimezone}`;
+        document.getElementById('dashboard-log-count-text').textContent = String(lines.length);
         document.getElementById('dashboard-log-lines-text').textContent = `${lines.length} 行 Bot 日志`;
         if (botAutoScrollEnabled) {
             scrollLogToBottom(botLogContainer);
@@ -703,23 +695,17 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const fetchBotLogs = async () => {
-        const selectedDate = logDatePicker.value;
-        if (!selectedDate) {
-            return;
-        }
-
         try {
-            const response = await fetch(`/api/logs?date=${selectedDate}`);
+            const response = await fetch('/api/logs');
             const data = await response.json();
             fullBotLogContent = data.logs || '';
-            document.getElementById('dashboard-log-date-text').textContent = data.date || selectedDate;
             if (data.tail_lines) {
-                botLogSummary.textContent = `显示最近 ${data.tail_lines} 行，时区 ${selectedTimezone}`;
+                botLogSummary.textContent = `显示最近 ${data.tail_lines} 条缓存日志，时区 ${selectedTimezone}`;
             }
             renderBotLogs();
         } catch (error) {
             fullBotLogContent = '';
-            botLogContainer.textContent = `Error fetching logs for ${selectedDate}.`;
+            botLogContainer.textContent = 'Error fetching Bot logs.';
             botLogSummary.textContent = 'Bot 日志加载失败';
         }
     };
@@ -796,9 +782,19 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const sendControlCommand = async (action) => {
-        const endpoint = action === 'restart' ? '/api/bot/restart' : '/api/bot/shutdown';
-        const actionText = action === 'restart' ? '重启' : '停止';
-        const confirmed = confirm(`确认要${actionText} Bot 容器吗？`);
+        const endpointMap = {
+            restart: '/api/bot/restart',
+            restart_web: '/api/web/restart',
+            shutdown: '/api/bot/shutdown'
+        };
+        const actionTextMap = {
+            restart: '重启 Bot',
+            restart_web: '重启 Web',
+            shutdown: '停止 Bot'
+        };
+        const endpoint = endpointMap[action];
+        const actionText = actionTextMap[action];
+        const confirmed = confirm(`确认要执行“${actionText}”吗？`);
         if (!confirmed) {
             return;
         }
@@ -833,7 +829,6 @@ document.addEventListener('DOMContentLoaded', () => {
         button.addEventListener('click', () => setActiveView(button.dataset.openView));
     });
 
-    logDatePicker.addEventListener('change', fetchBotLogs);
     botLogLevelFilter.querySelectorAll('input[type="checkbox"]').forEach((checkbox) => {
         checkbox.addEventListener('change', renderBotLogs);
     });
@@ -879,20 +874,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
     restartBtn.addEventListener('click', () => sendControlCommand('restart'));
+    restartWebBtn.addEventListener('click', () => sendControlCommand('restart_web'));
     shutdownBtn.addEventListener('click', () => sendControlCommand('shutdown'));
 
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyThemeLabel);
     window.matchMedia('(max-width: 768px)').addEventListener('change', () => {
         setMobileSidebarOpen(false);
     });
-
-    const today = new Date();
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(today.getDate() - 7);
-
-    logDatePicker.max = formatDateForPicker(today);
-    logDatePicker.min = formatDateForPicker(sevenDaysAgo);
-    logDatePicker.value = logDatePicker.max;
 
     populateTimezones();
     applyThemePreference();
@@ -906,11 +894,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(fetchBotStatus, 1000);
     setInterval(fetchSystemInfo, 2000);
     setInterval(fetchWebUILogs, 2000);
-    setInterval(() => {
-        if (logDatePicker.value === formatDateForPicker(new Date())) {
-            fetchBotLogs();
-        }
-    }, 1500);
+    setInterval(fetchBotLogs, 1500);
     setInterval(() => {
         if (botAutoScrollEnabled) {
             scrollLogToBottom(botLogContainer);

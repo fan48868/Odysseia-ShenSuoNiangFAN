@@ -54,6 +54,16 @@ tokenInput.addEventListener('keydown', async (event) => {
 });
 
 window.addEventListener('DOMContentLoaded', async () => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('logged_out') === '1') {
+        localStorage.removeItem(rememberedTokenKey);
+        sessionStorage.removeItem('adminToken');
+        if (window.history.replaceState) {
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
+        return;
+    }
+
     const rememberedToken = localStorage.getItem(rememberedTokenKey);
     if (!rememberedToken) {
         return;
