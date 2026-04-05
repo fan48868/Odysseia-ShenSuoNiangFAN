@@ -903,14 +903,14 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchWebUILogs();
     fetchSystemInfo();
 
-    setInterval(fetchBotStatus, 3000);
-    setInterval(fetchSystemInfo, 5000);
-    setInterval(fetchWebUILogs, 5000);
+    setInterval(fetchBotStatus, 1000);
+    setInterval(fetchSystemInfo, 2000);
+    setInterval(fetchWebUILogs, 2000);
     setInterval(() => {
         if (logDatePicker.value === formatDateForPicker(new Date())) {
             fetchBotLogs();
         }
-    }, 4000);
+    }, 1500);
     setInterval(() => {
         if (botAutoScrollEnabled) {
             scrollLogToBottom(botLogContainer);

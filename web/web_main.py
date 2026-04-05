@@ -1,4 +1,3 @@
-import io
 import logging
 import os
 import sys
@@ -26,8 +25,6 @@ if project_root not in sys.path:
 dotenv_path = os.path.join(project_root, ".env")
 load_dotenv(dotenv_path=dotenv_path, override=False, encoding="utf-8")
 
-from web.log import run_daily_cleanup_if_needed
-
 template_dir = current_dir
 static_dir = os.path.join(template_dir, "root")
 login_page_path = os.path.join(static_dir, "html", "login.html")
@@ -40,18 +37,6 @@ logger = logging.getLogger("webui")
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
 
-log_stream = io.StringIO()
-stream_handler = logging.StreamHandler(log_stream)
-stream_handler.setLevel(logging.DEBUG)
-stream_handler.setFormatter(
-    logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-)
-if not logger.handlers:
-    logger.addHandler(stream_handler)
-
-LOG_DIR = os.path.join(project_root, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-
 multiline_token = os.getenv("WEBUI_ADMIN_TOKEN")
 TOKEN_ARRAY = []
 if multiline_token:
@@ -63,8 +48,31 @@ BOT_CONTAINER_NAME = os.getenv("BOT_CONTAINER_NAME", "Odysseia_Guidance")
 last_heartbeat_time = datetime.utcnow()
 heartbeat_tolerance_seconds = 5.0
 SYSTEM_STATS_HISTORY = deque(maxlen=1440)
-BOT_LOG_TAIL_LINES = int(os.getenv("WEBUI_BOT_LOG_TAIL_LINES", "2000"))
+BOT_LOG_TAIL_LINES = int(os.getenv("WEBUI_BOT_LOG_TAIL_LINES", "1000"))
 WEBUI_LOG_TAIL_LINES = int(os.getenv("WEBUI_SERVER_LOG_TAIL_LINES", "1000"))
+BOT_LOG_BUFFER = deque(maxlen=BOT_LOG_TAIL_LINES)
+WEBUI_LOG_BUFFER = deque(maxlen=WEBUI_LOG_TAIL_LINES)
+
+
+class DequeLogHandler(logging.Handler):
+    def __init__(self, target_buffer: deque[str]):
+        super().__init__()
+        self.target_buffer = target_buffer
+
+    def emit(self, record):
+        try:
+            self.target_buffer.append(self.format(record))
+        except Exception:
+            self.handleError(record)
+
+
+stream_handler = DequeLogHandler(WEBUI_LOG_BUFFER)
+stream_handler.setLevel(logging.DEBUG)
+stream_handler.setFormatter(
+    logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+)
+if not logger.handlers:
+    logger.addHandler(stream_handler)
 
 
 def is_logged_in(request: Request) -> bool:
@@ -108,16 +116,12 @@ def collect_system_stats():
 async def receive_log(request: Request):
     global last_heartbeat_time
     last_heartbeat_time = datetime.utcnow()
-    run_daily_cleanup_if_needed(LOG_DIR, logger)
-    today_utc_str = last_heartbeat_time.strftime("%Y-%m-%d")
-    log_file_path = os.path.join(LOG_DIR, f"{today_utc_str}.txt")
 
     data = await request.json()
     if data and data.get("logs"):
         try:
-            with open(log_file_path, "a", encoding="utf-8") as handle:
-                for log_entry in data["logs"]:
-                    handle.write(log_entry + "\n")
+            for log_entry in data["logs"]:
+                BOT_LOG_BUFFER.append(log_entry)
         except Exception as exc:
             logger.error(f"Failed to write logs: {exc}")
             return PlainTextResponse("Error writing logs", status_code=500)
@@ -223,11 +227,21 @@ def get_logs(request: Request, date: str | None = None):
     if not is_logged_in(request):
         return unauthorized_response(api=True)
     date_str = date or datetime.utcnow().strftime("%Y-%m-%d")
-    log_file_path = os.path.join(LOG_DIR, f"{date_str}.txt")
+    current_date = datetime.utcnow().strftime("%Y-%m-%d")
+    if date_str != current_date:
+        return JSONResponse(
+            {
+                "logs": "仅保留当前运行周期的内存日志，历史文件日志已禁用。",
+                "date": date_str,
+                "tail_lines": BOT_LOG_TAIL_LINES,
+            }
+        )
+
     try:
-        with open(log_file_path, "r", encoding="utf-8") as handle:
-            tail_lines = deque(handle, maxlen=BOT_LOG_TAIL_LINES)
-        content = "".join(tail_lines)
+        tail_lines = list(BOT_LOG_BUFFER)[-BOT_LOG_TAIL_LINES:]
+        content = "\n".join(tail_lines)
+        if content:
+            content += "\n"
         return JSONResponse(
             {
                 "logs": content,
@@ -235,9 +249,6 @@ def get_logs(request: Request, date: str | None = None):
                 "tail_lines": BOT_LOG_TAIL_LINES,
             }
         )
-    except FileNotFoundError:
-        logger.warning(f"Log file for {date_str} not found.")
-        return JSONResponse({"logs": f"Log file for {date_str} not found.", "date": date_str})
     except Exception as exc:
         logger.error(f"Error in get_logs: {exc}")
         return JSONResponse(
@@ -251,8 +262,7 @@ def get_webui_logs(request: Request):
     if not is_logged_in(request):
         return unauthorized_response(api=True)
     try:
-        lines = log_stream.getvalue().splitlines()
-        content = "\n".join(lines[-WEBUI_LOG_TAIL_LINES:])
+        content = "\n".join(WEBUI_LOG_BUFFER)
         return JSONResponse(
             {
                 "logs": content,
