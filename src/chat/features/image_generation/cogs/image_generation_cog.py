@@ -968,7 +968,7 @@ class ImageGenerationPanelView(discord.ui.View):
             input_button.callback = self._open_prompt_modal
             preset_input_button = discord.ui.Button(
                 label="神所娘&类脑娘",
-                style=discord.ButtonStyle.secondary,
+                style=discord.ButtonStyle.success,
                 disabled=self.is_generating,
                 row=0,
             )
