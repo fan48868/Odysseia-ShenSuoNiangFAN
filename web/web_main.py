@@ -63,6 +63,8 @@ BOT_CONTAINER_NAME = os.getenv("BOT_CONTAINER_NAME", "Odysseia_Guidance")
 last_heartbeat_time = datetime.utcnow()
 heartbeat_tolerance_seconds = 5.0
 SYSTEM_STATS_HISTORY = deque(maxlen=1440)
+BOT_LOG_TAIL_LINES = int(os.getenv("WEBUI_BOT_LOG_TAIL_LINES", "2000"))
+WEBUI_LOG_TAIL_LINES = int(os.getenv("WEBUI_SERVER_LOG_TAIL_LINES", "1000"))
 
 
 def is_logged_in(request: Request) -> bool:
@@ -224,8 +226,15 @@ def get_logs(request: Request, date: str | None = None):
     log_file_path = os.path.join(LOG_DIR, f"{date_str}.txt")
     try:
         with open(log_file_path, "r", encoding="utf-8") as handle:
-            content = handle.read()
-        return JSONResponse({"logs": content, "date": date_str})
+            tail_lines = deque(handle, maxlen=BOT_LOG_TAIL_LINES)
+        content = "".join(tail_lines)
+        return JSONResponse(
+            {
+                "logs": content,
+                "date": date_str,
+                "tail_lines": BOT_LOG_TAIL_LINES,
+            }
+        )
     except FileNotFoundError:
         logger.warning(f"Log file for {date_str} not found.")
         return JSONResponse({"logs": f"Log file for {date_str} not found.", "date": date_str})
@@ -242,7 +251,14 @@ def get_webui_logs(request: Request):
     if not is_logged_in(request):
         return unauthorized_response(api=True)
     try:
-        return JSONResponse({"logs": log_stream.getvalue()})
+        lines = log_stream.getvalue().splitlines()
+        content = "\n".join(lines[-WEBUI_LOG_TAIL_LINES:])
+        return JSONResponse(
+            {
+                "logs": content,
+                "tail_lines": WEBUI_LOG_TAIL_LINES,
+            }
+        )
     except Exception as exc:
         logger.error(f"Error fetching webui logs from stream: {exc}")
         return JSONResponse(

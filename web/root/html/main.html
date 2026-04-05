@@ -713,6 +713,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await response.json();
             fullBotLogContent = data.logs || '';
             document.getElementById('dashboard-log-date-text').textContent = data.date || selectedDate;
+            if (data.tail_lines) {
+                botLogSummary.textContent = `显示最近 ${data.tail_lines} 行，时区 ${selectedTimezone}`;
+            }
             renderBotLogs();
         } catch (error) {
             fullBotLogContent = '';
@@ -726,6 +729,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch('/api/webui-logs');
             const data = await response.json();
             fullWebUILogContent = data.logs || '';
+            if (data.tail_lines) {
+                webuiLogSummary.textContent = `显示最近 ${data.tail_lines} 行 WebUI 日志`;
+            }
             renderWebUILogs();
         } catch (error) {
             fullWebUILogContent = '';
