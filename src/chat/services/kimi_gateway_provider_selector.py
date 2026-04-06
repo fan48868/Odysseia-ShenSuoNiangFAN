@@ -41,6 +41,7 @@ class KimiGatewayProviderSelectorService:
         "togetherai",
     ]
     PRIMARY_SELECTION_PROBABILITY = 0.7
+    FAST_PROVIDER_LOCK_UNIT_COST_THRESHOLD = 0.06
     FAILURE_PENALTY_SECONDS = 2.0
     SLOW_PROVIDER_UNIT_COST_THRESHOLD = 0.2
     SLOW_PROVIDER_COOLDOWN_SECONDS = 20 * 60
@@ -172,6 +173,9 @@ class KimiGatewayProviderSelectorService:
         primary_state = ordered_states[0]
         remaining_states = ordered_states[1:]
 
+        if self._should_lock_primary_provider_locked(primary_state):
+            return primary_state
+
         if (
             not remaining_states
             or self._rng.random() < self.PRIMARY_SELECTION_PROBABILITY
@@ -206,6 +210,15 @@ class KimiGatewayProviderSelectorService:
         return max(state.current_unit_cost or 0.0, 0.0) + max(
             state.failure_penalty_seconds, 0.0
         )
+
+    def _should_lock_primary_provider_locked(self, state: _ProviderState) -> bool:
+        if state.current_unit_cost is None:
+            return False
+        if state.last_output_units <= 0:
+            return False
+        if state.failure_penalty_seconds > 0:
+            return False
+        return state.current_unit_cost <= self.FAST_PROVIDER_LOCK_UNIT_COST_THRESHOLD
 
     def _is_warmup_complete_locked(self) -> bool:
         return all(state.explored for state in self._provider_states.values())

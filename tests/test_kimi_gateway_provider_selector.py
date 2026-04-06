@@ -232,11 +232,11 @@ async def test_selector_prefers_fastest_provider_but_can_sample_others_and_penal
     rng = _DeterministicRandom(random_values=[0.2, 0.95, 0.1], choice_indexes=[2])
     service = KimiGatewayProviderSelectorService(rng=rng)
     costs = {
-        "novita": 0.03,
-        "bedrock": 0.035,
-        "moonshotai": 0.05,
-        "fireworks": 0.025,
-        "togetherai": 0.04,
+        "novita": 0.08,
+        "bedrock": 0.085,
+        "moonshotai": 0.10,
+        "fireworks": 0.07,
+        "togetherai": 0.09,
     }
 
     for provider_name in service.PROVIDER_NAMES:
@@ -258,6 +258,36 @@ async def test_selector_prefers_fastest_provider_but_can_sample_others_and_penal
 
     post_penalty_selection = await service.select_provider()
     assert post_penalty_selection.provider_name == "novita"
+
+
+@pytest.mark.asyncio
+async def test_selector_locks_fastest_provider_when_fast_enough_then_unlocks():
+    rng = _DeterministicRandom(random_values=[0.95, 0.95], choice_indexes=[1])
+    service = KimiGatewayProviderSelectorService(rng=rng)
+    costs = {
+        "novita": 0.05,
+        "bedrock": 0.07,
+        "moonshotai": 0.08,
+        "fireworks": 0.09,
+        "togetherai": 0.10,
+    }
+
+    for provider_name in service.PROVIDER_NAMES:
+        await service.report_success(
+            provider_name,
+            elapsed_seconds=costs[provider_name] * 10,
+            output_units=10,
+        )
+
+    locked_selection = await service.select_provider()
+    await service.release_provider(locked_selection.provider_name)
+
+    await service.report_success("novita", elapsed_seconds=0.325, output_units=5)
+
+    unlocked_selection = await service.select_provider()
+
+    assert locked_selection.provider_name == "novita"
+    assert unlocked_selection.provider_name == "moonshotai"
 
 
 @pytest.mark.asyncio
