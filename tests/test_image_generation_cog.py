@@ -1,6 +1,7 @@
 import base64
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,8 @@ from src.chat.features.image_generation.cogs.image_generation_cog import (
     PRESET_CHARACTER_PROMPT,
     GatewayImageClient,
     PublicGeneratedImageView,
+    ImageGenerationPanelView,
+    ReferenceImageInput,
 )
 
 
@@ -59,6 +62,41 @@ def test_grok_request_uses_images_api():
         "model": GatewayImageClient.GROK_MODEL,
         "prompt": "draw a fox in neon rain",
     }
+
+
+def test_gemini_request_with_reference_images_uses_multimodal_content():
+    api_url, payload = GatewayImageClient._build_request(
+        GatewayImageClient.GEMINI_FLASH_MODEL,
+        "keep the character identity and change the clothes",
+        reference_images=[
+            ReferenceImageInput(
+                data=b"ref-image-1",
+                filename="ref1.png",
+                mime_type="image/png",
+            ),
+            ReferenceImageInput(
+                data=b"ref-image-2",
+                filename="ref2.png",
+                mime_type="image/jpeg",
+            ),
+        ],
+    )
+
+    assert api_url == GatewayImageClient.CHAT_COMPLETIONS_API_URL
+    assert payload["modalities"] == ["text", "image"]
+    assert isinstance(payload["messages"][0]["content"], list)
+    assert payload["messages"][0]["content"][0] == {
+        "type": "text",
+        "text": "keep the character identity and change the clothes",
+    }
+    assert payload["messages"][0]["content"][1]["type"] == "image_url"
+    assert payload["messages"][0]["content"][1]["image_url"]["url"].startswith(
+        "data:image/png;base64,"
+    )
+    assert payload["messages"][0]["content"][2]["type"] == "image_url"
+    assert payload["messages"][0]["content"][2]["image_url"]["url"].startswith(
+        "data:image/jpeg;base64,"
+    )
 
 
 def test_collect_and_decode_gemini_data_url_image():
@@ -129,3 +167,47 @@ async def test_public_generated_image_view_has_permanent_delete_button():
 
     delete_button = view.children[0]
     assert delete_button.label == "删除"
+
+
+@pytest.mark.asyncio
+async def test_panel_reference_image_status_line_changes_with_reference_image():
+    dummy_user = SimpleNamespace(
+        id=123,
+        display_name="tester",
+        display_avatar=SimpleNamespace(url="https://example.com/avatar.png"),
+    )
+    dummy_interaction = SimpleNamespace(user=dummy_user)
+
+    view_without_reference = ImageGenerationPanelView(
+        origin_interaction=dummy_interaction,
+        image_client=GatewayImageClient(),
+        quota_service=SimpleNamespace(),
+        is_developer=False,
+        reference_images=None,
+    )
+    assert (
+        view_without_reference._reference_image_status_line()
+        == "提示：现在可以传入参考图了，输入命令时加上附加参数吧！"
+    )
+    view_without_reference.stop()
+
+    view_with_reference = ImageGenerationPanelView(
+        origin_interaction=dummy_interaction,
+        image_client=GatewayImageClient(),
+        quota_service=SimpleNamespace(),
+        is_developer=False,
+        reference_images=[
+            ReferenceImageInput(
+                data=b"img-1",
+                filename="reference-1.png",
+                mime_type="image/png",
+            ),
+            ReferenceImageInput(
+                data=b"img-2",
+                filename="reference-2.png",
+                mime_type="image/png",
+            ),
+        ],
+    )
+    assert view_with_reference._reference_image_status_line() == "当前已传入 2 张参考图。"
+    view_with_reference.stop()
