@@ -381,6 +381,98 @@ def test_extract_output_units_uses_output_text_length_and_minimum_one():
     )
 
 
+@pytest.mark.parametrize(
+    ("message", "expected_reasoning"),
+    [
+        (
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "test_tool", "arguments": "{}"},
+                    }
+                ],
+            },
+            "",
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_details": [{"type": "text", "text": "step by step"}],
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "test_tool", "arguments": "{}"},
+                    }
+                ],
+            },
+            "step by step",
+        ),
+    ],
+)
+def test_normalize_chat_completion_result_backfills_reasoning_content_for_tool_calls(
+    message: Dict[str, Any], expected_reasoning: str
+):
+    result = {
+        "choices": [
+            {
+                "message": message,
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+
+    normalized = CustomModelClient.normalize_chat_completion_result(result)
+
+    assert normalized["choices"][0]["message"]["reasoning_content"] == expected_reasoning
+    assert "reasoning_content" not in result["choices"][0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_custom_model_send_backfills_reasoning_content_for_request_tool_call_messages():
+    client = CustomModelClient()
+    captured_payloads: List[Dict[str, Any]] = []
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "test_tool", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "test_tool",
+            "content": "{}",
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        _capture_request_payload(request, captured_payloads)
+        return _build_json_response(request, model_name="moonshotai/kimi-k2.5")
+
+    runtime_config = _build_runtime_config(base_url="https://example.com/v1")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        await client.send(
+            http_client=http_client,
+            payload={"model": "moonshotai/kimi-k2.5", "messages": messages},
+            runtime_config=runtime_config,
+        )
+
+    assert captured_payloads[0]["messages"][0]["reasoning_content"] == ""
+    assert "reasoning_content" not in messages[0]
+
+
 @pytest.mark.asyncio
 async def test_custom_model_send_injects_single_provider_options_for_kimi_gateway(
     caplog: pytest.LogCaptureFixture,

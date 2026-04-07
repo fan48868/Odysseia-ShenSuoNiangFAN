@@ -1494,6 +1494,11 @@ class OpenAIService:
 
                     raise
 
+                if is_custom_model:
+                    result = self.custom_model_client.normalize_chat_completion_result(
+                        result
+                    )
+
                 first_choice = result["choices"][0]
                 response_message = first_choice.get("message")
                 if not isinstance(response_message, dict):
@@ -1506,6 +1511,8 @@ class OpenAIService:
                 reasoning_content = response_message.get("reasoning_content")
                 content = response_message.get("content") or ""
                 tool_calls = response_message.get("tool_calls")
+                if is_custom_model and tool_calls is not None and reasoning_content is None:
+                    reasoning_content = ""
 
                 if reasoning_content and not is_custom_model:
                     log.info(

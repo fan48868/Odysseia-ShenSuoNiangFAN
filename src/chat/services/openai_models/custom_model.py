@@ -627,6 +627,78 @@ class CustomModelClient:
         return ""
 
     @classmethod
+    def _normalize_assistant_tool_call_reasoning(
+        cls, block: Any, *, assume_assistant: bool = False
+    ) -> Any:
+        if not isinstance(block, dict):
+            return block
+
+        tool_calls = block.get("tool_calls")
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return block
+
+        role = str(block.get("role") or "").strip().lower()
+        is_assistant_block = role == "assistant" or (assume_assistant and not role)
+        if not is_assistant_block:
+            return block
+
+        if isinstance(block.get("reasoning_content"), str):
+            return block
+
+        normalized_block = dict(block)
+        normalized_block["reasoning_content"] = cls._extract_reasoning_text_from_block(
+            block
+        )
+        return normalized_block
+
+    @classmethod
+    def normalize_request_messages(cls, messages: Any) -> Any:
+        if not isinstance(messages, list):
+            return messages
+
+        changed = False
+        normalized_messages: List[Any] = []
+        for message in messages:
+            normalized_message = cls._normalize_assistant_tool_call_reasoning(message)
+            if normalized_message is not message:
+                changed = True
+            normalized_messages.append(normalized_message)
+
+        return normalized_messages if changed else messages
+
+    @classmethod
+    def normalize_chat_completion_result(
+        cls, result: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(result, dict):
+            return result
+
+        choices = result.get("choices")
+        if not isinstance(choices, list):
+            return result
+
+        normalized_result: Optional[Dict[str, Any]] = None
+
+        for choice_index, choice in enumerate(choices):
+            if not isinstance(choice, dict):
+                continue
+
+            for block_key in ("message", "delta"):
+                block = choice.get(block_key)
+                normalized_block = cls._normalize_assistant_tool_call_reasoning(
+                    block, assume_assistant=True
+                )
+                if normalized_block is block:
+                    continue
+
+                if normalized_result is None:
+                    normalized_result = copy.deepcopy(result)
+
+                normalized_result["choices"][choice_index][block_key] = normalized_block
+
+        return normalized_result if normalized_result is not None else result
+
+    @classmethod
     def diagnose_streaming_chat_completion_body(cls, body: str) -> Dict[str, Any]:
         normalized_body = str(body or "")
         diagnostics: Dict[str, Any] = {
@@ -1338,6 +1410,9 @@ class CustomModelClient:
 
         api_url = self._build_chat_completions_url(api_url)
         request_payload = dict(payload)
+        request_payload["messages"] = self.normalize_request_messages(
+            request_payload.get("messages")
+        )
         request_payload["stream"] = True
         request_payload["thinking"] = {"type": "disabled"}
         request_payload.pop("chat_template_kwargs", None)
