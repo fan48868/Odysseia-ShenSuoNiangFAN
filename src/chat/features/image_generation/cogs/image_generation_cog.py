@@ -133,6 +133,63 @@ def _extract_error_message(payload: Any) -> str:
     return str(payload).strip()
 
 
+def _extract_text_from_content_blocks(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+
+    if not isinstance(content, list):
+        return ""
+
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+
+        text = ""
+        if item.get("type") == "text":
+            text = str(item.get("text", "") or "").strip()
+        elif "text" in item:
+            text = str(item.get("text", "") or "").strip()
+
+        if text:
+            parts.append(text)
+
+    return "\n".join(parts).strip()
+
+
+def _extract_model_text_message(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+
+    choices = payload.get("choices", [])
+    if not isinstance(choices, list):
+        return ""
+
+    text_parts: list[str] = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+
+        message = choice.get("message")
+        if isinstance(message, dict):
+            content_text = _extract_text_from_content_blocks(message.get("content"))
+            if content_text:
+                text_parts.append(content_text)
+
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            delta_text = _extract_text_from_content_blocks(delta.get("content"))
+            if delta_text:
+                text_parts.append(delta_text)
+
+    deduped_parts: list[str] = []
+    for part in text_parts:
+        if part and part not in deduped_parts:
+            deduped_parts.append(part)
+
+    return "\n\n".join(deduped_parts).strip()
+
+
 def _get_developer_user_ids() -> set[int]:
     developer_ids = set(config.DEVELOPER_USER_IDS)
     raw_value = _strip_wrapping_quotes(str(os.getenv("DEVELOPER_USER_IDS", "") or ""))
@@ -185,6 +242,7 @@ class ImageGenerationError:
     message: str
     status_code: int | None = None
     payload: Any = None
+    model_text: str | None = None
 
     def should_rotate_key(self) -> bool:
         return self.status_code == 402
@@ -208,6 +266,7 @@ class QuotaReservation:
 
 class GatewayImageClient:
     IMAGE_API_URL = "https://ai-gateway.vercel.sh/v1/images/generations"
+    IMAGE_EDITS_API_URL = "https://ai-gateway.vercel.sh/v1/images/edits"
     CHAT_COMPLETIONS_API_URL = "https://ai-gateway.vercel.sh/v1/chat/completions"
     PRIMARY_ENV_KEY = "IMAGINE_API_KEY"
     LEGACY_ENV_KEYS = ("GROK_IMAGINE_API_KEY",)
@@ -316,7 +375,12 @@ class GatewayImageClient:
 
     @classmethod
     def supports_reference_image(cls, model_name: str | None) -> bool:
-        return cls.uses_chat_completions_api(model_name)
+        normalized_model = cls.normalize_model_name(model_name)
+        return normalized_model in {
+            cls.GEMINI_PRO_MODEL,
+            cls.GEMINI_FLASH_MODEL,
+            cls.GROK_MODEL,
+        }
 
     @staticmethod
     def _build_data_url(image_bytes: bytes, mime_type: str) -> str:
@@ -364,6 +428,27 @@ class GatewayImageClient:
                     "stream": False,
                 },
             )
+
+        if normalized_model == cls.GROK_MODEL and normalized_reference_images:
+            grok_images = [
+                {
+                    "type": "image_url",
+                    "url": cls._build_data_url(
+                        reference_image.data,
+                        reference_image.mime_type,
+                    ),
+                }
+                for reference_image in normalized_reference_images
+            ]
+            payload: dict[str, Any] = {
+                "model": normalized_model,
+                "prompt": prompt,
+            }
+            if len(grok_images) == 1:
+                payload["image"] = grok_images[0]
+            else:
+                payload["images"] = grok_images
+            return cls.IMAGE_EDITS_API_URL, payload
 
         return (
             cls.IMAGE_API_URL,
@@ -557,6 +642,7 @@ class GatewayImageClient:
             "没有在返回结果中找到可用的图片数据。可能是被审核截断。",
             status_code=status_code,
             payload=response_payload,
+            model_text=_extract_model_text_message(response_payload) or None,
         )
 
     @staticmethod
@@ -1236,6 +1322,14 @@ class ImageGenerationPanelView(discord.ui.View):
             if error is not None:
                 self.last_error = error.message
                 self.last_status = "生成失败。"
+                if error.model_text:
+                    try:
+                        await interaction.followup.send(
+                            f"模型返回文字：{_truncate_text(error.model_text, 1800)}",
+                            ephemeral=True,
+                        )
+                    except Exception as exc:
+                        log.warning("发送模型返回文字的私密消息失败: %s", exc)
                 if reservation is not None:
                     self.quota_status = await self.quota_service.refund_generation(reservation)
                 return

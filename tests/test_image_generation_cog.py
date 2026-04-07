@@ -13,6 +13,7 @@ from src.chat.features.image_generation.cogs.image_generation_cog import (
     PublicGeneratedImageView,
     ImageGenerationPanelView,
     ReferenceImageInput,
+    _extract_model_text_message,
 )
 
 
@@ -62,6 +63,56 @@ def test_grok_request_uses_images_api():
         "model": GatewayImageClient.GROK_MODEL,
         "prompt": "draw a fox in neon rain",
     }
+
+
+def test_grok_request_with_single_reference_image_uses_image_edits():
+    api_url, payload = GatewayImageClient._build_request(
+        GatewayImageClient.GROK_MODEL,
+        "keep the composition and add a sci-fi skyline",
+        reference_images=[
+            ReferenceImageInput(
+                data=b"ref-image-1",
+                filename="ref1.png",
+                mime_type="image/png",
+            )
+        ],
+    )
+
+    assert api_url == GatewayImageClient.IMAGE_EDITS_API_URL
+    assert payload["model"] == GatewayImageClient.GROK_MODEL
+    assert payload["prompt"] == "keep the composition and add a sci-fi skyline"
+    assert "image" in payload
+    assert payload["image"]["type"] == "image_url"
+    assert payload["image"]["url"].startswith("data:image/png;base64,")
+    assert "images" not in payload
+
+
+def test_grok_request_with_multiple_reference_images_uses_image_edits():
+    api_url, payload = GatewayImageClient._build_request(
+        GatewayImageClient.GROK_MODEL,
+        "combine these character references into one clean portrait",
+        reference_images=[
+            ReferenceImageInput(
+                data=b"ref-image-1",
+                filename="ref1.png",
+                mime_type="image/png",
+            ),
+            ReferenceImageInput(
+                data=b"ref-image-2",
+                filename="ref2.jpg",
+                mime_type="image/jpeg",
+            ),
+        ],
+    )
+
+    assert api_url == GatewayImageClient.IMAGE_EDITS_API_URL
+    assert payload["model"] == GatewayImageClient.GROK_MODEL
+    assert payload["prompt"] == "combine these character references into one clean portrait"
+    assert "image" not in payload
+    assert len(payload["images"]) == 2
+    assert payload["images"][0]["type"] == "image_url"
+    assert payload["images"][0]["url"].startswith("data:image/png;base64,")
+    assert payload["images"][1]["url"].startswith("data:image/jpeg;base64,")
 
 
 def test_gemini_request_with_reference_images_uses_multimodal_content():
@@ -135,6 +186,51 @@ def test_collect_and_decode_gemini_data_url_image():
     assert image.filename.endswith(".png")
 
 
+def test_extract_model_text_message_from_chat_completion_payload():
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "内容因为安全策略被拦截。"},
+                    ]
+                }
+            }
+        ]
+    }
+
+    assert _extract_model_text_message(payload) == "内容因为安全策略被拦截。"
+
+
+@pytest.mark.asyncio
+async def test_extract_generated_image_error_keeps_model_text_when_no_image_found():
+    client = GatewayImageClient()
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "由于审核原因，未返回图片。"},
+                    ],
+                    "images": [],
+                }
+            }
+        ]
+    }
+
+    image, error = await client._extract_generated_image(
+        session=SimpleNamespace(),
+        model_name=GatewayImageClient.GEMINI_FLASH_MODEL,
+        response_payload=payload,
+        status_code=200,
+    )
+
+    assert image is None
+    assert error is not None
+    assert error.message == "没有在返回结果中找到可用的图片数据。可能是被审核截断。"
+    assert error.model_text == "由于审核原因，未返回图片。"
+
+
 def test_collect_grok_b64_payload_candidates():
     payload = {
         "data": [
@@ -150,6 +246,12 @@ def test_collect_grok_b64_payload_candidates():
     )
 
     assert candidates == payload["data"]
+
+
+def test_grok_supports_reference_images():
+    assert GatewayImageClient.supports_reference_image(
+        GatewayImageClient.GROK_MODEL
+    )
 
 
 def test_preset_character_prompt_contains_both_characters():
