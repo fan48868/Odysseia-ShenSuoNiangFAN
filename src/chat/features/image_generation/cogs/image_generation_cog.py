@@ -266,7 +266,6 @@ class QuotaReservation:
 
 class GatewayImageClient:
     IMAGE_API_URL = "https://ai-gateway.vercel.sh/v1/images/generations"
-    IMAGE_EDITS_API_URL = "https://ai-gateway.vercel.sh/v1/images/edits"
     CHAT_COMPLETIONS_API_URL = "https://ai-gateway.vercel.sh/v1/chat/completions"
     PRIMARY_ENV_KEY = "IMAGINE_API_KEY"
     LEGACY_ENV_KEYS = ("GROK_IMAGINE_API_KEY",)
@@ -375,12 +374,7 @@ class GatewayImageClient:
 
     @classmethod
     def supports_reference_image(cls, model_name: str | None) -> bool:
-        normalized_model = cls.normalize_model_name(model_name)
-        return normalized_model in {
-            cls.GEMINI_PRO_MODEL,
-            cls.GEMINI_FLASH_MODEL,
-            cls.GROK_MODEL,
-        }
+        return cls.uses_chat_completions_api(model_name)
 
     @staticmethod
     def _build_data_url(image_bytes: bytes, mime_type: str) -> str:
@@ -428,27 +422,6 @@ class GatewayImageClient:
                     "stream": False,
                 },
             )
-
-        if normalized_model == cls.GROK_MODEL and normalized_reference_images:
-            grok_images = [
-                {
-                    "type": "image_url",
-                    "url": cls._build_data_url(
-                        reference_image.data,
-                        reference_image.mime_type,
-                    ),
-                }
-                for reference_image in normalized_reference_images
-            ]
-            payload: dict[str, Any] = {
-                "model": normalized_model,
-                "prompt": prompt,
-            }
-            if len(grok_images) == 1:
-                payload["image"] = grok_images[0]
-            else:
-                payload["images"] = grok_images
-            return cls.IMAGE_EDITS_API_URL, payload
 
         return (
             cls.IMAGE_API_URL,
@@ -727,6 +700,10 @@ class GatewayImageClient:
         if normalized_reference_images and not self.supports_reference_image(
             normalized_model
         ):
+            if normalized_model == self.GROK_MODEL:
+                return None, ImageGenerationError(
+                    "当前通过 Vercel AI Gateway 调用 Grok 时暂不支持参考图，请切换到 Gemini 生图模型。"
+                )
             return None, ImageGenerationError(
                 "当前模型暂不支持参考图，请切换到 Gemini 生图模型后再试。"
             )
@@ -1435,6 +1412,7 @@ class ImageGenerationCog(commands.Cog):
     ):
         is_developer = self._is_developer(interaction.user.id)
         initial_status_message: str | None = None
+        await interaction.response.defer(ephemeral=True)
         resolved_reference_images, reference_image_error = await self._read_reference_images(
             [
                 reference_image_1,
@@ -1444,17 +1422,19 @@ class ImageGenerationCog(commands.Cog):
         )
 
         if reference_image_error:
-            await interaction.response.send_message(
-                reference_image_error,
-                ephemeral=True,
+            await interaction.edit_original_response(
+                content=reference_image_error,
+                embed=None,
+                view=None,
             )
             return
 
         if daily_limit is not None:
             if not is_developer:
-                await interaction.response.send_message(
-                    "只有 DEVELOPER_USER_IDS 中的开发者可以修改每日次数。",
-                    ephemeral=True,
+                await interaction.edit_original_response(
+                    content="只有 DEVELOPER_USER_IDS 中的开发者可以修改每日次数。",
+                    embed=None,
+                    view=None,
                 )
                 return
 
@@ -1473,10 +1453,10 @@ class ImageGenerationCog(commands.Cog):
         )
         await view.initialize(initial_status_message=initial_status_message)
 
-        await interaction.response.send_message(
+        await interaction.edit_original_response(
+            content=None,
             embed=view._build_panel_embed(),
             view=view,
-            ephemeral=True,
         )
 
 

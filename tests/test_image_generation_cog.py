@@ -65,56 +65,6 @@ def test_grok_request_uses_images_api():
     }
 
 
-def test_grok_request_with_single_reference_image_uses_image_edits():
-    api_url, payload = GatewayImageClient._build_request(
-        GatewayImageClient.GROK_MODEL,
-        "keep the composition and add a sci-fi skyline",
-        reference_images=[
-            ReferenceImageInput(
-                data=b"ref-image-1",
-                filename="ref1.png",
-                mime_type="image/png",
-            )
-        ],
-    )
-
-    assert api_url == GatewayImageClient.IMAGE_EDITS_API_URL
-    assert payload["model"] == GatewayImageClient.GROK_MODEL
-    assert payload["prompt"] == "keep the composition and add a sci-fi skyline"
-    assert "image" in payload
-    assert payload["image"]["type"] == "image_url"
-    assert payload["image"]["url"].startswith("data:image/png;base64,")
-    assert "images" not in payload
-
-
-def test_grok_request_with_multiple_reference_images_uses_image_edits():
-    api_url, payload = GatewayImageClient._build_request(
-        GatewayImageClient.GROK_MODEL,
-        "combine these character references into one clean portrait",
-        reference_images=[
-            ReferenceImageInput(
-                data=b"ref-image-1",
-                filename="ref1.png",
-                mime_type="image/png",
-            ),
-            ReferenceImageInput(
-                data=b"ref-image-2",
-                filename="ref2.jpg",
-                mime_type="image/jpeg",
-            ),
-        ],
-    )
-
-    assert api_url == GatewayImageClient.IMAGE_EDITS_API_URL
-    assert payload["model"] == GatewayImageClient.GROK_MODEL
-    assert payload["prompt"] == "combine these character references into one clean portrait"
-    assert "image" not in payload
-    assert len(payload["images"]) == 2
-    assert payload["images"][0]["type"] == "image_url"
-    assert payload["images"][0]["url"].startswith("data:image/png;base64,")
-    assert payload["images"][1]["url"].startswith("data:image/jpeg;base64,")
-
-
 def test_gemini_request_with_reference_images_uses_multimodal_content():
     api_url, payload = GatewayImageClient._build_request(
         GatewayImageClient.GEMINI_FLASH_MODEL,
@@ -248,9 +198,32 @@ def test_collect_grok_b64_payload_candidates():
     assert candidates == payload["data"]
 
 
-def test_grok_supports_reference_images():
-    assert GatewayImageClient.supports_reference_image(
+def test_grok_does_not_support_reference_images_under_gateway():
+    assert not GatewayImageClient.supports_reference_image(
         GatewayImageClient.GROK_MODEL
+    )
+
+
+@pytest.mark.asyncio
+async def test_grok_reference_images_return_clear_gateway_error():
+    client = GatewayImageClient()
+
+    image, error = await client.generate_image(
+        prompt="keep the composition and add a sci-fi skyline",
+        model_name=GatewayImageClient.GROK_MODEL,
+        reference_images=[
+            ReferenceImageInput(
+                data=b"ref-image-1",
+                filename="ref1.png",
+                mime_type="image/png",
+            )
+        ],
+    )
+
+    assert image is None
+    assert error is not None
+    assert error.message == (
+        "当前通过 Vercel AI Gateway 调用 Grok 时暂不支持参考图，请切换到 Gemini 生图模型。"
     )
 
 
