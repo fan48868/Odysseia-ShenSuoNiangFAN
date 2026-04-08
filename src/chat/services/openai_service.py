@@ -1562,7 +1562,7 @@ class OpenAIService:
                                 f"[{channel_label}] 检测到违禁词，但回复长度为 {content_len} (>800)，按成本优化策略放行。"
                             )
 
-                    allowed_emoji_names = {"开心","乖巧","害羞","吃瓜","偷笑","比心","desuwa","伤心","生气","加油", "好奇","邀请","傲娇","祝福","你好","叹气","投降",}
+                    allowed_emoji_names = {"开心","乖巧","害羞","吃瓜","偷笑","裂开","呜呜","收到","打哈欠","得意","点赞","眩晕","疑惑","比心","desuwa","伤心","生气","加油", "好奇","邀请","傲娇","祝福","你好","叹气","投降",}
                     removed_emoji_tags: List[str] = []
 
                     def _strip_disallowed_emoji_tag(match):
