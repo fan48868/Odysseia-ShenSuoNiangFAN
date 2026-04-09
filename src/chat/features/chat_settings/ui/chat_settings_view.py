@@ -17,6 +17,7 @@ from src.database.database import AsyncSessionLocal
 from src.database.models import TokenUsage
 from datetime import datetime
 from src.chat.features.chat_settings.ui.warm_up_settings_view import WarmUpSettingsView
+from src.chat.features.chat_settings.ui.vercel_gateway_settings_view import VercelGatewayProvidersView
 from src.chat.features.chat_settings.ui.components import PaginatedSelect
 from src.chat.services.event_service import event_service
 from src.chat.features.chat_settings.ui.ai_model_settings_modal import (
@@ -278,6 +279,14 @@ class ChatSettingsView(View):
                 row=4,
             )
         )
+        self.add_item(
+            Button(
+                label="供应商设置",
+                style=ButtonStyle.secondary,
+                custom_id="vercel_gateway_settings",
+                row=4,
+            )
+        )
 
     async def _update_view(self, interaction: Interaction):
         """通过编辑附加的消息来刷新视图。"""
@@ -315,6 +324,8 @@ class ChatSettingsView(View):
             await self.on_memory_settings(interaction)
         elif custom_id == "tts_settings":
             await self.on_tts_settings(interaction)
+        elif custom_id == "vercel_gateway_settings":
+            await self.on_vercel_gateway_settings(interaction)
 
         return True
 
@@ -324,6 +335,17 @@ class ChatSettingsView(View):
         view = TTSSwitchView(mode)
         await interaction.response.send_message(
             content=view.render_content(),
+            view=view,
+            ephemeral=True,
+        )
+
+    async def on_vercel_gateway_settings(self, interaction: Interaction):
+        if not self.guild:
+            await interaction.response.send_message("服务器信息缺失。", ephemeral=True)
+            return
+        view = VercelGatewayProvidersView(self.guild.id)
+        await interaction.response.send_message(
+            "⚙️ Vercel Gateway 供应商设置",
             view=view,
             ephemeral=True,
         )

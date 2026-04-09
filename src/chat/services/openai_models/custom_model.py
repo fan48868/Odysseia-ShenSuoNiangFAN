@@ -16,8 +16,8 @@ from PIL import Image
 from dotenv import set_key
 
 from src import config
-from src.chat.services.kimi_gateway_provider_selector import (
-    KimiGatewayProviderSelectorService,
+from src.chat.services.vercel_gateway_provider_selector import (
+    VercelGatewayProviderSelectorService,
     ProviderSelection,
 )
 from src.chat.services.moonshot_vision_service import moonshot_vision_service
@@ -42,7 +42,7 @@ class CustomModelClient:
         self._api_keys: List[str] = []
         self._active_api_key_index = 0
         self._key_rotation_lock = asyncio.Lock()
-        self._kimi_gateway_provider_selector = KimiGatewayProviderSelectorService()
+        self._gateway_selectors: Dict[str, VercelGatewayProviderSelectorService] = {}
         self.api_key: Optional[str] = None
         self.raw_api_key: Optional[str] = None
         self._api_key_source_type = "inline"
@@ -1605,20 +1605,31 @@ class CustomModelClient:
             runtime_config.get("gateway_provider_name"),
         )
         is_vercel_gateway = "ai-gateway.vercel.sh" in api_url.lower()
-        is_kimi_k2_5_model = normalized_request_model == "moonshotai/kimi-k2.5"
-        selected_gateway_provider: Optional[ProviderSelection] = None
-        if is_vercel_gateway and is_kimi_k2_5_model:
-            selected_gateway_provider = (
-                await self._kimi_gateway_provider_selector.select_provider()
-            )
-            log.info(
-                "[Custom] 已选择 Kimi Gateway 供应商 | model=%s | 供应商=%s | 阶段=%s | 分数=%.6f | url=%s",
-                request_model_name,
-                selected_gateway_provider.provider_name,
-                selected_gateway_provider.stage,
-                selected_gateway_provider.effective_score,
-                api_url,
-            )
+        # 检查该模型是否有对应的供应商配置
+        selector = None
+        if is_vercel_gateway:
+            # 从 VercelGatewayProviderSelectorService.MODEL_PROVIDER_NAMES 中查找
+            from src.chat.services.vercel_gateway_provider_selector import VercelGatewayProviderSelectorService
+            if normalized_request_model in VercelGatewayProviderSelectorService.MODEL_PROVIDER_NAMES:
+                # 获取或创建选择器实例
+                if normalized_request_model not in self._gateway_selectors:
+                    self._gateway_selectors[normalized_request_model] = VercelGatewayProviderSelectorService(
+                        model_name=normalized_request_model
+                    )
+                selector = self._gateway_selectors[normalized_request_model]
+                selected_gateway_provider = await selector.select_provider()
+                log.info(
+                    "[Custom] 已选择 Vercel Gateway 供应商 | model=%s | 供应商=%s | 阶段=%s | 分数=%.6f | url=%s",
+                    request_model_name,
+                    selected_gateway_provider.provider_name,
+                    selected_gateway_provider.stage,
+                    selected_gateway_provider.effective_score,
+                    api_url,
+                )
+            else:
+                selected_gateway_provider = None
+        else:
+            selected_gateway_provider = None
         provider_timeout_injected = False
         provider_only_injected = False
         provider_order_injected = False
@@ -1777,15 +1788,15 @@ class CustomModelClient:
                             ):
                                 continue
 
-                        if selected_gateway_provider is not None:
+                        if selected_gateway_provider is not None and selector is not None:
                             if self._should_penalize_gateway_provider_response(
                                 current_response.status_code
                             ):
-                                await self._kimi_gateway_provider_selector.report_failure(
+                                await selector.report_failure(
                                     selected_gateway_provider.provider_name
                                 )
                             else:
-                                await self._kimi_gateway_provider_selector.release_provider(
+                                await selector.release_provider(
                                     selected_gateway_provider.provider_name
                                 )
 
@@ -1961,14 +1972,14 @@ class CustomModelClient:
                     )
                     successful_request_elapsed_seconds = loop.time() - request_started_at
 
-                    if selected_gateway_provider is not None:
+                    if selected_gateway_provider is not None and selector is not None:
                         parsed_result = self._parse_chat_completion_response_body(
                             response
                         )
                         output_units = self._extract_output_units_from_result(
                             parsed_result
                         )
-                        await self._kimi_gateway_provider_selector.report_success(
+                        await selector.report_success(
                             selected_gateway_provider.provider_name,
                             elapsed_seconds=successful_request_elapsed_seconds,
                             output_units=output_units,
@@ -1977,7 +1988,7 @@ class CustomModelClient:
                             output_units, 1
                         )
                         log.info(
-                            "[Custom] Kimi Gateway 供应商测速结果 | model=%s | 供应商=%s | 阶段=%s | 总耗时=%.2fs | 输出字数=%s | 每字耗时=%.6f | status=%s",
+                            "[Custom] Vercel Gateway 供应商测速结果 | model=%s | 供应商=%s | 阶段=%s | 总耗时=%.2fs | 输出字数=%s | 每字耗时=%.6f | status=%s",
                             request_model_name,
                             selected_gateway_provider.provider_name,
                             selected_gateway_provider.stage,
@@ -1989,8 +2000,8 @@ class CustomModelClient:
                     break
             except httpx.RequestError as exc:
                 elapsed_total_seconds = loop.time() - request_started_at
-                if selected_gateway_provider is not None:
-                    await self._kimi_gateway_provider_selector.report_failure(
+                if selected_gateway_provider is not None and selector is not None:
+                    await selector.report_failure(
                         selected_gateway_provider.provider_name
                     )
 

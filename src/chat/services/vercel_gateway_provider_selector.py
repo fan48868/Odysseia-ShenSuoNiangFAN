@@ -5,7 +5,7 @@ import logging
 import random
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 log = logging.getLogger(__name__)
 
@@ -32,34 +32,113 @@ class _ProviderState:
     cooldown_until_monotonic: float = 0.0
 
 
-class KimiGatewayProviderSelectorService:
-    PROVIDER_NAMES: List[str] = [
-        "novita",
-        "bedrock",
-        "moonshotai",
-        "fireworks",
-        "togetherai",
-    ]
+class VercelGatewayProviderSelectorService:
+    # 按模型名配置的供应商列表，方便以后扩展其他模型
+    MODEL_PROVIDER_NAMES: Dict[str, List[str]] = {
+        "moonshotai/kimi-k2.5": [
+            "novita",
+            "bedrock",
+            "moonshotai",
+            "fireworks",
+            "togetherai",
+        ],
+    }
+
     PRIMARY_SELECTION_PROBABILITY = 0.7
     FAST_PROVIDER_LOCK_UNIT_COST_THRESHOLD = 0.06
     FAILURE_PENALTY_SECONDS = 2.0
     SLOW_PROVIDER_UNIT_COST_THRESHOLD = 0.2
     SLOW_PROVIDER_COOLDOWN_SECONDS = 20 * 60
 
+    # 全局实例注册表
+    _global_instances: Dict[str, "VercelGatewayProviderSelectorService"] = {}
+    _global_instances_lock = asyncio.Lock()
+
+    @classmethod
+    async def get_instance(cls, model_name: str) -> Optional["VercelGatewayProviderSelectorService"]:
+        """获取已注册的选择器实例（如果尚未注册则返回 None，UI 应通过 CustomModelClient 创建后注册）"""
+        async with cls._global_instances_lock:
+            return cls._global_instances.get(model_name)
+
+    @classmethod
+    async def register_instance(cls, model_name: str, instance: "VercelGatewayProviderSelectorService") -> None:
+        async with cls._global_instances_lock:
+            cls._global_instances[model_name] = instance
+
+    @classmethod
+    async def unregister_instance(cls, model_name: str) -> None:
+        async with cls._global_instances_lock:
+            cls._global_instances.pop(model_name, None)
+
+    @classmethod
+    def get_available_models(cls) -> List[str]:
+        """获取所有已配置供应商的模型列表（供 UI 使用）"""
+        return list(cls.MODEL_PROVIDER_NAMES.keys())
+
     def __init__(
         self,
+        model_name: str,
         *,
         rng: Optional[random.Random] = None,
         time_fn: Optional[Callable[[], float]] = None,
+        disabled_providers: Optional[Set[str]] = None,
     ) -> None:
         self._lock = asyncio.Lock()
         self._rng = rng or random.Random()
         self._time_fn = time_fn or time.monotonic
+        self._model_name = model_name
+
+        provider_names = self.MODEL_PROVIDER_NAMES.get(model_name)
+        if not provider_names:
+            raise ValueError(
+                f"No provider names configured for model '{model_name}'. "
+                f"Available models: {list(self.MODEL_PROVIDER_NAMES.keys())}"
+            )
+
+        self.provider_names = provider_names
+        self._disabled_providers: Set[str] = set(disabled_providers or [])
         self._warmup_results_logged = False
         self._provider_states: Dict[str, _ProviderState] = {
             provider_name: _ProviderState(provider_name=provider_name)
-            for provider_name in self.PROVIDER_NAMES
+            for provider_name in self.provider_names
         }
+
+        # 注册到全局表
+        asyncio.create_task(self._register_async())
+
+    async def _register_async(self) -> None:
+        await self.register_instance(self._model_name, self)
+
+    async def update_disabled_providers(self, disabled_set: Set[str]) -> None:
+        """更新被禁用的供应商列表（UI 调用）"""
+        async with self._lock:
+            self._disabled_providers = set(disabled_set)
+            # 如果禁用列表发生变化，重新检查预热是否完成
+            if self._is_warmup_complete_locked() and not self._warmup_results_logged:
+                self._log_warmup_results_if_ready_locked()
+
+    async def get_provider_statuses(self) -> List[Dict[str, Any]]:
+        """获取当前所有供应商的状态（供 UI 展示）"""
+        async with self._lock:
+            now = self._time_fn()
+            self._refresh_cooldowns_locked(now)
+            statuses = []
+            for provider_name in self.provider_names:
+                state = self._provider_states[provider_name]
+                cooling_seconds = max(state.cooldown_until_monotonic - now, 0.0)
+                statuses.append({
+                    "provider_name": provider_name,
+                    "enabled": provider_name not in self._disabled_providers,
+                    "effective_score": self._get_effective_score_locked(state),
+                    "unit_cost": state.current_unit_cost or 0.0,
+                    "failure_penalty": state.failure_penalty_seconds,
+                    "sample_count": state.warmup_sample_count,
+                    "cooling_seconds": cooling_seconds,
+                    "last_elapsed_seconds": state.last_elapsed_seconds,
+                    "last_output_units": state.last_output_units,
+                    "explored": state.explored,
+                })
+            return statuses
 
     async def select_provider(self) -> ProviderSelection:
         async with self._lock:
@@ -67,12 +146,13 @@ class KimiGatewayProviderSelectorService:
             self._refresh_cooldowns_locked(now)
             warmup_candidates = [
                 self._provider_states[provider_name]
-                for provider_name in self.PROVIDER_NAMES
+                for provider_name in self.provider_names
                 if not self._provider_states[provider_name].explored
                 and not self._provider_states[provider_name].warmup_reserved
                 and not self._is_provider_cooling_locked(
                     self._provider_states[provider_name], now
                 )
+                and provider_name not in self._disabled_providers
             ]
 
             if warmup_candidates:
@@ -110,7 +190,8 @@ class KimiGatewayProviderSelectorService:
                     self._time_fn() + self.SLOW_PROVIDER_COOLDOWN_SECONDS
                 )
                 log.warning(
-                    "[KimiGateway] 供应商测速过慢，进入冷却 | 供应商=%s | 每字耗时=%.6f | 阈值=%.3f | 冷却分钟=%s",
+                    "[Gateway] 供应商测速过慢，进入冷却 | 模型=%s | 供应商=%s | 每字耗时=%.6f | 阈值=%.3f | 冷却分钟=%s",
+                    self._model_name,
                     provider_name,
                     unit_cost,
                     self.SLOW_PROVIDER_UNIT_COST_THRESHOLD,
@@ -157,16 +238,21 @@ class KimiGatewayProviderSelectorService:
         ordered_states = self._get_selectable_provider_states_locked(now)
         if not ordered_states:
             log.warning(
-                "[KimiGateway] 所有供应商都在冷却中，本次临时忽略冷却继续选路。"
+                "[Gateway] 所有供应商都在冷却中或被禁用，本次临时忽略冷却继续选路 | 模型=%s",
+                self._model_name,
             )
             ordered_states = [
                 self._provider_states[provider_name]
-                for provider_name in self.PROVIDER_NAMES
+                for provider_name in self.provider_names
+                if provider_name not in self._disabled_providers
+            ] or [
+                self._provider_states[provider_name]
+                for provider_name in self.provider_names
             ]
         ordered_states.sort(
             key=lambda state: (
                 self._get_effective_score_locked(state),
-                self.PROVIDER_NAMES.index(state.provider_name),
+                self.provider_names.index(state.provider_name),
             )
         )
 
@@ -187,10 +273,11 @@ class KimiGatewayProviderSelectorService:
     def _get_selectable_provider_states_locked(self, now: float) -> List[_ProviderState]:
         return [
             self._provider_states[provider_name]
-            for provider_name in self.PROVIDER_NAMES
+            for provider_name in self.provider_names
             if not self._is_provider_cooling_locked(
                 self._provider_states[provider_name], now
             )
+            and provider_name not in self._disabled_providers
         ]
 
     @staticmethod
@@ -202,7 +289,8 @@ class KimiGatewayProviderSelectorService:
             if 0.0 < state.cooldown_until_monotonic <= now:
                 state.cooldown_until_monotonic = 0.0
                 log.info(
-                    "[KimiGateway] 供应商冷却结束，重新参与选路 | 供应商=%s",
+                    "[Gateway] 供应商冷却结束，重新参与选路 | 模型=%s | 供应商=%s",
+                    self._model_name,
                     state.provider_name,
                 )
 
@@ -221,24 +309,40 @@ class KimiGatewayProviderSelectorService:
         return state.current_unit_cost <= self.FAST_PROVIDER_LOCK_UNIT_COST_THRESHOLD
 
     def _is_warmup_complete_locked(self) -> bool:
-        return all(state.explored for state in self._provider_states.values())
+        """预热完成条件：所有未被禁用的供应商都已探索（explored=True）。"""
+        active_states = [
+            state for name, state in self._provider_states.items()
+            if name not in self._disabled_providers
+        ]
+        if not active_states:
+            # 如果没有启用的供应商，预热视为已完成（避免卡死）
+            return True
+        return all(state.explored for state in active_states)
 
     def _log_warmup_results_if_ready_locked(self) -> None:
         if self._warmup_results_logged or not self._is_warmup_complete_locked():
             return
 
         self._warmup_results_logged = True
+        # 只记录未禁用的供应商成绩
+        active_states = [
+            state for name, state in self._provider_states.items()
+            if name not in self._disabled_providers
+        ]
+        if not active_states:
+            log.info("[Gateway] 没有启用的供应商，跳过预热记录。模型=%s", self._model_name)
+            return
         scoreboard = " | ".join(self._build_scoreboard_entries_locked())
-        log.info("[KimiGateway] 供应商预热完成，当前成绩榜：%s", scoreboard)
+        log.info("[Gateway] 供应商预热完成，模型=%s，当前成绩榜：%s", self._model_name, scoreboard)
 
     def _build_scoreboard_entries_locked(self) -> List[str]:
         ordered_states = [
-            self._provider_states[provider_name] for provider_name in self.PROVIDER_NAMES
+            self._provider_states[provider_name] for provider_name in self.provider_names
         ]
         ordered_states.sort(
             key=lambda state: (
                 self._get_effective_score_locked(state),
-                self.PROVIDER_NAMES.index(state.provider_name),
+                self.provider_names.index(state.provider_name),
             )
         )
         return [
