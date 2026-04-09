@@ -1308,8 +1308,10 @@ class CustomModelClient:
         response_text = (response.text or "").lstrip()
         return "text/event-stream" in content_type or response_text.startswith("data:")
 
-    @staticmethod
-    def parse_streaming_chat_completion_body(body: str) -> Optional[Dict[str, Any]]:
+    @classmethod
+    def parse_streaming_chat_completion_body(
+        cls, body: str
+    ) -> Optional[Dict[str, Any]]:
         if not body or "data:" not in body:
             return None
 
@@ -1411,17 +1413,13 @@ class CustomModelClient:
                 if isinstance(delta_content, str):
                     content_chunks.append(delta_content)
                 elif isinstance(delta_content, list):
-                    extracted_delta_content = (
-                        CustomModelClient._extract_text_from_openai_content(
-                            delta_content
-                        )
+                    extracted_delta_content = cls._extract_text_from_openai_content(
+                        delta_content
                     )
                     if extracted_delta_content:
                         content_chunks.append(extracted_delta_content)
 
-                extracted_delta_reasoning = (
-                    CustomModelClient._extract_reasoning_text_from_block(delta)
-                )
+                extracted_delta_reasoning = cls._extract_reasoning_text_from_block(delta)
                 if extracted_delta_reasoning:
                     reasoning_chunks.append(extracted_delta_reasoning)
 
@@ -1439,16 +1437,14 @@ class CustomModelClient:
                 if isinstance(message_content, str) and message_content and not content_chunks:
                     content_chunks.append(message_content)
                 elif isinstance(message_content, list) and not content_chunks:
-                    extracted_message_content = (
-                        CustomModelClient._extract_text_from_openai_content(
-                            message_content
-                        )
+                    extracted_message_content = cls._extract_text_from_openai_content(
+                        message_content
                     )
                     if extracted_message_content:
                         content_chunks.append(extracted_message_content)
 
-                extracted_message_reasoning = (
-                    CustomModelClient._extract_reasoning_text_from_block(message_block)
+                extracted_message_reasoning = cls._extract_reasoning_text_from_block(
+                    message_block
                 )
                 if extracted_message_reasoning and not reasoning_chunks:
                     reasoning_chunks.append(extracted_message_reasoning)
