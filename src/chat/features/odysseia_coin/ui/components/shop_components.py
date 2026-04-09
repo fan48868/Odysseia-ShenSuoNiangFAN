@@ -7,7 +7,7 @@ import discord
 import logging
 from typing import List, Dict, Any, TypeVar, cast, TYPE_CHECKING
 
-
+from src import config
 from src.chat.services.event_service import event_service
 from src.chat.features.events.ui.event_panel_view import EventPanelView
 from src.chat.features.work_game.services.work_service import WorkService
@@ -1065,39 +1065,44 @@ class ToolListButton(ShopButton["SimpleShopView"]):
 
     def __init__(self):
         super().__init__(
-            label="类脑娘的工作清单", style=discord.ButtonStyle.primary, emoji="🗒️"
+            label="全局启用或关闭工具",
+            style=discord.ButtonStyle.primary,
+            emoji="🗒️",
         )
 
     async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id not in config.DEVELOPER_USER_IDS:
+            await interaction.response.send_message(
+                "只有 DEVELOPER_USER_IDS 中的开发者可以进入全局工具开关。",
+                ephemeral=True,
+            )
+            return
+
         tool_settings_view = ToolSettingsView(main_view=self.view)
-        await tool_settings_view.initialize(interaction.user)
+        await tool_settings_view.initialize()
         embed = await tool_settings_view.create_embed()
         await interaction.response.edit_message(embeds=[embed], view=tool_settings_view)
 
 
 class ToolSettingsView(discord.ui.View):
-    """管理用户工具设置的视图。"""
+    """管理全局工具设置的视图。"""
 
     def __init__(self, main_view: "SimpleShopView"):
         super().__init__(timeout=300)
         self.main_view = main_view
-        self.user: discord.User | discord.Member | None = None
-        self.user_settings: Dict[str, Any] | None = None
+        self.global_settings: Dict[str, Any] | None = None
         self.all_tools: Dict[str, Dict[str, Any]] = {}
         self.confirmation_message: str | None = None
 
-    async def initialize(self, user: discord.User | discord.Member):
-        self.user = user
-        self.user_settings = await user_tool_settings_service.get_user_tool_settings(
-            str(user.id)
-        )
+    async def initialize(self):
+        self.global_settings = await user_tool_settings_service.get_global_tool_settings()
         self.all_tools = get_all_tools_metadata()
         self.add_components()
 
     def add_components(self):
         """根据当前状态向视图添加组件。"""
         self.clear_items()
-        self.add_item(ToolToggleSelect(self.all_tools, self.user_settings))
+        self.add_item(ToolToggleSelect(self.all_tools, self.global_settings))
 
         back_button = discord.ui.Button(
             label="返回商店", style=discord.ButtonStyle.secondary, emoji="⬅️"
@@ -1107,14 +1112,18 @@ class ToolSettingsView(discord.ui.View):
 
     async def create_embed(self) -> discord.Embed:
         """创建工具设置的嵌入消息。"""
-        description = "在这里可以设置类脑娘在你的帖子里能使用哪些工具哦～\n默认情况下所有工具都是开启的。"
+        description = (
+            "在这里可以全局控制类脑娘能否使用某个工具哦～\n"
+            "关闭后，该工具不会再转换并发送给 API。\n"
+            "默认情况下所有工具都是开启的。"
+        )
         if self.confirmation_message:
             description = f"✅ {self.confirmation_message}\n\n{description}"
             # 重置消息，以便下次更新时不显示
             self.confirmation_message = None
 
         embed = discord.Embed(
-            title="🗒️ 类脑娘的工作清单",
+            title="🗒️ 全局启用或关闭工具",
             description=description,
             color=discord.Color.blue(),
         )
@@ -1132,18 +1141,20 @@ class ToolToggleSelect(discord.ui.Select):
     def __init__(
         self,
         all_tools: Dict[str, Dict[str, Any]],
-        user_settings: Dict[str, Any] | None,
+        global_settings: Dict[str, Any] | None,
     ):
         from src.chat.config.chat_config import HIDDEN_TOOLS
 
         options = []
-        enabled_tools = user_settings.get("enabled_tools") if user_settings else None
+        enabled_tools = (
+            global_settings.get("enabled_tools") if global_settings else None
+        )
 
         for tool_name, meta in all_tools.items():
             # 过滤掉不允许用户控制的工具（HIDDEN_TOOLS）
             if tool_name in HIDDEN_TOOLS:
                 continue
-            # 如果 user_settings 为 None，则默认启用所有工具。
+            # 如果 global_settings 为 None，则默认启用所有工具。
             # 如果数据库中的 enabled_tools 为 None，则默认启用所有工具。
             is_enabled = enabled_tools is None or tool_name in enabled_tools
             options.append(
@@ -1157,29 +1168,40 @@ class ToolToggleSelect(discord.ui.Select):
             )
 
         super().__init__(
-            placeholder="选择要开启/关闭的工具...",
+            placeholder="选择全局启用的工具...",
             min_values=0,
             max_values=len(options),
             options=options,
         )
 
     async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id not in config.DEVELOPER_USER_IDS:
+            await interaction.response.send_message(
+                "只有 DEVELOPER_USER_IDS 中的开发者可以修改全局工具开关。",
+                ephemeral=True,
+            )
+            return
+
         view = cast(ToolSettingsView, self.view)
-        user_id = str(interaction.user.id)
 
         # 将UI中选择的工具保存到数据库
         new_enabled_set = set(self.values) if self.values else set()
 
-        await user_tool_settings_service.save_user_tool_settings(
-            user_id, {"enabled_tools": list(new_enabled_set)}
+        save_success = await user_tool_settings_service.save_global_tool_settings(
+            {"enabled_tools": sorted(new_enabled_set)}
         )
+        if not save_success:
+            await interaction.response.send_message(
+                "保存全局工具开关失败，请稍后再试。",
+                ephemeral=True,
+            )
+            return
 
-        # 更新视图中的用户设置
-        view.user_settings = await user_tool_settings_service.get_user_tool_settings(
-            user_id
-        )
+        # 更新视图中的全局设置
+        view.global_settings = await user_tool_settings_service.get_global_tool_settings()
+        view.confirmation_message = "已更新全局工具开关。"
 
-        # 设置确认消息并更新原始消息
+        # 重新构建视图并更新消息
         view.add_components()
         embed = await view.create_embed()
         await interaction.response.edit_message(embed=embed, view=view)

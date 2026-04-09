@@ -641,6 +641,19 @@ class OpenAIService:
             user_id_for_settings=user_id_for_settings
         )
         openai_tools: List[Dict[str, Any]] = []
+        globally_skipped_tools: List[str] = []
+
+        if dynamic_tools:
+            dynamic_tools, globally_skipped_tools = (
+                await self.tool_service.filter_tools_for_global_settings(dynamic_tools)
+            )
+            if globally_skipped_tools:
+                log.info(
+                    "[%s] 已跳过 %s 个全局关闭工具，不再发送给 API（%s）。",
+                    channel_label,
+                    len(globally_skipped_tools),
+                    ", ".join(globally_skipped_tools),
+                )
 
         _PY_TYPE_MAP = {
             str: "string",
@@ -1040,6 +1053,10 @@ class OpenAIService:
 
             if openai_tools:
                 log.info(f"[{channel_label}] 成功转换 {len(openai_tools)} 个工具发往 API。")
+            elif globally_skipped_tools:
+                log.info(
+                    f"[{channel_label}] 当前可控工具已被全局关闭，未向 API 发送动态工具。"
+                )
             else:
                 log.warning(f"[{channel_label}] 获取到了工具，但转换结果为空！")
 

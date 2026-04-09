@@ -1175,6 +1175,16 @@ class GeminiService:
             user_id_for_settings=user_id_for_settings
         )
         if dynamic_tools:
+            dynamic_tools, globally_skipped_tools = (
+                await self.tool_service.filter_tools_for_global_settings(dynamic_tools)
+            )
+            if globally_skipped_tools:
+                log.info(
+                    "Gemini 分支已跳过 %s 个全局关闭工具，不再发送给 API（%s）。",
+                    len(globally_skipped_tools),
+                    ", ".join(globally_skipped_tools),
+                )
+
             disabled_in_gemini = {
                 "analyze_image_with_gemini_pro",
                 "get_api_balance",

@@ -3,6 +3,7 @@ import logging
 from typing import List, Dict, Any
 from discord.ext import commands
 
+from src import config
 from src.chat.features.odysseia_coin.service.shop_service import (
     ShopData,
     shop_service,
@@ -90,8 +91,8 @@ class SimpleShopView(discord.ui.View):
         if self.shop_data.show_tutorial_button:
             self.add_item(KnowledgeBaseButton())
 
-        # 添加类脑娘的工作清单按钮
-        self.add_item(ToolListButton())
+        if self.author.id in config.DEVELOPER_USER_IDS:
+            self.add_item(ToolListButton())
 
     async def on_timeout(self):
         for item in self.children:
