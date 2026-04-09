@@ -396,7 +396,22 @@ def test_extract_output_units_uses_output_text_length_and_minimum_one():
                     }
                 ],
             },
-            "",
+            CustomModelClient._TOOL_CALL_REASONING_PLACEHOLDER,
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "test_tool", "arguments": "{}"},
+                    }
+                ],
+            },
+            CustomModelClient._TOOL_CALL_REASONING_PLACEHOLDER,
         ),
         (
             {
@@ -418,6 +433,7 @@ def test_extract_output_units_uses_output_text_length_and_minimum_one():
 def test_normalize_chat_completion_result_backfills_reasoning_content_for_tool_calls(
     message: Dict[str, Any], expected_reasoning: str
 ):
+    original_reasoning = message.get("reasoning_content")
     result = {
         "choices": [
             {
@@ -430,7 +446,10 @@ def test_normalize_chat_completion_result_backfills_reasoning_content_for_tool_c
     normalized = CustomModelClient.normalize_chat_completion_result(result)
 
     assert normalized["choices"][0]["message"]["reasoning_content"] == expected_reasoning
-    assert "reasoning_content" not in result["choices"][0]["message"]
+    if original_reasoning is None:
+        assert "reasoning_content" not in result["choices"][0]["message"]
+    else:
+        assert result["choices"][0]["message"]["reasoning_content"] == original_reasoning
 
 
 @pytest.mark.asyncio
@@ -469,7 +488,10 @@ async def test_custom_model_send_backfills_reasoning_content_for_request_tool_ca
             runtime_config=runtime_config,
         )
 
-    assert captured_payloads[0]["messages"][0]["reasoning_content"] == ""
+    assert (
+        captured_payloads[0]["messages"][0]["reasoning_content"]
+        == CustomModelClient._TOOL_CALL_REASONING_PLACEHOLDER
+    )
     assert "reasoning_content" not in messages[0]
 
 

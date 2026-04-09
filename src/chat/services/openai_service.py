@@ -1511,8 +1511,12 @@ class OpenAIService:
                 reasoning_content = response_message.get("reasoning_content")
                 content = response_message.get("content") or ""
                 tool_calls = response_message.get("tool_calls")
-                if is_custom_model and tool_calls is not None and reasoning_content is None:
-                    reasoning_content = ""
+                if is_custom_model and tool_calls is not None:
+                    reasoning_content = (
+                        self.custom_model_client.normalize_tool_call_reasoning_content(
+                            reasoning_content
+                        )
+                    )
 
                 if reasoning_content and not is_custom_model:
                     log.info(

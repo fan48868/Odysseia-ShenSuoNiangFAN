@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 class CustomModelClient:
     _PRIMARY_API_KEY_ENV_NAME = "CUSTOM_MODEL_API_KEY"
     _LEGACY_API_KEY_ENV_NAME = "CUSTON_MODEL_API_KEY"
+    _TOOL_CALL_REASONING_PLACEHOLDER = "[tool-call reasoning omitted]"
     """Custom OpenAI 兼容通道客户端：负责配置管理、请求发送与 Custom 专属解析。"""
 
     def __init__(self) -> None:
@@ -627,6 +628,26 @@ class CustomModelClient:
         return ""
 
     @classmethod
+    def normalize_tool_call_reasoning_content(cls, reasoning_content: Any) -> str:
+        extracted_from_content = cls._extract_text_from_openai_content(reasoning_content)
+        if extracted_from_content:
+            return extracted_from_content
+
+        if isinstance(reasoning_content, str):
+            normalized_reasoning = reasoning_content.strip()
+            if normalized_reasoning:
+                return normalized_reasoning
+
+        if isinstance(reasoning_content, dict):
+            extracted_from_block = cls._extract_reasoning_text_from_block(
+                reasoning_content
+            )
+            if extracted_from_block:
+                return extracted_from_block
+
+        return cls._TOOL_CALL_REASONING_PLACEHOLDER
+
+    @classmethod
     def _normalize_assistant_tool_call_reasoning(
         cls, block: Any, *, assume_assistant: bool = False
     ) -> Any:
@@ -642,14 +663,147 @@ class CustomModelClient:
         if not is_assistant_block:
             return block
 
-        if isinstance(block.get("reasoning_content"), str):
+        existing_reasoning = block.get("reasoning_content")
+        if isinstance(existing_reasoning, str) and existing_reasoning.strip():
             return block
 
         normalized_block = dict(block)
-        normalized_block["reasoning_content"] = cls._extract_reasoning_text_from_block(
-            block
+        normalized_block["reasoning_content"] = cls.normalize_tool_call_reasoning_content(
+            cls._extract_reasoning_text_from_block(block)
         )
         return normalized_block
+
+    @classmethod
+    def _collect_missing_assistant_tool_call_reasoning_indexes(
+        cls, messages: Any
+    ) -> List[int]:
+        if not isinstance(messages, list):
+            return []
+
+        missing_indexes: List[int] = []
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict):
+                continue
+
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list) or not tool_calls:
+                continue
+
+            role = str(message.get("role") or "").strip().lower()
+            if role != "assistant":
+                continue
+
+            reasoning_content = message.get("reasoning_content")
+            if not isinstance(reasoning_content, str) or not reasoning_content.strip():
+                missing_indexes.append(index)
+
+        return missing_indexes
+
+    @classmethod
+    def _preview_message_debug_text(cls, value: Any, *, max_length: int = 120) -> str:
+        if isinstance(value, str):
+            preview = value.strip()
+        else:
+            preview = cls._extract_text_from_openai_content(value)
+            if not preview and value is not None:
+                preview = str(value).strip()
+
+        preview = re.sub(r"\s+", " ", preview).strip()
+        if len(preview) > max_length:
+            preview = preview[: max_length - 3] + "..."
+        return preview
+
+    @classmethod
+    def _build_message_debug_summary(
+        cls, message: Any, *, index: int
+    ) -> Dict[str, Any]:
+        if not isinstance(message, dict):
+            return {"index": index, "message_type": type(message).__name__}
+
+        tool_calls = message.get("tool_calls")
+        tool_names: List[str] = []
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function_payload = tool_call.get("function")
+                if not isinstance(function_payload, dict):
+                    continue
+                tool_name = function_payload.get("name")
+                if isinstance(tool_name, str) and tool_name:
+                    tool_names.append(tool_name)
+
+        reasoning_content = message.get("reasoning_content")
+        reasoning_preview = cls._preview_message_debug_text(reasoning_content)
+        content_preview = cls._preview_message_debug_text(message.get("content"))
+
+        return {
+            "index": index,
+            "role": message.get("role"),
+            "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0,
+            "tool_names": tool_names,
+            "reasoning_type": (
+                type(reasoning_content).__name__
+                if reasoning_content is not None
+                else None
+            ),
+            "reasoning_length": (
+                len(reasoning_content.strip())
+                if isinstance(reasoning_content, str)
+                else None
+            ),
+            "reasoning_preview": reasoning_preview,
+            "content_type": (
+                type(message.get("content")).__name__
+                if message.get("content") is not None
+                else None
+            ),
+            "content_preview": content_preview,
+        }
+
+    @classmethod
+    def _extract_reasoning_error_message_index(
+        cls, error_text: str
+    ) -> Optional[int]:
+        match = re.search(
+            r"assistant tool call message at index (\d+)",
+            str(error_text or ""),
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _log_reasoning_error_message_window(
+        cls, messages: Any, *, target_index: int, error_text: str
+    ) -> None:
+        if not isinstance(messages, list):
+            log.error(
+                "[Custom] reasoning_content 缺失定位失败：messages 不是列表 | target_index=%s | error=%s",
+                target_index,
+                error_text,
+            )
+            return
+
+        start_index = max(target_index - 2, 0)
+        end_index = min(target_index + 3, len(messages))
+        window_summaries = [
+            cls._build_message_debug_summary(message, index=index)
+            for index, message in enumerate(
+                messages[start_index:end_index], start=start_index
+            )
+        ]
+        log.error(
+            "[Custom] 检测到 assistant tool-call reasoning_content 缺失报错 | target_index=%s | missing_indexes=%s | window=%s",
+            target_index,
+            cls._collect_missing_assistant_tool_call_reasoning_indexes(messages),
+            json.dumps(window_summaries, ensure_ascii=False),
+        )
 
     @classmethod
     def normalize_request_messages(cls, messages: Any) -> Any:
@@ -1323,7 +1477,9 @@ class CustomModelClient:
             message["reasoning_content"] = final_reasoning
         if final_tool_calls:
             message["tool_calls"] = final_tool_calls
-            message.setdefault("reasoning_content", "")
+            message["reasoning_content"] = cls.normalize_tool_call_reasoning_content(
+                message.get("reasoning_content")
+            )
 
         final_finish_reason = latest_finish_reason or (
             "tool_calls" if final_tool_calls else "stop"
@@ -1413,6 +1569,16 @@ class CustomModelClient:
         request_payload["messages"] = self.normalize_request_messages(
             request_payload.get("messages")
         )
+        missing_reasoning_indexes = (
+            self._collect_missing_assistant_tool_call_reasoning_indexes(
+                request_payload.get("messages")
+            )
+        )
+        if missing_reasoning_indexes:
+            log.warning(
+                "[Custom] 请求发送前仍发现 assistant tool-call reasoning_content 缺失 | indexes=%s",
+                missing_reasoning_indexes,
+            )
         request_payload["stream"] = True
         request_payload["thinking"] = {"type": "disabled"}
         request_payload.pop("chat_template_kwargs", None)
@@ -1626,6 +1792,16 @@ class CustomModelClient:
                                 await self._kimi_gateway_provider_selector.release_provider(
                                     selected_gateway_provider.provider_name
                                 )
+
+                        reasoning_error_index = self._extract_reasoning_error_message_index(
+                            response_text
+                        )
+                        if reasoning_error_index is not None:
+                            self._log_reasoning_error_message_window(
+                                request_payload.get("messages"),
+                                target_index=reasoning_error_index,
+                                error_text=response_text,
+                            )
 
                         current_response.raise_for_status()
 
