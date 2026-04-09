@@ -1742,6 +1742,7 @@ class CustomModelClient:
             saw_non_sse_payload = False
             response_content_encoding = "<pending>"
             response_transfer_encoding = "<pending>"
+            provider_failure_reported = False
 
             try:
                 async with http_client.stream(
@@ -1795,6 +1796,7 @@ class CustomModelClient:
                                 await selector.report_failure(
                                     selected_gateway_provider.provider_name
                                 )
+                                provider_failure_reported = True
                             else:
                                 await selector.release_provider(
                                     selected_gateway_provider.provider_name
@@ -1808,6 +1810,13 @@ class CustomModelClient:
                                 request_payload.get("messages"),
                                 target_index=reasoning_error_index,
                                 error_text=response_text,
+                            )
+
+                        # 将 5xx 服务器错误（包括 500）作为网络异常抛出，以便上层重试
+                        if 500 <= current_response.status_code < 600:
+                            raise httpx.ConnectError(
+                                f"Server error {current_response.status_code}: {current_response.reason_phrase}",
+                                request=current_response.request,
                             )
 
                         current_response.raise_for_status()
@@ -2000,7 +2009,11 @@ class CustomModelClient:
                     break
             except httpx.RequestError as exc:
                 elapsed_total_seconds = loop.time() - request_started_at
-                if selected_gateway_provider is not None and selector is not None:
+                if (
+                    selected_gateway_provider is not None
+                    and selector is not None
+                    and not provider_failure_reported
+                ):
                     await selector.report_failure(
                         selected_gateway_provider.provider_name
                     )
