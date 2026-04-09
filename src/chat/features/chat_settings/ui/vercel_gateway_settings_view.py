@@ -8,8 +8,6 @@ from typing import List, Dict, Any, Set
 from src.chat.services.vercel_gateway_provider_selector import VercelGatewayProviderSelectorService
 from src.chat.features.chat_settings.services.chat_settings_service import chat_settings_service
 
-_DISABLED_PROVIDERS_KEY_TEMPLATE = "vercel_gateway_disabled_providers:{}"
-
 
 class VercelGatewayProvidersView(View):
     """供应商设置面板：模型选择、状态展示、禁用管理。"""
@@ -57,22 +55,10 @@ class VercelGatewayProvidersView(View):
             return
         self.selected_model = self.model_select.values[0]
 
-        # 获取选择器实例（必须存在，否则提示先调用模型）
-        self.selector = await VercelGatewayProviderSelectorService.get_instance(self.selected_model)
-        if self.selector is None:
-            # 模型未激活，提示用户先使用模型
-            await interaction.response.edit_message(
-                content=f"⚠️ 模型 `{self.selected_model}` 尚未激活。\n请先在聊天中使用该模型发送一条消息，然后再回来配置供应商。",
-                view=self,
-            )
-            # 确保供应商相关组件未创建（如果之前意外创建了，删除它们）
-            if self.provider_select is not None:
-                self.remove_item(self.provider_select)
-                self.provider_select = None
-            if self.refresh_button is not None:
-                self.remove_item(self.refresh_button)
-                self.refresh_button = None
-            return
+        # 获取或创建选择器实例，无需先手动调用一次模型
+        self.selector = await VercelGatewayProviderSelectorService.get_or_create_instance(
+            self.selected_model
+        )
 
         # 动态创建供应商多选下拉框和刷新按钮（如果尚未创建）
         if self.provider_select is None:
@@ -98,16 +84,9 @@ class VercelGatewayProvidersView(View):
             self.add_item(self.refresh_button)
 
         # 加载当前全局禁用列表（从数据库）
-        key = _DISABLED_PROVIDERS_KEY_TEMPLATE.format(self.selected_model)
-        raw = await chat_settings_service.db_manager.get_global_setting(key)
-        if raw:
-            try:
-                import json
-                self.disabled_providers = set(json.loads(raw))
-            except:
-                self.disabled_providers = set()
-        else:
-            self.disabled_providers = set()
+        self.disabled_providers = await VercelGatewayProviderSelectorService.load_disabled_providers(
+            self.selected_model
+        )
 
         # 同步禁用列表到 selector
         await self.selector.update_disabled_providers(self.disabled_providers)
@@ -229,7 +208,9 @@ class VercelGatewayProvidersView(View):
         self.disabled_providers = new_disabled
 
         # 保存到数据库
-        key = _DISABLED_PROVIDERS_KEY_TEMPLATE.format(self.selected_model)
+        key = VercelGatewayProviderSelectorService.get_disabled_providers_setting_key(
+            self.selected_model
+        )
         import json
         value = json.dumps(list(new_disabled))
         await chat_settings_service.db_manager.set_global_setting(key, value)

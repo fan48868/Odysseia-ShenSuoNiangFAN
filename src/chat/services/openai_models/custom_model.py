@@ -1613,7 +1613,7 @@ class CustomModelClient:
             if normalized_request_model in VercelGatewayProviderSelectorService.MODEL_PROVIDER_NAMES:
                 # 获取或创建选择器实例
                 if normalized_request_model not in self._gateway_selectors:
-                    self._gateway_selectors[normalized_request_model] = VercelGatewayProviderSelectorService(
+                    self._gateway_selectors[normalized_request_model] = await VercelGatewayProviderSelectorService.get_or_create_instance(
                         model_name=normalized_request_model
                     )
                 selector = self._gateway_selectors[normalized_request_model]

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+import json
 import logging
 import random
 import time
@@ -8,6 +9,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set
 
 log = logging.getLogger(__name__)
+
+_DISABLED_PROVIDERS_KEY_TEMPLATE = "vercel_gateway_disabled_providers:{}"
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,31 @@ class VercelGatewayProviderSelectorService:
             return cls._global_instances.get(model_name)
 
     @classmethod
+    async def get_or_create_instance(
+        cls,
+        model_name: str,
+        *,
+        rng: Optional[random.Random] = None,
+        time_fn: Optional[Callable[[], float]] = None,
+    ) -> "VercelGatewayProviderSelectorService":
+        """获取全局选择器实例，如不存在则按数据库配置创建。"""
+        existing_instance = await cls.get_instance(model_name)
+        if existing_instance is not None:
+            return existing_instance
+
+        created_instance = await cls.create_for_model(
+            model_name,
+            rng=rng,
+            time_fn=time_fn,
+        )
+        async with cls._global_instances_lock:
+            existing_instance = cls._global_instances.get(model_name)
+            if existing_instance is not None:
+                return existing_instance
+            cls._global_instances[model_name] = created_instance
+            return created_instance
+
+    @classmethod
     async def register_instance(cls, model_name: str, instance: "VercelGatewayProviderSelectorService") -> None:
         async with cls._global_instances_lock:
             cls._global_instances[model_name] = instance
@@ -74,6 +102,64 @@ class VercelGatewayProviderSelectorService:
     def get_available_models(cls) -> List[str]:
         """获取所有已配置供应商的模型列表（供 UI 使用）"""
         return list(cls.MODEL_PROVIDER_NAMES.keys())
+
+    @classmethod
+    def get_disabled_providers_setting_key(cls, model_name: str) -> str:
+        return _DISABLED_PROVIDERS_KEY_TEMPLATE.format(model_name)
+
+    @classmethod
+    async def load_disabled_providers(cls, model_name: str) -> Set[str]:
+        """从全局设置中加载指定模型的已禁用供应商列表。"""
+        from src.chat.features.chat_settings.services.chat_settings_service import (
+            chat_settings_service,
+        )
+
+        raw = await chat_settings_service.db_manager.get_global_setting(
+            cls.get_disabled_providers_setting_key(model_name)
+        )
+        if not raw:
+            return set()
+
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            log.warning(
+                "[Gateway] 禁用供应商配置解析失败，已忽略 | 模型=%s | 原始值=%r",
+                model_name,
+                raw,
+            )
+            return set()
+
+        if not isinstance(parsed, (list, tuple, set)):
+            log.warning(
+                "[Gateway] 禁用供应商配置格式无效，已忽略 | 模型=%s | 类型=%s",
+                model_name,
+                type(parsed).__name__,
+            )
+            return set()
+
+        configured_providers = set(cls.MODEL_PROVIDER_NAMES.get(model_name, []))
+        disabled_providers = {str(provider_name) for provider_name in parsed}
+        if configured_providers:
+            disabled_providers &= configured_providers
+        return disabled_providers
+
+    @classmethod
+    async def create_for_model(
+        cls,
+        model_name: str,
+        *,
+        rng: Optional[random.Random] = None,
+        time_fn: Optional[Callable[[], float]] = None,
+    ) -> "VercelGatewayProviderSelectorService":
+        """创建选择器时自动恢复数据库中的禁用供应商配置。"""
+        disabled_providers = await cls.load_disabled_providers(model_name)
+        return cls(
+            model_name=model_name,
+            rng=rng,
+            time_fn=time_fn,
+            disabled_providers=disabled_providers,
+        )
 
     def __init__(
         self,

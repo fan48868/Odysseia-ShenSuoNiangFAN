@@ -45,6 +45,13 @@ class ReviewService:
         self.background_tasks = weakref.WeakSet()
         self.check_expired_entries.start()
 
+    def set_bot(self, bot: discord.Client):
+        """在外层重建 Discord 客户端后，刷新服务持有的 bot 引用。"""
+        self.bot = bot
+        if not self.check_expired_entries.is_running():
+            self.check_expired_entries.start()
+        log.info("ReviewService 已更新为新的 bot 实例。")
+
     def _get_db_connection(self):
         """建立并返回一个新的 SQLite 数据库连接。"""
         try:
@@ -898,4 +905,6 @@ def initialize_review_service(bot: discord.Client, work_db_service: "WorkDBServi
     if review_service is None:
         review_service = ReviewService(bot, work_db_service)
         log.info("ReviewService 已成功初始化并启动定时任务。")
+    else:
+        review_service.set_bot(bot)
     return review_service

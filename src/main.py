@@ -53,6 +53,15 @@ enable_webui = os.getenv("ENABLE_WEBUI", "true").lower() == "true"
 webui_log_batch_size = int(os.getenv("WEBUI_LOG_BATCH_SIZE", "200"))
 webui_log_timeout = float(os.getenv("WEBUI_LOG_TIMEOUT", "5.0"))
 webui_log_backlog_limit = int(os.getenv("WEBUI_LOG_BACKLOG_LIMIT", "5000"))
+discord_reconnect_base_delay = float(
+    os.getenv("DISCORD_RECONNECT_BASE_DELAY", "5")
+)
+discord_reconnect_max_delay = float(
+    os.getenv("DISCORD_RECONNECT_MAX_DELAY", "300")
+)
+discord_reconnect_stable_reset_seconds = float(
+    os.getenv("DISCORD_RECONNECT_STABLE_RESET_SECONDS", "600")
+)
 
 log_queue = queue.Queue()
 
@@ -217,6 +226,7 @@ class GuidanceBot(commands.Bot):
         init_kwargs["max_messages"] = 10000
 
         super().__init__(**init_kwargs)
+        self.last_ready_monotonic = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """
@@ -317,6 +327,7 @@ class GuidanceBot(commands.Bot):
     async def on_ready(self):
         """当机器人成功连接到 Discord 时调用"""
         log = logging.getLogger(__name__)
+        self.last_ready_monotonic = time.monotonic()
         log.info("--- 机器人已上线 ---")
         if self.user:
             log.info(f"登录用户: {self.user} (ID: {self.user.id})")
@@ -359,6 +370,82 @@ class GuidanceBot(commands.Bot):
 
         log.info("--------------------")
         log.info("--- 启动成功 ---")
+
+    async def on_disconnect(self):
+        logging.getLogger(__name__).warning(
+            "与 Discord 网关的连接已断开，正在等待库内部恢复或外层监督重试。"
+        )
+
+    async def on_resumed(self):
+        logging.getLogger(__name__).info("已恢复与 Discord 网关的会话。")
+
+
+def _get_next_reconnect_delay(current_delay: float) -> float:
+    """计算下一次重连等待时间，并限制在最大退避窗口内。"""
+    if current_delay <= 0:
+        return discord_reconnect_base_delay
+    return min(current_delay * 2, discord_reconnect_max_delay)
+
+
+async def run_bot_forever(token: str):
+    """
+    持续监督 Discord Bot。
+
+    即使底层库在网络异常、代理切换或网关握手失败后最终抛出异常，
+    这里也会使用新的 Bot 实例继续尝试连接，而不是让整个进程退出。
+    """
+    log = logging.getLogger(__name__)
+    reconnect_delay = discord_reconnect_base_delay
+    work_db_service = WorkDBService()
+    from src.chat.services.context_service_test import initialize_context_service_test
+
+    attempt = 0
+    while True:
+        bot = GuidanceBot()
+        attempt += 1
+
+        guidance_db_manager.set_bot_instance(bot)
+        gemini_service.set_bot(bot)
+        initialize_context_service_test(bot)
+        initialize_review_service(bot, work_db_service)
+
+        try:
+            log.info(f"正在连接 Discord（第 {attempt} 次尝试）...")
+            await bot.start(token, reconnect=True)
+            log.warning("Discord Bot 连接已结束，准备重新尝试连接。")
+        except discord.LoginFailure:
+            log.critical("无法登录，请检查你的 DISCORD_TOKEN 是否正确。")
+            break
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            log.error(
+                f"Discord 连接失败或已中断，将在 {reconnect_delay:.1f} 秒后重试: {e}",
+                exc_info=True,
+            )
+        finally:
+            try:
+                if not bot.is_closed():
+                    await bot.close()
+            except Exception as close_error:
+                log.warning(f"关闭 Bot 实例时出现异常: {close_error}", exc_info=True)
+
+        uptime = None
+        if bot.last_ready_monotonic is not None:
+            uptime = time.monotonic() - bot.last_ready_monotonic
+
+        if uptime is not None and uptime >= discord_reconnect_stable_reset_seconds:
+            log.info(
+                f"本次连接已稳定运行约 {uptime:.1f} 秒，重连退避已重置为初始值。"
+            )
+            sleep_delay = discord_reconnect_base_delay
+            reconnect_delay = discord_reconnect_base_delay
+        else:
+            sleep_delay = reconnect_delay
+            reconnect_delay = _get_next_reconnect_delay(reconnect_delay)
+
+        log.info(f"将在 {sleep_delay:.1f} 秒后再次尝试连接 Discord。")
+        await asyncio.sleep(sleep_delay)
 
 
 def handle_exception(exc_type, exc_value, exc_traceback):
@@ -451,36 +538,17 @@ async def main():
     scheduler.start()
     log.info("已启动每日数据库备份任务。")
 
-    # 4. 创建并运行机器人实例
-    bot = GuidanceBot()
-    guidance_db_manager.set_bot_instance(bot)
-    # 在机器人启动时，将 bot 实例注入到 GeminiService 中
-    # 这是确保工具能够访问 Discord API 的关键步骤
-    gemini_service.set_bot(bot)
-    # 为 context_service_test 注入 bot 实例，使其能够访问缓存
-    # 为 context_service_test 注入 bot 实例，使其能够访问缓存
-    from src.chat.services.context_service_test import initialize_context_service_test
-
-    initialize_context_service_test(bot)
-    # 初始化所有需要的服务实例
-    work_db_service = WorkDBService()
-    # 初始化审核服务，并将 bot 和其他服务实例注入
-    initialize_review_service(bot, work_db_service)
-
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         log.critical("错误: DISCORD_TOKEN 未在 .env 文件中设置！")
         return
 
     try:
-        await bot.start(token)
-    except discord.LoginFailure:
-        log.critical("无法登录，请检查你的 DISCORD_TOKEN 是否正确。")
+        await run_bot_forever(token)
     except Exception as e:
-        log.critical(f"启动机器人时发生未知错误: {e}", exc_info=True)
+        log.critical(f"监督 Bot 运行时发生未知错误: {e}", exc_info=True)
     finally:
-        # 在机器人关闭时，确保数据库连接被关闭
-        log.info("机器人已下线。")
+        log.info("机器人监督器已停止。")
 
 
 if __name__ == "__main__":
