@@ -1,6 +1,7 @@
 import base64
 import os
 import sys
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -134,6 +135,49 @@ def test_collect_and_decode_gemini_data_url_image():
     assert image is not None
     assert image.data == image_bytes
     assert image.filename.endswith(".png")
+
+
+def test_calculate_usage_cost_for_gemini_flash():
+    usage = GatewayImageClient._calculate_usage_cost(
+        GatewayImageClient.GEMINI_FLASH_MODEL,
+        {
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 2000,
+            }
+        },
+    )
+
+    assert usage.input_tokens == 1000
+    assert usage.output_tokens == 2000
+    assert usage.cost_usd == Decimal("0.006500")
+
+
+def test_calculate_usage_cost_for_gemini_pro():
+    usage = GatewayImageClient._calculate_usage_cost(
+        GatewayImageClient.GEMINI_PRO_MODEL,
+        {
+            "usage": {
+                "prompt_tokens": 2000,
+                "completion_tokens": 3000,
+            }
+        },
+    )
+
+    assert usage.input_tokens == 2000
+    assert usage.output_tokens == 3000
+    assert usage.cost_usd == Decimal("0.040000")
+
+
+def test_calculate_usage_cost_for_grok_is_flat():
+    usage = GatewayImageClient._calculate_usage_cost(
+        GatewayImageClient.GROK_MODEL,
+        {},
+    )
+
+    assert usage.input_tokens == 0
+    assert usage.output_tokens == 0
+    assert usage.cost_usd == Decimal("0.020000")
 
 
 def test_extract_model_text_message_from_chat_completion_payload():

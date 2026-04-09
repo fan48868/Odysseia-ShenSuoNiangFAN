@@ -9,6 +9,7 @@ import mimetypes
 import os
 import time
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -264,6 +265,13 @@ class QuotaReservation:
     date_key: str
 
 
+@dataclass(slots=True)
+class ImageGenerationUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: Decimal = Decimal("0")
+
+
 class GatewayImageClient:
     IMAGE_API_URL = "https://ai-gateway.vercel.sh/v1/images/generations"
     CHAT_COMPLETIONS_API_URL = "https://ai-gateway.vercel.sh/v1/chat/completions"
@@ -273,6 +281,11 @@ class GatewayImageClient:
     GEMINI_FLASH_MODEL = "google/gemini-3.1-flash-image-preview"
     GROK_MODEL = "xai/grok-imagine-image"
     DEFAULT_MODEL = GEMINI_FLASH_MODEL
+    GEMINI_FLASH_INPUT_USD_PER_MTOK = Decimal("0.5")
+    GEMINI_FLASH_OUTPUT_USD_PER_MTOK = Decimal("3.0")
+    GEMINI_PRO_INPUT_USD_PER_MTOK = Decimal("2.0")
+    GEMINI_PRO_OUTPUT_USD_PER_MTOK = Decimal("12.0")
+    GROK_COST_USD_PER_REQUEST = Decimal("0.02")
 
     def __init__(self):
         self._lock = asyncio.Lock()
@@ -375,6 +388,97 @@ class GatewayImageClient:
     @classmethod
     def supports_reference_image(cls, model_name: str | None) -> bool:
         return cls.uses_chat_completions_api(model_name)
+
+    @staticmethod
+    def _quantize_cost(cost: Decimal) -> Decimal:
+        return cost.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+
+    @classmethod
+    def _extract_usage(cls, payload: Any) -> ImageGenerationUsage:
+        if not isinstance(payload, dict):
+            return ImageGenerationUsage()
+
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            return ImageGenerationUsage()
+
+        def _to_int(value: Any) -> int:
+            try:
+                return max(int(value), 0)
+            except (TypeError, ValueError):
+                return 0
+
+        input_tokens = _to_int(
+            usage.get("prompt_tokens", usage.get("input_tokens", 0))
+        )
+        output_tokens = _to_int(
+            usage.get("completion_tokens", usage.get("output_tokens", 0))
+        )
+        return ImageGenerationUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=Decimal("0"),
+        )
+
+    @classmethod
+    def _calculate_usage_cost(
+        cls,
+        model_name: str,
+        payload: Any,
+    ) -> ImageGenerationUsage:
+        normalized_model = cls.normalize_model_name(model_name)
+
+        if normalized_model == cls.GROK_MODEL:
+            return ImageGenerationUsage(
+                input_tokens=0,
+                output_tokens=0,
+                cost_usd=cls._quantize_cost(cls.GROK_COST_USD_PER_REQUEST),
+            )
+
+        usage = cls._extract_usage(payload)
+        if normalized_model == cls.GEMINI_FLASH_MODEL:
+            input_rate = cls.GEMINI_FLASH_INPUT_USD_PER_MTOK
+            output_rate = cls.GEMINI_FLASH_OUTPUT_USD_PER_MTOK
+        elif normalized_model == cls.GEMINI_PRO_MODEL:
+            input_rate = cls.GEMINI_PRO_INPUT_USD_PER_MTOK
+            output_rate = cls.GEMINI_PRO_OUTPUT_USD_PER_MTOK
+        else:
+            usage.cost_usd = Decimal("0")
+            return usage
+
+        input_cost = (Decimal(usage.input_tokens) / Decimal("1000000")) * input_rate
+        output_cost = (Decimal(usage.output_tokens) / Decimal("1000000")) * output_rate
+        usage.cost_usd = cls._quantize_cost(input_cost + output_cost)
+        return usage
+
+    @classmethod
+    def _log_billing_result(
+        cls,
+        *,
+        model_name: str,
+        response_payload: Any,
+        success: bool,
+        failure_reason: str | None = None,
+    ) -> None:
+        usage = cls._calculate_usage_cost(model_name, response_payload)
+        if success:
+            log.info(
+                "生图成功，本次花费$%s | model=%s | input_tokens=%s | output_tokens=%s",
+                format(usage.cost_usd, "f"),
+                cls.normalize_model_name(model_name),
+                usage.input_tokens,
+                usage.output_tokens,
+            )
+            return
+
+        log.info(
+            "生图失败，原因：%s，本次花费$%s | model=%s | input_tokens=%s | output_tokens=%s",
+            failure_reason or "未知原因",
+            format(usage.cost_usd, "f"),
+            cls.normalize_model_name(model_name),
+            usage.input_tokens,
+            usage.output_tokens,
+        )
 
     @staticmethod
     def _build_data_url(image_bytes: bytes, mime_type: str) -> str:
@@ -666,17 +770,31 @@ class GatewayImageClient:
                 ) as response:
                     response_payload = await self._read_response_payload(response)
                     if response.status < 200 or response.status >= 300:
-                        return None, self._build_api_error(
+                        error = self._build_api_error(
                             response.status,
                             response_payload,
                         )
+                        self._log_billing_result(
+                            model_name=model_name,
+                            response_payload=response_payload,
+                            success=False,
+                            failure_reason=error.message,
+                        )
+                        return None, error
 
-                    return await self._extract_generated_image(
+                    image, error = await self._extract_generated_image(
                         session,
                         model_name,
                         response_payload,
                         status_code=response.status,
                     )
+                    self._log_billing_result(
+                        model_name=model_name,
+                        response_payload=response_payload,
+                        success=image is not None and error is None,
+                        failure_reason=(error.message if error is not None else None),
+                    )
+                    return image, error
         except asyncio.TimeoutError:
             return None, ImageGenerationError("请求生图接口超时，请稍后再试。")
         except aiohttp.ClientError as exc:
