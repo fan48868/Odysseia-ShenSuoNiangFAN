@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union, get_args, get_origin
 from zoneinfo import ZoneInfo
@@ -228,7 +229,7 @@ class OpenAIService:
         self,
         *,
         channel_label: str,
-        send_coro_factory: Callable[[], Awaitable[Dict[str, Any]]],
+        send_coro_factory: Callable[[int, bool], Awaitable[Dict[str, Any]]],
         on_retry: Optional[
             Callable[[int, httpx.RequestError], Awaitable[None]]
         ] = None,
@@ -243,7 +244,10 @@ class OpenAIService:
 
         for attempt in range(max_attempts):
             try:
-                return await send_coro_factory()
+                return await send_coro_factory(
+                    attempt,
+                    attempt >= max_attempts - 1,
+                )
             except httpx.RequestError as e:
                 if attempt >= max_attempts - 1:
                     raise
@@ -370,10 +374,11 @@ class OpenAIService:
                 )
 
         try:
+            logical_request_id = uuid.uuid4().hex if is_custom_model else None
             if is_deepseek_model:
                 request_result = await self._send_with_network_retry_once(
                     channel_label=channel_label,
-                    send_coro_factory=lambda: self.deepseek_model_client.send(
+                    send_coro_factory=lambda attempt, is_final_attempt: self.deepseek_model_client.send(
                         http_client=http_client,
                         payload=payload,
                         override_base_url=override_base_url,
@@ -382,18 +387,20 @@ class OpenAIService:
             elif is_custom_model:
                 request_result = await self._send_with_network_retry_once(
                     channel_label=channel_label,
-                    send_coro_factory=lambda: self.custom_model_client.send(
+                    send_coro_factory=lambda attempt, is_final_attempt: self.custom_model_client.send(
                         http_client=http_client,
                         payload=payload,
                         override_base_url=override_base_url,
                         runtime_config=custom_runtime_config,
+                        logical_request_id=logical_request_id,
+                        is_final_network_attempt=is_final_attempt,
                     ),
                     on_retry=recreate_http_client,
                 )
             else:
                 request_result = await self._send_with_network_retry_once(
                     channel_label=channel_label,
-                    send_coro_factory=lambda: self.kimi_model_client.send(
+                    send_coro_factory=lambda attempt, is_final_attempt: self.kimi_model_client.send(
                         http_client=http_client,
                         payload=payload,
                         user_id=user_id,
@@ -1375,27 +1382,30 @@ class OpenAIService:
                 if is_deepseek_model:
                     request_result = await self._send_with_network_retry_once(
                         channel_label=channel_label,
-                        send_coro_factory=lambda: self.deepseek_model_client.send(
+                        send_coro_factory=lambda attempt, is_final_attempt: self.deepseek_model_client.send(
                             http_client=http_client,
                             payload=payload,
                             override_base_url=override_base_url,
                         ),
                     )
                 elif is_custom_model:
+                    logical_request_id = uuid.uuid4().hex
                     request_result = await self._send_with_network_retry_once(
                         channel_label=channel_label,
-                        send_coro_factory=lambda: self.custom_model_client.send(
+                        send_coro_factory=lambda attempt, is_final_attempt: self.custom_model_client.send(
                             http_client=http_client,
                             payload=payload,
                             override_base_url=override_base_url,
                             runtime_config=custom_runtime_config,
+                            logical_request_id=logical_request_id,
+                            is_final_network_attempt=is_final_attempt,
                         ),
                         on_retry=recreate_http_client,
                     )
                 else:
                     request_result = await self._send_with_network_retry_once(
                         channel_label=channel_label,
-                        send_coro_factory=lambda: self.kimi_model_client.send(
+                        send_coro_factory=lambda attempt, is_final_attempt: self.kimi_model_client.send(
                             http_client=http_client,
                             payload=payload,
                             user_id=user_id,

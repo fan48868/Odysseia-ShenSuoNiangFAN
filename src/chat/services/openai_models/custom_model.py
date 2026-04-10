@@ -1548,6 +1548,8 @@ class CustomModelClient:
         payload: Dict[str, Any],
         override_base_url: Optional[str] = None,
         runtime_config: Optional[Dict[str, Any]] = None,
+        logical_request_id: Optional[str] = None,
+        is_final_network_attempt: bool = True,
     ) -> Dict[str, Any]:
         if runtime_config is None:
             runtime_config = self.refresh_from_env()
@@ -1617,7 +1619,9 @@ class CustomModelClient:
                         model_name=normalized_request_model
                     )
                 selector = self._gateway_selectors[normalized_request_model]
-                selected_gateway_provider = await selector.select_provider()
+                selected_gateway_provider = await selector.select_provider(
+                    logical_request_id=logical_request_id
+                )
                 log.info(
                     "[Custom] 已选择 Vercel Gateway 供应商 | model=%s | 供应商=%s | 阶段=%s | 分数=%.6f | url=%s",
                     request_model_name,
@@ -1794,12 +1798,22 @@ class CustomModelClient:
                                 current_response.status_code
                             ):
                                 await selector.report_failure(
-                                    selected_gateway_provider.provider_name
+                                    selected_gateway_provider
                                 )
                                 provider_failure_reported = True
                             else:
                                 await selector.release_provider(
-                                    selected_gateway_provider.provider_name
+                                    selected_gateway_provider,
+                                    manual_result_status=(
+                                        "failure"
+                                        if selected_gateway_provider.manual_test_run_id
+                                        else None
+                                    ),
+                                    error=httpx.HTTPStatusError(
+                                        combined_error_text,
+                                        request=current_response.request,
+                                        response=current_response,
+                                    ),
                                 )
 
                         reasoning_error_index = self._extract_reasoning_error_message_index(
@@ -1989,7 +2003,7 @@ class CustomModelClient:
                             parsed_result
                         )
                         await selector.report_success(
-                            selected_gateway_provider.provider_name,
+                            selected_gateway_provider,
                             elapsed_seconds=successful_request_elapsed_seconds,
                             output_units=output_units,
                         )
@@ -2013,9 +2027,15 @@ class CustomModelClient:
                     selected_gateway_provider is not None
                     and selector is not None
                     and not provider_failure_reported
+                    and (
+                        is_final_network_attempt
+                        or selected_gateway_provider.manual_test_run_id is None
+                    )
                 ):
                     await selector.report_failure(
-                        selected_gateway_provider.provider_name
+                        selected_gateway_provider,
+                        error=exc,
+                        network_error=True,
                     )
 
                 log.warning(
