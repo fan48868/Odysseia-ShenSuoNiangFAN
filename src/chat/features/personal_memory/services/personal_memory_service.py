@@ -23,83 +23,8 @@ log = logging.getLogger(__name__)
 
 class PersonalMemoryService:
     def __init__(self):
-        # In-process "force summary" requests (consumed on next message writeback).
-        # Structure: {user_id: {"reason": Optional[str], "limit": int}}
-        self._force_summary_requests: dict[int, dict[str, Any]] = {}
-        self._force_summary_lock = asyncio.Lock()
-
-    @staticmethod
-    def _clamp_force_summary_limit(limit: Any) -> int:
-        """
-        Clamp the requested pair count for a forced summary.
-        Default: 5
-        Max: 20
-        """
-        try:
-            limit_int = int(limit)
-        except Exception:
-            return 5
-
-        if limit_int < 1:
-            return 5
-
-        return min(limit_int, 20)
-
-    @staticmethod
-    def _split_history_for_forced_summary(
-        history: list, limit: int
-    ) -> tuple[list, list, int]:
-        """
-        Split conversation history into:
-        - history_to_summarize: last N pairs (user+model) to summarize
-        - remaining_history: history with those pairs removed
-        - pairs_to_summarize: actual pair count summarized
-
-        Notes:
-        - If history length is odd, keep the last dangling turn in remaining_history.
-        - We always summarize complete (user+model) pairs only.
-        """
-        history_list = list(history or [])
-        if not history_list:
-            return [], [], 0
-
-        dangling_turn = None
-        if len(history_list) % 2 == 1:
-            dangling_turn = history_list[-1]
-            history_list = history_list[:-1]
-
-        pairs_available = max(0, len(history_list) // 2)
-        pairs_to_summarize = min(max(limit, 0), pairs_available)
-        turns_to_summarize = pairs_to_summarize * 2
-
-        if turns_to_summarize <= 0:
-            remaining = list(history_list)
-            if dangling_turn is not None:
-                remaining.append(dangling_turn)
-            return [], remaining, 0
-
-        history_to_summarize = list(history_list[-turns_to_summarize:])
-        remaining_history = list(history_list[:-turns_to_summarize])
-        if dangling_turn is not None:
-            remaining_history.append(dangling_turn)
-
-        return history_to_summarize, remaining_history, pairs_to_summarize
-
-    async def request_force_summary(
-        self, user_id: int, reason: Optional[str] = None, limit: int = 5
-    ) -> None:
-        safe_limit = self._clamp_force_summary_limit(limit)
-        async with self._force_summary_lock:
-            self._force_summary_requests[int(user_id)] = {
-                "reason": reason,
-                "limit": safe_limit,
-            }
-
-    async def _consume_force_summary_request(
-        self, user_id: int
-    ) -> Optional[dict[str, Any]]:
-        async with self._force_summary_lock:
-            return self._force_summary_requests.pop(int(user_id), None)
+        # 不再需要 force_summary 相关属性
+        pass
 
     async def _sync_personal_memory_vectors_in_background(
         self, user_id: int, new_summary: Optional[str]
@@ -129,6 +54,7 @@ class PersonalMemoryService:
         candidate_lines: List[str],
         existing_long_texts: set[str],
     ) -> List[str]:
+        """对候选长期记忆行进行基础去重 + 语义去重，返回格式化的列表。"""
         normalized_texts: List[str] = []
         seen_texts: set[str] = set()
         for raw_line in candidate_lines or []:
@@ -174,10 +100,9 @@ class PersonalMemoryService:
     ):
         """
         核心入口：更新对话历史和计数，并在达到阈值时触发总结。
-        所有数据库操作都在ParadeDB中完成。
+        仅由计数阈值触发，不接受任何手动/强制请求。
         """
         history_to_summarize = None
-        forced_summary_context = None
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 stmt = (
@@ -189,8 +114,6 @@ class PersonalMemoryService:
                 profile = result.scalars().first()
 
                 if not profile:
-                    # 避免工具被调用后，这个用户后续没有触发入库流程导致请求常驻内存
-                    await self._consume_force_summary_request(user_id)
                     log.warning(f"用户 {user_id} 没有个人档案，无法记录记忆。")
                     return
 
@@ -208,70 +131,24 @@ class PersonalMemoryService:
 
                 log.debug(f"用户 {user_id} 的消息计数更新为: {new_count}")
 
-                force_request = await self._consume_force_summary_request(user_id)
-                if force_request:
-                    safe_limit = self._clamp_force_summary_limit(
-                        force_request.get("limit")
-                    )
-                    reason = force_request.get("reason")
-
-                    (
-                        history_to_summarize,
-                        remaining_history,
-                        pairs_to_summarize,
-                    ) = self._split_history_for_forced_summary(new_history, safe_limit)
-
-                    if history_to_summarize:
-                        setattr(profile, "history", remaining_history)
-                        adjusted_count = max(0, new_count - pairs_to_summarize)
-                        setattr(profile, "personal_message_count", adjusted_count)
-                        forced_summary_context = {
-                            "limit": safe_limit,
-                            "pairs": pairs_to_summarize,
-                            "reason": reason,
-                        }
-                        log.info(
-                            "用户 %s 手动触发个人记忆总结：pairs=%s, limit=%s",
-                            user_id,
-                            pairs_to_summarize,
-                            safe_limit,
-                        )
-                    else:
-                        log.info(
-                            "用户 %s 手动触发个人记忆总结，但没有可总结的历史。",
-                            user_id,
-                        )
-                elif new_count >= PERSONAL_MEMORY_CONFIG["summary_threshold"]:
-                    log.info(f"用户 {user_id} 达到阈值，准备总结。")
+                # 仅检查计数阈值触发总结
+                threshold = PERSONAL_MEMORY_CONFIG.get("summary_threshold", 20)
+                if new_count >= threshold:
+                    log.info(f"用户 {user_id} 达到阈值 {threshold}，准备总结。")
                     history_to_summarize = list(new_history)
                     setattr(profile, "personal_message_count", 0)
                     setattr(profile, "history", [])
 
+        # 在事务外执行总结，避免长事务阻塞
         if history_to_summarize:
-            if forced_summary_context:
-                log.info(
-                    "开始执行手动个人记忆总结：user_id=%s, pairs=%s, limit=%s",
-                    user_id,
-                    forced_summary_context.get("pairs"),
-                    forced_summary_context.get("limit"),
-                )
-                await self._summarize_memory(
-                    user_id,
-                    history_to_summarize,
-                    require_new_long_memory=True,
-                    force_reason=forced_summary_context.get("reason"),
-                )
-            else:
-                await self._summarize_memory(user_id, history_to_summarize)
+            await self._summarize_memory(user_id, history_to_summarize)
 
     async def _summarize_memory(
         self,
         user_id: int,
         conversation_history: list,
-        require_new_long_memory: bool = False,
-        force_reason: Optional[str] = None,
     ):
-        """私有方法：获取历史，生成摘要，并清空计数和历史。"""
+        """私有方法：获取历史，生成摘要，并更新数据库。"""
         log.info(f"开始为用户 {user_id} 生成记忆摘要。")
 
         async with AsyncSessionLocal() as session:
@@ -281,7 +158,7 @@ class PersonalMemoryService:
             result = await session.execute(stmt)
             old_summary = result.scalars().first() or ""
 
-        # 解析旧摘要以获取现有的长期记忆（用于手动触发时保证“新增”）
+        # 解析旧摘要以获取现有的长期记忆（用于去重）
         old_long_lines = []
         if old_summary:
             old_lines = old_summary.split("\n")
@@ -316,7 +193,7 @@ class PersonalMemoryService:
             log.warning(f"用户 {user_id} 的对话历史格式化后为空。")
             return
 
-        # 3. 构建 Prompt 并调用 AI 生成新摘要
+        # 构建 Prompt
         prompt_template = PROMPT_CONFIG.get("personal_memory_summary")
         if not prompt_template:
             log.error("未找到 'personal_memory_summary' 的 prompt 模板。")
@@ -327,18 +204,6 @@ class PersonalMemoryService:
             dialogue_history=dialogue_text,
         )
 
-        if require_new_long_memory:
-            reason_text = (force_reason or "").strip()
-            extra_rules = (
-                "\n\n[手动触发强制要求]\n"
-                "- 这次是手动触发的个人记忆总结：必须在“<new_long_memory>”中输出至少 1 条**新增长期记忆**（仍然不超过 2 条）。\n"
-                "- 新增长期记忆必须是客观陈述，不要复述或引用用户的具体对话句子，不要写“用户说...”。\n"
-                "- 新增长期记忆不要与旧的长期记忆重复。\n"
-            )
-            if reason_text:
-                extra_rules += f"- 触发原因/想记住的关键点：{reason_text}\n"
-            final_prompt += extra_rules
-
         log.info("用户 %s 开始执行个人记忆总结。", user_id)
 
         max_retries = 3
@@ -346,7 +211,6 @@ class PersonalMemoryService:
         added_long_lines = []
         new_recent_lines = []
 
-        # 仅对“AI 空响应”进行重试；超过条数限制时不重试，直接筛选
         for attempt in range(max_retries):
             ai_response = await gemini_service.generate_simple_response(
                 prompt=final_prompt,
@@ -363,8 +227,7 @@ class PersonalMemoryService:
             log.error(f"为用户 {user_id} 生成记忆摘要失败，重试多次后仍无有效响应。")
             return
 
-        # 4. 解析 AI 响应并合并记忆
-        # 提取新增的长期记忆
+        # 解析新增长期记忆
         new_long_match = re.search(
             r"<new_long_memory>(.*?)</new_long_memory>", ai_response, re.DOTALL
         )
@@ -377,13 +240,12 @@ class PersonalMemoryService:
                     if line.strip().startswith("-")
                 ]
 
-        # 检测条数限制：超过 2 条时，直接请求 AI 筛选，不再重试重新生成
+        # 条数限制处理：超过2条则让AI精选
         if len(added_long_lines) > 2:
             log.warning(
-                f"生成的长期记忆条数 ({len(added_long_lines)}) 超过限制 (2条)，直接请求 AI 筛选最重要的 2 条。"
+                f"生成的长期记忆条数 ({len(added_long_lines)}) 超过限制 (2条)，请求 AI 筛选最重要的 2 条。"
             )
 
-            # 构建筛选 Prompt
             memory_items = [line.lstrip("- ").strip() for line in added_long_lines]
             memory_list_text = "\n".join([f"{i + 1}. {item}" for i, item in enumerate(memory_items)])
 
@@ -425,13 +287,14 @@ class PersonalMemoryService:
                 log.error(f"AI 筛选过程发生错误: {e}，回退到强制截断。")
                 added_long_lines = added_long_lines[:2]
 
+        # 去重处理
         added_long_lines = await self._filter_new_long_memory_lines(
             user_id=user_id,
             candidate_lines=added_long_lines,
             existing_long_texts=existing_long_texts,
         )
 
-        # 提取新的近期动态
+        # 提取近期动态
         new_recent_match = re.search(
             r"<recent_dynamics>(.*?)</recent_dynamics>", ai_response, re.DOTALL
         )
@@ -444,107 +307,10 @@ class PersonalMemoryService:
                     if line.strip().startswith("-")
                 ]
 
-        # --- 手动触发：强制保证“新增长期记忆”至少 1 条 ---
-        if require_new_long_memory:
-            unique_added_long_lines = list(added_long_lines)
-
-            if not unique_added_long_lines:
-                max_force_attempts = 2
-                reason_text = (force_reason or "").strip()
-                for attempt in range(max_force_attempts):
-                    force_prompt = (
-                        "你是记忆管理专家。现在是一次【手动触发】的个人记忆总结。\n"
-                        "请从对话中提炼出至少 1 条、最多 2 条【新的长期记忆】。\n\n"
-                        "【本次对话】\n"
-                        f"{dialogue_text}\n\n"
-                        "【输出要求】\n"
-                        "1. 只输出 1-2 条内容。\n"
-                        "2. 每条一行，严格以 `- ` 开头。\n"
-                        "3. 内容必须是客观陈述，不要复述具体对话句子，不要写“用户说...”。\n"
-                        "4. 用户统一用“用户”代称，神社娘统一用“神社娘”代称。\n"
-                        "5. 不要输出任何解释性文字。\n"
-                    )
-                    if reason_text:
-                        force_prompt = (
-                            force_prompt
-                            + "\n【触发原因/想记住的关键点】\n"
-                            + reason_text
-                            + "\n"
-                        )
-
-                    force_response = await gemini_service.generate_simple_response(
-                        prompt=force_prompt,
-                        generation_config=GEMINI_SUMMARY_GEN_CONFIG,
-                        model_name=get_summary_model(),
-                    )
-
-                    if not force_response:
-                        log.warning(
-                            "手动触发强制新增长期记忆失败：AI 返回空 (attempt=%s/%s)",
-                            attempt + 1,
-                            max_force_attempts,
-                        )
-                        continue
-
-                    candidate_lines = [
-                        line.strip()
-                        for line in force_response.split("\n")
-                        if line.strip().startswith("-")
-                    ]
-                    candidate_unique = await self._filter_new_long_memory_lines(
-                        user_id=user_id,
-                        candidate_lines=candidate_lines,
-                        existing_long_texts=existing_long_texts,
-                    )
-                    if candidate_unique:
-                        unique_added_long_lines = candidate_unique[:2]
-                        log.info(
-                            "手动触发强制新增长期记忆成功：user_id=%s, added=%s",
-                            user_id,
-                            len(unique_added_long_lines),
-                        )
-                        break
-
-            if not unique_added_long_lines:
-                # 最后兜底：尽量用 reason 生成一条可落库的长期记忆（避免新增 0 条）
-                fallback_candidates = []
-                reason_text = (force_reason or "").strip()
-                if reason_text:
-                    safe_reason = reason_text.replace("\n", " ").strip()
-                    if len(safe_reason) > 160:
-                        safe_reason = safe_reason[:160] + "..."
-                    fallback_candidates.append(
-                        f"- 用户希望被长期记住的关键点：{safe_reason}"
-                    )
-                fallback_candidates.extend(
-                    [
-                        "- 用户在关键节点会主动要求神社娘更新其长期记忆。",
-                        "- 用户希望神社娘将关键要点写入长期记忆。",
-                        "- 用户倾向于在重要信息出现时及时更新长期记忆。",
-                    ]
-                )
-
-                for cand in fallback_candidates:
-                    filtered_candidate = await self._filter_new_long_memory_lines(
-                        user_id=user_id,
-                        candidate_lines=[cand],
-                        existing_long_texts=existing_long_texts,
-                    )
-                    if filtered_candidate:
-                        unique_added_long_lines = filtered_candidate
-                        break
-
-            if not unique_added_long_lines:
-                # 极端兜底：如果所有候选都重复，确保仍然能“新增”一条（避免手动触发新增 0 条）
-                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                unique_added_long_lines = [f"- 用户触发了一次手动记忆总结（{now_str}）。"]
-
-            added_long_lines = unique_added_long_lines
-
-        # 合并：旧长期 + 新增长期
+        # 合并长期记忆
         final_long_lines = old_long_lines + added_long_lines
 
-        # 构建最终摘要字符串
+        # 构建最终摘要
         final_summary = (
             "### 长期记忆\n"
             + "\n".join(final_long_lines)
@@ -564,7 +330,7 @@ class PersonalMemoryService:
         log.info(f"用户 {user_id} 的总结流程完成。")
 
     async def get_memory_summary(self, user_id: int) -> str:
-        """根据用户ID从 ParadeDB 获取其个人记忆摘要。"""
+        """根据用户ID从数据库获取其个人记忆摘要。"""
         async with AsyncSessionLocal() as session:
             stmt = select(CommunityMemberProfile.personal_summary).where(
                 CommunityMemberProfile.discord_id == str(user_id)
@@ -573,23 +339,22 @@ class PersonalMemoryService:
             summary = result.scalars().first()
 
             if summary:
-                log.debug(f"从 ParadeDB 找到用户 {user_id} 的摘要。")
+                log.debug(f"从数据库找到用户 {user_id} 的摘要。")
                 return summary
             else:
-                log.debug(f"在 ParadeDB 中未找到用户 {user_id} 的摘要。")
+                log.debug(f"在数据库中未找到用户 {user_id} 的摘要。")
                 return "该用户当前没有个人记忆摘要。"
 
     async def update_summary_manually(self, user_id: int, new_summary: str):
         """
         仅手动更新用户的个人记忆摘要，不影响计数或历史记录。
-        主要用于管理员手动编辑。
+        主要用于内部调用或管理员手动编辑。
         """
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 await self._update_summary(session, user_id, new_summary)
         log.info(f"为用户 {user_id} 手动更新了记忆摘要。")
 
-        # 后台同步向量表，保证与 personal_summary 一致（不阻塞当前交互）
         asyncio.create_task(
             self._sync_personal_memory_vectors_in_background(user_id, new_summary)
         )
@@ -625,8 +390,7 @@ class PersonalMemoryService:
         self, user_id: int, new_summary: Optional[str]
     ):
         """
-        在 ParadeDB 中更新摘要，同时重置个人消息计数和对话历史。
-        (重构后，此函数调用两个独立的私有方法)
+        在数据库中更新摘要，同时重置个人消息计数和对话历史。
         """
         async with AsyncSessionLocal() as session:
             async with session.begin():
@@ -634,7 +398,6 @@ class PersonalMemoryService:
                 await self._reset_history_and_count(session, user_id)
         log.info(f"为用户 {user_id} 更新了记忆摘要，并重置了计数和历史。")
 
-        # 后台同步向量表，保证与 personal_summary 一致（不阻塞当前交互）
         asyncio.create_task(
             self._sync_personal_memory_vectors_in_background(user_id, new_summary)
         )
