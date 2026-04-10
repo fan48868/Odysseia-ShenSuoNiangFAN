@@ -45,12 +45,12 @@
   level_name: "友好"
   prompt: "友好"
 - id: "intimate"
-  min_affection: 80
-  max_affection: 99
+  min_affection: 8000
+  max_affection: 9999
   level_name: "亲密"
   prompt: "亲密"
 - id: "very_friendly"
-  min_affection: 100
-  max_affection: 10000
-  level_name: "信赖"
-  prompt: "信赖"
+  min_affection: 10000
+  max_affection: 99999
+  level_name: "依恋"
+  prompt: "依恋"

@@ -266,11 +266,22 @@ class CategorySelect(ShopSelect["SimpleShopView"]):
             )
             for category in categories
         ]
+
+        if not options:
+            options = [
+                discord.SelectOption(
+                    label="暂无商品分类",
+                    value="none",
+                    description="目前没有任何商品分类"
+                )
+            ]
+
         super().__init__(
             placeholder="选择一个商品类别...",
             min_values=1,
             max_values=1,
             options=options,
+            disabled=not categories
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -307,11 +318,22 @@ class ItemSelect(ShopSelect["SimpleShopView"]):
             for item in items
         ]
         options = options[:25]
+
+        if not options:
+            options = [
+                discord.SelectOption(
+                    label="暂无商品",
+                    value="none",
+                    description=f"{category} 中暂时没有商品"
+                )
+            ]
+
         super().__init__(
             placeholder=f"选择 {category} 中的商品...",
             min_values=1,
             max_values=1,
             options=options,
+            disabled=not items
         )
 
     async def callback(self, interaction: discord.Interaction):
