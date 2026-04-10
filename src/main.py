@@ -511,12 +511,13 @@ async def main():
     except Exception as e:
         log.error(f"设置 asyncio 异常处理器失败: {e}", exc_info=True)
 
-    # --- webui心跳启动进程 --
-    if enable_webui:
-        log.info("启用 WebUI 心跳与日志上报")
-        sender_thread = threading.Thread(target=heartbeat_sender, daemon=True)
-        sender_thread.start()
-        log.info("WebUI 心跳与日志上报已启用")
+    # # --- webui心跳启动进程 --
+    # # 注：软软不需要此功能，已直接注释关闭，杜绝额外的线程开销
+    # if enable_webui:
+    #     log.info("启用 WebUI 心跳与日志上报")
+    #     sender_thread = threading.Thread(target=heartbeat_sender, daemon=True)
+    #     sender_thread.start()
+    #     log.info("WebUI 心跳与日志上报已启用")
 
     # 3. 异步初始化数据库
     log.info("正在异步初始化数据库...")
