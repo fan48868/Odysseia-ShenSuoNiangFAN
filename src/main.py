@@ -307,6 +307,11 @@ class GuidanceBot(commands.Bot):
             for file in path.glob("*.py"):
                 if file.name.startswith("__"):
                     continue
+                
+                 # --- 临时禁用图像生成 ---
+                if file.name == "image_generation_cog.py":
+                    log.warning(f"已根据指令临时跳过加载: {file.name}")
+                    continue
 
 
                 # 从文件系统路径构建 Python 模块路径

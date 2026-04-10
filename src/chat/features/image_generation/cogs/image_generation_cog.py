@@ -7,6 +7,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import time
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
@@ -273,19 +274,12 @@ class ImageGenerationUsage:
 
 
 class GatewayImageClient:
-    IMAGE_API_URL = "https://ai-gateway.vercel.sh/v1/images/generations"
-    CHAT_COMPLETIONS_API_URL = "https://ai-gateway.vercel.sh/v1/chat/completions"
+    CHAT_COMPLETIONS_API_URL = "https://site.atopes.de/v1/chat/completions"
     PRIMARY_ENV_KEY = "IMAGINE_API_KEY"
-    LEGACY_ENV_KEYS = ("GROK_IMAGINE_API_KEY",)
-    GEMINI_PRO_MODEL = "google/gemini-3-pro-image"
-    GEMINI_FLASH_MODEL = "google/gemini-3.1-flash-image-preview"
-    GROK_MODEL = "xai/grok-imagine-image"
+    LEGACY_ENV_KEYS = ()
+    GEMINI_PRO_MODEL = "gemini-3-pro-image-preview"
+    GEMINI_FLASH_MODEL = "gemini-3.1-flash-image-preview"
     DEFAULT_MODEL = GEMINI_FLASH_MODEL
-    GEMINI_FLASH_INPUT_USD_PER_MTOK = Decimal("0.5")
-    GEMINI_FLASH_OUTPUT_USD_PER_MTOK = Decimal("3.0")
-    GEMINI_PRO_INPUT_USD_PER_MTOK = Decimal("2.0")
-    GEMINI_PRO_OUTPUT_USD_PER_MTOK = Decimal("12.0")
-    GROK_COST_USD_PER_REQUEST = Decimal("0.02")
 
     def __init__(self):
         self._lock = asyncio.Lock()
@@ -349,7 +343,6 @@ class GatewayImageClient:
         return (
             cls.GEMINI_PRO_MODEL,
             cls.GEMINI_FLASH_MODEL,
-            cls.GROK_MODEL,
         )
 
     @classmethod
@@ -373,112 +366,17 @@ class GatewayImageClient:
             return "Gemini Pro"
         if normalized_model == cls.GEMINI_FLASH_MODEL:
             return "Gemini 3.1 Flash"
-        if normalized_model == cls.GROK_MODEL:
-            return "Grok"
         return normalized_model
 
     @classmethod
     def uses_chat_completions_api(cls, model_name: str | None) -> bool:
-        normalized_model = cls.normalize_model_name(model_name)
-        return normalized_model in {
-            cls.GEMINI_PRO_MODEL,
-            cls.GEMINI_FLASH_MODEL,
-        }
+        # 所有模型都使用 chat completions API
+        return True
 
     @classmethod
     def supports_reference_image(cls, model_name: str | None) -> bool:
         return cls.uses_chat_completions_api(model_name)
 
-    @staticmethod
-    def _quantize_cost(cost: Decimal) -> Decimal:
-        return cost.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
-
-    @classmethod
-    def _extract_usage(cls, payload: Any) -> ImageGenerationUsage:
-        if not isinstance(payload, dict):
-            return ImageGenerationUsage()
-
-        usage = payload.get("usage")
-        if not isinstance(usage, dict):
-            return ImageGenerationUsage()
-
-        def _to_int(value: Any) -> int:
-            try:
-                return max(int(value), 0)
-            except (TypeError, ValueError):
-                return 0
-
-        input_tokens = _to_int(
-            usage.get("prompt_tokens", usage.get("input_tokens", 0))
-        )
-        output_tokens = _to_int(
-            usage.get("completion_tokens", usage.get("output_tokens", 0))
-        )
-        return ImageGenerationUsage(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cost_usd=Decimal("0"),
-        )
-
-    @classmethod
-    def _calculate_usage_cost(
-        cls,
-        model_name: str,
-        payload: Any,
-    ) -> ImageGenerationUsage:
-        normalized_model = cls.normalize_model_name(model_name)
-
-        if normalized_model == cls.GROK_MODEL:
-            return ImageGenerationUsage(
-                input_tokens=0,
-                output_tokens=0,
-                cost_usd=cls._quantize_cost(cls.GROK_COST_USD_PER_REQUEST),
-            )
-
-        usage = cls._extract_usage(payload)
-        if normalized_model == cls.GEMINI_FLASH_MODEL:
-            input_rate = cls.GEMINI_FLASH_INPUT_USD_PER_MTOK
-            output_rate = cls.GEMINI_FLASH_OUTPUT_USD_PER_MTOK
-        elif normalized_model == cls.GEMINI_PRO_MODEL:
-            input_rate = cls.GEMINI_PRO_INPUT_USD_PER_MTOK
-            output_rate = cls.GEMINI_PRO_OUTPUT_USD_PER_MTOK
-        else:
-            usage.cost_usd = Decimal("0")
-            return usage
-
-        input_cost = (Decimal(usage.input_tokens) / Decimal("1000000")) * input_rate
-        output_cost = (Decimal(usage.output_tokens) / Decimal("1000000")) * output_rate
-        usage.cost_usd = cls._quantize_cost(input_cost + output_cost)
-        return usage
-
-    @classmethod
-    def _log_billing_result(
-        cls,
-        *,
-        model_name: str,
-        response_payload: Any,
-        success: bool,
-        failure_reason: str | None = None,
-    ) -> None:
-        usage = cls._calculate_usage_cost(model_name, response_payload)
-        if success:
-            log.info(
-                "生图成功，本次花费$%s | model=%s | input_tokens=%s | output_tokens=%s",
-                format(usage.cost_usd, "f"),
-                cls.normalize_model_name(model_name),
-                usage.input_tokens,
-                usage.output_tokens,
-            )
-            return
-
-        log.info(
-            "生图失败，原因：%s，本次花费$%s | model=%s | input_tokens=%s | output_tokens=%s",
-            failure_reason or "未知原因",
-            format(usage.cost_usd, "f"),
-            cls.normalize_model_name(model_name),
-            usage.input_tokens,
-            usage.output_tokens,
-        )
 
     @staticmethod
     def _build_data_url(image_bytes: bytes, mime_type: str) -> str:
@@ -495,43 +393,34 @@ class GatewayImageClient:
     ) -> tuple[str, dict[str, Any]]:
         normalized_model = cls.normalize_model_name(model_name)
         normalized_reference_images = list(reference_images or [])
-        if cls.uses_chat_completions_api(normalized_model):
-            if normalized_reference_images:
-                content_blocks: list[dict[str, Any]] = [
-                    {"type": "text", "text": prompt},
-                ]
-                for reference_image in normalized_reference_images:
-                    content_blocks.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": cls._build_data_url(
-                                    reference_image.data,
-                                    reference_image.mime_type,
-                                ),
-                                "detail": "auto",
-                            },
-                        }
-                    )
-            else:
-                content_blocks = prompt
-            return (
-                cls.CHAT_COMPLETIONS_API_URL,
-                {
-                    "model": normalized_model,
-                    "messages": [{"role": "user", "content": content_blocks}],
-                    "modalities": (
-                        ["text", "image"] if normalized_reference_images else ["image"]
-                    ),
-                    "stream": False,
-                },
-            )
-
+        if normalized_reference_images:
+            content_blocks: list[dict[str, Any]] = [
+                {"type": "text", "text": prompt},
+            ]
+            for reference_image in normalized_reference_images:
+                content_blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": cls._build_data_url(
+                                reference_image.data,
+                                reference_image.mime_type,
+                            ),
+                            "detail": "auto",
+                        },
+                    }
+                )
+        else:
+            content_blocks = prompt
         return (
-            cls.IMAGE_API_URL,
+            cls.CHAT_COMPLETIONS_API_URL,
             {
                 "model": normalized_model,
-                "prompt": prompt,
+                "messages": [{"role": "user", "content": content_blocks}],
+                "modalities": (
+                    ["text", "image"] if normalized_reference_images else ["image"]
+                ),
+                "stream": False,
             },
         )
 
@@ -607,6 +496,38 @@ class GatewayImageClient:
             ),
             None,
         )
+
+    @staticmethod
+    def _extract_markdown_image_url(text: str) -> str | None:
+        """从 Markdown 文本中提取第一个图片 URL。
+        支持格式：
+        - ![alt](url)
+        - [text](url) （仅当 url 以常见图片扩展名结尾时）
+        - 直接 http/https URL 且以图片扩展名结尾
+        """
+        if not text:
+            return None
+
+        # 匹配 Markdown 图片: ![alt](url)
+        match = re.search(r'!\[.*?\]\(([^)]+)\)', text)
+        if match:
+            url = match.group(1).strip()
+            if url.startswith(('http://', 'https://')):
+                return url
+
+        # 匹配 Markdown 链接: [text](url) 且 url 是图片
+        match = re.search(r'\[.*?\]\(([^)]+)\)', text)
+        if match:
+            url = match.group(1).strip()
+            if url.startswith(('http://', 'https://')) and re.search(r'\.(png|jpg|jpeg|gif|webp)(\?.*)?$', url, re.I):
+                return url
+
+        # 匹配裸 URL 且是图片
+        match = re.search(r'https?://[^\s<>]+?\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s<>]*)?', text, re.I)
+        if match:
+            return match.group(0)
+
+        return None
 
     @classmethod
     def _collect_image_candidates(
@@ -712,6 +633,22 @@ class GatewayImageClient:
             if error is not None and first_error is None:
                 first_error = error
 
+        # 如果从标准 candidates 中没有找到图片，尝试从模型返回的文本中提取 Markdown 图片链接
+        model_text = _extract_model_text_message(response_payload)
+        if model_text:
+            image_url = self._extract_markdown_image_url(model_text)
+            if image_url:
+                # 下载图片
+                image, error = await self._download_image(
+                    session,
+                    image_url,
+                    self._build_filename(model_name),
+                )
+                if image is not None:
+                    return image, None
+                if error is not None and first_error is None:
+                    first_error = error
+
         if first_error is not None:
             return None, first_error
 
@@ -719,7 +656,7 @@ class GatewayImageClient:
             "没有在返回结果中找到可用的图片数据。可能是被审核截断。",
             status_code=status_code,
             payload=response_payload,
-            model_text=_extract_model_text_message(response_payload) or None,
+            model_text=model_text or None,
         )
 
     @staticmethod
@@ -774,12 +711,6 @@ class GatewayImageClient:
                             response.status,
                             response_payload,
                         )
-                        self._log_billing_result(
-                            model_name=model_name,
-                            response_payload=response_payload,
-                            success=False,
-                            failure_reason=error.message,
-                        )
                         return None, error
 
                     image, error = await self._extract_generated_image(
@@ -787,12 +718,6 @@ class GatewayImageClient:
                         model_name,
                         response_payload,
                         status_code=response.status,
-                    )
-                    self._log_billing_result(
-                        model_name=model_name,
-                        response_payload=response_payload,
-                        success=image is not None and error is None,
-                        failure_reason=(error.message if error is not None else None),
                     )
                     return image, error
         except asyncio.TimeoutError:
@@ -818,13 +743,7 @@ class GatewayImageClient:
         if normalized_reference_images and not self.supports_reference_image(
             normalized_model
         ):
-            if normalized_model == self.GROK_MODEL:
-                return None, ImageGenerationError(
-                    "当前通过 Vercel AI Gateway 调用 Grok 时暂不支持参考图，请切换到 Gemini 生图模型。"
-                )
-            return None, ImageGenerationError(
-                "当前模型暂不支持参考图，请切换到 Gemini 生图模型后再试。"
-            )
+            return None, ImageGenerationError("当前模型暂不支持参考图。")
 
         async with self._lock:
             api_keys = self._load_api_keys()
@@ -1417,14 +1336,20 @@ class ImageGenerationPanelView(discord.ui.View):
             if error is not None:
                 self.last_error = error.message
                 self.last_status = "生成失败。"
-                if error.model_text:
-                    try:
+                # 无论是否有模型文本，都发送一条仅发起者可见的消息
+                try:
+                    if error.model_text:
                         await interaction.followup.send(
-                            f"模型返回文字：{_truncate_text(error.model_text, 1800)}",
+                            f"模型返回文本：{_truncate_text(error.model_text, 1800)}",
                             ephemeral=True,
                         )
-                    except Exception as exc:
-                        log.warning("发送模型返回文字的私密消息失败: %s", exc)
+                    else:
+                        await interaction.followup.send(
+                            "模型未返回任何文本",
+                            ephemeral=True,
+                        )
+                except Exception as exc:
+                    log.warning("发送模型返回文本的私密消息失败: %s", exc)
                 if reservation is not None:
                     self.quota_status = await self.quota_service.refund_generation(reservation)
                 return
