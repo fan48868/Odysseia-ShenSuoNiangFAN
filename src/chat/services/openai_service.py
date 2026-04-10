@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union, get_args, get_origin
 from zoneinfo import ZoneInfo
@@ -228,7 +229,7 @@ class OpenAIService:
         self,
         *,
         channel_label: str,
-        send_coro_factory: Callable[[], Awaitable[Dict[str, Any]]],
+        send_coro_factory: Callable[[int, bool], Awaitable[Dict[str, Any]]],
         on_retry: Optional[
             Callable[[int, httpx.RequestError], Awaitable[None]]
         ] = None,
@@ -243,7 +244,10 @@ class OpenAIService:
 
         for attempt in range(max_attempts):
             try:
-                return await send_coro_factory()
+                return await send_coro_factory(
+                    attempt,
+                    attempt >= max_attempts - 1,
+                )
             except httpx.RequestError as e:
                 if attempt >= max_attempts - 1:
                     raise
@@ -370,10 +374,11 @@ class OpenAIService:
                 )
 
         try:
+            logical_request_id = uuid.uuid4().hex if is_custom_model else None
             if is_deepseek_model:
                 request_result = await self._send_with_network_retry_once(
                     channel_label=channel_label,
-                    send_coro_factory=lambda: self.deepseek_model_client.send(
+                    send_coro_factory=lambda attempt, is_final_attempt: self.deepseek_model_client.send(
                         http_client=http_client,
                         payload=payload,
                         override_base_url=override_base_url,
@@ -382,18 +387,20 @@ class OpenAIService:
             elif is_custom_model:
                 request_result = await self._send_with_network_retry_once(
                     channel_label=channel_label,
-                    send_coro_factory=lambda: self.custom_model_client.send(
+                    send_coro_factory=lambda attempt, is_final_attempt: self.custom_model_client.send(
                         http_client=http_client,
                         payload=payload,
                         override_base_url=override_base_url,
                         runtime_config=custom_runtime_config,
+                        logical_request_id=logical_request_id,
+                        is_final_network_attempt=is_final_attempt,
                     ),
                     on_retry=recreate_http_client,
                 )
             else:
                 request_result = await self._send_with_network_retry_once(
                     channel_label=channel_label,
-                    send_coro_factory=lambda: self.kimi_model_client.send(
+                    send_coro_factory=lambda attempt, is_final_attempt: self.kimi_model_client.send(
                         http_client=http_client,
                         payload=payload,
                         user_id=user_id,
@@ -641,6 +648,19 @@ class OpenAIService:
             user_id_for_settings=user_id_for_settings
         )
         openai_tools: List[Dict[str, Any]] = []
+        globally_skipped_tools: List[str] = []
+
+        if dynamic_tools:
+            dynamic_tools, globally_skipped_tools = (
+                await self.tool_service.filter_tools_for_global_settings(dynamic_tools)
+            )
+            if globally_skipped_tools:
+                log.info(
+                    "[%s] 已跳过 %s 个全局关闭工具，不再发送给 API（%s）。",
+                    channel_label,
+                    len(globally_skipped_tools),
+                    ", ".join(globally_skipped_tools),
+                )
 
         _PY_TYPE_MAP = {
             str: "string",
@@ -1040,6 +1060,10 @@ class OpenAIService:
 
             if openai_tools:
                 log.info(f"[{channel_label}] 成功转换 {len(openai_tools)} 个工具发往 API。")
+            elif globally_skipped_tools:
+                log.info(
+                    f"[{channel_label}] 当前可控工具已被全局关闭，未向 API 发送动态工具。"
+                )
             else:
                 log.warning(f"[{channel_label}] 获取到了工具，但转换结果为空！")
 
@@ -1358,27 +1382,30 @@ class OpenAIService:
                 if is_deepseek_model:
                     request_result = await self._send_with_network_retry_once(
                         channel_label=channel_label,
-                        send_coro_factory=lambda: self.deepseek_model_client.send(
+                        send_coro_factory=lambda attempt, is_final_attempt: self.deepseek_model_client.send(
                             http_client=http_client,
                             payload=payload,
                             override_base_url=override_base_url,
                         ),
                     )
                 elif is_custom_model:
+                    logical_request_id = uuid.uuid4().hex
                     request_result = await self._send_with_network_retry_once(
                         channel_label=channel_label,
-                        send_coro_factory=lambda: self.custom_model_client.send(
+                        send_coro_factory=lambda attempt, is_final_attempt: self.custom_model_client.send(
                             http_client=http_client,
                             payload=payload,
                             override_base_url=override_base_url,
                             runtime_config=custom_runtime_config,
+                            logical_request_id=logical_request_id,
+                            is_final_network_attempt=is_final_attempt,
                         ),
                         on_retry=recreate_http_client,
                     )
                 else:
                     request_result = await self._send_with_network_retry_once(
                         channel_label=channel_label,
-                        send_coro_factory=lambda: self.kimi_model_client.send(
+                        send_coro_factory=lambda attempt, is_final_attempt: self.kimi_model_client.send(
                             http_client=http_client,
                             payload=payload,
                             user_id=user_id,
@@ -1494,6 +1521,11 @@ class OpenAIService:
 
                     raise
 
+                if is_custom_model:
+                    result = self.custom_model_client.normalize_chat_completion_result(
+                        result
+                    )
+
                 first_choice = result["choices"][0]
                 response_message = first_choice.get("message")
                 if not isinstance(response_message, dict):
@@ -1506,6 +1538,12 @@ class OpenAIService:
                 reasoning_content = response_message.get("reasoning_content")
                 content = response_message.get("content") or ""
                 tool_calls = response_message.get("tool_calls")
+                if is_custom_model and tool_calls is not None:
+                    reasoning_content = (
+                        self.custom_model_client.normalize_tool_call_reasoning_content(
+                            reasoning_content
+                        )
+                    )
 
                 if reasoning_content and not is_custom_model:
                     log.info(
@@ -1555,7 +1593,7 @@ class OpenAIService:
                                 f"[{channel_label}] 检测到违禁词，但回复长度为 {content_len} (>800)，按成本优化策略放行。"
                             )
 
-                    allowed_emoji_names = {"开心","乖巧","害羞","吃瓜","偷笑","比心","desuwa","伤心","生气","加油", "好奇","邀请","傲娇","祝福","你好","叹气","投降",}
+                    allowed_emoji_names = {"开心","乖巧","害羞","吃瓜","偷笑","裂开","呜呜","收到","打哈欠","得意","点赞","眩晕","疑惑","比心","desuwa","伤心","生气","加油", "好奇","邀请","傲娇","祝福","你好","叹气","投降",}
                     removed_emoji_tags: List[str] = []
 
                     def _strip_disallowed_emoji_tag(match):

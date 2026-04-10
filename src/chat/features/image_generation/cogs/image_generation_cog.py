@@ -7,8 +7,10 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import time
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -21,6 +23,10 @@ from discord.ext import commands
 from src import config
 
 log = logging.getLogger(__name__)
+
+PRESET_CHARACTER_PROMPT = """主角:
+神所娘：一位动漫少女，拥有及肩的棕色渐变短发，一侧编有麻花辫，辫子上装饰着🤣图标发饰。她有着大而富有表现力的棕色眼睛。身穿白色翻领衬衫、黑色领带和棕色V领毛衣背心。
+类脑娘：和神所娘穿着外貌都相同，唯一不同的是类脑娘辫子上是ai公司claude的橘色菊花图标。"""
 
 
 def _truncate_text(text: str, limit: int) -> str:
@@ -37,6 +43,11 @@ def _escape_code_block(text: str) -> str:
 def _format_prompt_block(prompt: str, limit: int = 3200) -> str:
     prompt_preview = _truncate_text(prompt, limit)
     return f"```text\n{_escape_code_block(prompt_preview)}\n```"
+
+
+def _guess_mime_type_from_filename(filename: str) -> str:
+    guessed_mime_type, _ = mimetypes.guess_type(str(filename or ""))
+    return guessed_mime_type or "image/png"
 
 
 def _strip_wrapping_quotes(value: str) -> str:
@@ -124,6 +135,63 @@ def _extract_error_message(payload: Any) -> str:
     return str(payload).strip()
 
 
+def _extract_text_from_content_blocks(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+
+    if not isinstance(content, list):
+        return ""
+
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+
+        text = ""
+        if item.get("type") == "text":
+            text = str(item.get("text", "") or "").strip()
+        elif "text" in item:
+            text = str(item.get("text", "") or "").strip()
+
+        if text:
+            parts.append(text)
+
+    return "\n".join(parts).strip()
+
+
+def _extract_model_text_message(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+
+    choices = payload.get("choices", [])
+    if not isinstance(choices, list):
+        return ""
+
+    text_parts: list[str] = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+
+        message = choice.get("message")
+        if isinstance(message, dict):
+            content_text = _extract_text_from_content_blocks(message.get("content"))
+            if content_text:
+                text_parts.append(content_text)
+
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            delta_text = _extract_text_from_content_blocks(delta.get("content"))
+            if delta_text:
+                text_parts.append(delta_text)
+
+    deduped_parts: list[str] = []
+    for part in text_parts:
+        if part and part not in deduped_parts:
+            deduped_parts.append(part)
+
+    return "\n\n".join(deduped_parts).strip()
+
+
 def _get_developer_user_ids() -> set[int]:
     developer_ids = set(config.DEVELOPER_USER_IDS)
     raw_value = _strip_wrapping_quotes(str(os.getenv("DEVELOPER_USER_IDS", "") or ""))
@@ -165,10 +233,18 @@ class GeneratedImage:
 
 
 @dataclass(slots=True)
+class ReferenceImageInput:
+    data: bytes
+    filename: str
+    mime_type: str
+
+
+@dataclass(slots=True)
 class ImageGenerationError:
     message: str
     status_code: int | None = None
     payload: Any = None
+    model_text: str | None = None
 
     def should_rotate_key(self) -> bool:
         return self.status_code == 402
@@ -190,15 +266,20 @@ class QuotaReservation:
     date_key: str
 
 
+@dataclass(slots=True)
+class ImageGenerationUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: Decimal = Decimal("0")
+
+
 class GatewayImageClient:
-    IMAGE_API_URL = "https://ai-gateway.vercel.sh/v1/images/generations"
-    CHAT_COMPLETIONS_API_URL = "https://ai-gateway.vercel.sh/v1/chat/completions"
+    CHAT_COMPLETIONS_API_URL = "https://site.atopes.de/v1/chat/completions"
     PRIMARY_ENV_KEY = "IMAGINE_API_KEY"
-    LEGACY_ENV_KEYS = ("GROK_IMAGINE_API_KEY",)
-    GEMINI_PRO_MODEL = "google/gemini-3-pro-image"
-    GEMINI_FLASH_MODEL = "google/gemini-3.1-flash-image-preview"
-    GROK_MODEL = "xai/grok-imagine-image"
-    DEFAULT_MODEL = GEMINI_PRO_MODEL
+    LEGACY_ENV_KEYS = ()
+    GEMINI_PRO_MODEL = "gemini-3-pro-image-preview"
+    GEMINI_FLASH_MODEL = "gemini-3.1-flash-image-preview"
+    DEFAULT_MODEL = GEMINI_FLASH_MODEL
 
     def __init__(self):
         self._lock = asyncio.Lock()
@@ -262,7 +343,6 @@ class GatewayImageClient:
         return (
             cls.GEMINI_PRO_MODEL,
             cls.GEMINI_FLASH_MODEL,
-            cls.GROK_MODEL,
         )
 
     @classmethod
@@ -286,37 +366,61 @@ class GatewayImageClient:
             return "Gemini Pro"
         if normalized_model == cls.GEMINI_FLASH_MODEL:
             return "Gemini 3.1 Flash"
-        if normalized_model == cls.GROK_MODEL:
-            return "Grok"
         return normalized_model
 
     @classmethod
     def uses_chat_completions_api(cls, model_name: str | None) -> bool:
-        normalized_model = cls.normalize_model_name(model_name)
-        return normalized_model in {
-            cls.GEMINI_PRO_MODEL,
-            cls.GEMINI_FLASH_MODEL,
-        }
+        # 所有模型都使用 chat completions API
+        return True
 
     @classmethod
-    def _build_request(cls, model_name: str, prompt: str) -> tuple[str, dict[str, Any]]:
-        normalized_model = cls.normalize_model_name(model_name)
-        if cls.uses_chat_completions_api(normalized_model):
-            return (
-                cls.CHAT_COMPLETIONS_API_URL,
-                {
-                    "model": normalized_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "modalities": ["image"],
-                    "stream": False,
-                },
-            )
+    def supports_reference_image(cls, model_name: str | None) -> bool:
+        return cls.uses_chat_completions_api(model_name)
 
+
+    @staticmethod
+    def _build_data_url(image_bytes: bytes, mime_type: str) -> str:
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        normalized_mime_type = str(mime_type or "image/png").strip() or "image/png"
+        return f"data:{normalized_mime_type};base64,{image_b64}"
+
+    @classmethod
+    def _build_request(
+        cls,
+        model_name: str,
+        prompt: str,
+        reference_images: list[ReferenceImageInput] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        normalized_model = cls.normalize_model_name(model_name)
+        normalized_reference_images = list(reference_images or [])
+        if normalized_reference_images:
+            content_blocks: list[dict[str, Any]] = [
+                {"type": "text", "text": prompt},
+            ]
+            for reference_image in normalized_reference_images:
+                content_blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": cls._build_data_url(
+                                reference_image.data,
+                                reference_image.mime_type,
+                            ),
+                            "detail": "auto",
+                        },
+                    }
+                )
+        else:
+            content_blocks = prompt
         return (
-            cls.IMAGE_API_URL,
+            cls.CHAT_COMPLETIONS_API_URL,
             {
                 "model": normalized_model,
-                "prompt": prompt,
+                "messages": [{"role": "user", "content": content_blocks}],
+                "modalities": (
+                    ["text", "image"] if normalized_reference_images else ["image"]
+                ),
+                "stream": False,
             },
         )
 
@@ -392,6 +496,38 @@ class GatewayImageClient:
             ),
             None,
         )
+
+    @staticmethod
+    def _extract_markdown_image_url(text: str) -> str | None:
+        """从 Markdown 文本中提取第一个图片 URL。
+        支持格式：
+        - ![alt](url)
+        - [text](url) （仅当 url 以常见图片扩展名结尾时）
+        - 直接 http/https URL 且以图片扩展名结尾
+        """
+        if not text:
+            return None
+
+        # 匹配 Markdown 图片: ![alt](url)
+        match = re.search(r'!\[.*?\]\(([^)]+)\)', text)
+        if match:
+            url = match.group(1).strip()
+            if url.startswith(('http://', 'https://')):
+                return url
+
+        # 匹配 Markdown 链接: [text](url) 且 url 是图片
+        match = re.search(r'\[.*?\]\(([^)]+)\)', text)
+        if match:
+            url = match.group(1).strip()
+            if url.startswith(('http://', 'https://')) and re.search(r'\.(png|jpg|jpeg|gif|webp)(\?.*)?$', url, re.I):
+                return url
+
+        # 匹配裸 URL 且是图片
+        match = re.search(r'https?://[^\s<>]+?\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s<>]*)?', text, re.I)
+        if match:
+            return match.group(0)
+
+        return None
 
     @classmethod
     def _collect_image_candidates(
@@ -497,13 +633,30 @@ class GatewayImageClient:
             if error is not None and first_error is None:
                 first_error = error
 
+        # 如果从标准 candidates 中没有找到图片，尝试从模型返回的文本中提取 Markdown 图片链接
+        model_text = _extract_model_text_message(response_payload)
+        if model_text:
+            image_url = self._extract_markdown_image_url(model_text)
+            if image_url:
+                # 下载图片
+                image, error = await self._download_image(
+                    session,
+                    image_url,
+                    self._build_filename(model_name),
+                )
+                if image is not None:
+                    return image, None
+                if error is not None and first_error is None:
+                    first_error = error
+
         if first_error is not None:
             return None, first_error
 
         return None, ImageGenerationError(
-            "生图接口返回成功，但没有找到可用的图片数据。",
+            "没有在返回结果中找到可用的图片数据。可能是被审核截断。",
             status_code=status_code,
             payload=response_payload,
+            model_text=model_text or None,
         )
 
     @staticmethod
@@ -532,12 +685,17 @@ class GatewayImageClient:
         api_key: str,
         prompt: str,
         model_name: str,
+        reference_images: list[ReferenceImageInput] | None = None,
     ) -> tuple[GeneratedImage | None, ImageGenerationError | None]:
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        api_url, payload = self._build_request(model_name, prompt)
+        api_url, payload = self._build_request(
+            model_name,
+            prompt,
+            reference_images=reference_images,
+        )
         timeout = aiohttp.ClientTimeout(total=180)
 
         try:
@@ -549,17 +707,19 @@ class GatewayImageClient:
                 ) as response:
                     response_payload = await self._read_response_payload(response)
                     if response.status < 200 or response.status >= 300:
-                        return None, self._build_api_error(
+                        error = self._build_api_error(
                             response.status,
                             response_payload,
                         )
+                        return None, error
 
-                    return await self._extract_generated_image(
+                    image, error = await self._extract_generated_image(
                         session,
                         model_name,
                         response_payload,
                         status_code=response.status,
                     )
+                    return image, error
         except asyncio.TimeoutError:
             return None, ImageGenerationError("请求生图接口超时，请稍后再试。")
         except aiohttp.ClientError as exc:
@@ -572,12 +732,19 @@ class GatewayImageClient:
         self,
         prompt: str,
         model_name: str | None = None,
+        reference_images: list[ReferenceImageInput] | None = None,
     ) -> tuple[GeneratedImage | None, ImageGenerationError | None]:
         prompt = (prompt or "").strip()
         if not prompt:
             return None, ImageGenerationError("提示词不能为空。")
 
         normalized_model = self.normalize_model_name(model_name)
+        normalized_reference_images = list(reference_images or [])
+        if normalized_reference_images and not self.supports_reference_image(
+            normalized_model
+        ):
+            return None, ImageGenerationError("当前模型暂不支持参考图。")
+
         async with self._lock:
             api_keys = self._load_api_keys()
             if not api_keys:
@@ -599,6 +766,7 @@ class GatewayImageClient:
                     api_key,
                     prompt,
                     normalized_model,
+                    reference_images=normalized_reference_images,
                 )
                 if image is not None:
                     return image, None
@@ -820,6 +988,53 @@ class PromptInputModal(discord.ui.Modal, title="输入提示词"):
         await self.parent_view.refresh_panel()
 
 
+class PublicGeneratedImageView(discord.ui.View):
+    def __init__(self, requester_user_id: int):
+        super().__init__(timeout=None)
+        self.requester_user_id = requester_user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user and interaction.user.id == self.requester_user_id:
+            return True
+
+        await interaction.response.send_message("只有生成这张图片的人可以删除它。", ephemeral=True)
+        return False
+
+    @discord.ui.button(
+        label="删除",
+        style=discord.ButtonStyle.danger,
+        custom_id="generated_image_delete",
+    )
+    async def delete_generated_message(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if interaction.message is None:
+            await interaction.response.send_message("找不到要删除的图片消息。", ephemeral=True)
+            return
+
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException:
+            pass
+
+        try:
+            await interaction.message.delete()
+            self.stop()
+        except discord.Forbidden:
+            if interaction.response.is_done():
+                await interaction.followup.send("我没有权限删除这条消息。", ephemeral=True)
+            else:
+                await interaction.response.send_message("我没有权限删除这条消息。", ephemeral=True)
+        except discord.HTTPException as exc:
+            error_message = f"删除图片消息失败：{exc}"
+            if interaction.response.is_done():
+                await interaction.followup.send(error_message, ephemeral=True)
+            else:
+                await interaction.response.send_message(error_message, ephemeral=True)
+
+
 class ImageGenerationPanelView(discord.ui.View):
     def __init__(
         self,
@@ -828,6 +1043,7 @@ class ImageGenerationPanelView(discord.ui.View):
         image_client: GatewayImageClient,
         quota_service: GlobalDailyQuotaService,
         is_developer: bool,
+        reference_images: list[ReferenceImageInput] | None = None,
     ):
         super().__init__(timeout=config.VIEW_TIMEOUT)
         self.origin_interaction = origin_interaction
@@ -835,6 +1051,7 @@ class ImageGenerationPanelView(discord.ui.View):
         self.image_client = image_client
         self.quota_service = quota_service
         self.is_developer = is_developer
+        self.reference_images = list(reference_images or [])
 
         self.prompt = ""
         self.use_spoiler = False
@@ -886,6 +1103,12 @@ class ImageGenerationPanelView(discord.ui.View):
         model_label = self.image_client.get_model_label(self.selected_model)
         return f"模型：{model_label}"
 
+    def _reference_image_status_line(self) -> str:
+        reference_image_count = len(self.reference_images)
+        if reference_image_count > 0:
+            return f"当前已传入 {reference_image_count} 张参考图。"
+        return "提示：现在可以传入参考图了，输入命令时加上附加参数吧！"
+
     def _can_generate_now(self) -> bool:
         if self.is_generating or not self.prompt:
             return False
@@ -920,6 +1143,8 @@ class ImageGenerationPanelView(discord.ui.View):
             description_lines.extend(["", f"**错误：** {self.last_error}"])
         elif self.last_status:
             description_lines.extend(["", f"**状态：** {self.last_status}"])
+
+        description_lines.append(self._reference_image_status_line())
 
         if self.last_public_message_url:
             description_lines.extend(
@@ -962,7 +1187,15 @@ class ImageGenerationPanelView(discord.ui.View):
                 row=0,
             )
             input_button.callback = self._open_prompt_modal
+            preset_input_button = discord.ui.Button(
+                label="神所娘&类脑娘",
+                style=discord.ButtonStyle.success,
+                disabled=self.is_generating,
+                row=0,
+            )
+            preset_input_button.callback = self._open_preset_prompt_modal
             self.add_item(input_button)
+            self.add_item(preset_input_button)
             self.add_item(model_button)
             return
 
@@ -1015,6 +1248,11 @@ class ImageGenerationPanelView(discord.ui.View):
             PromptInputModal(self, default_prompt=self.prompt)
         )
 
+    async def _open_preset_prompt_modal(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(
+            PromptInputModal(self, default_prompt=PRESET_CHARACTER_PROMPT)
+        )
+
     async def _toggle_spoiler(self, interaction: discord.Interaction) -> None:
         await self._sync_quota_status()
         self.use_spoiler = not self.use_spoiler
@@ -1051,6 +1289,7 @@ class ImageGenerationPanelView(discord.ui.View):
         return await channel.send(
             file=image_file,
             embed=self._build_public_embed(requester),
+            view=PublicGeneratedImageView(requester.id),
         )
 
     async def _generate_image(self, interaction: discord.Interaction) -> None:
@@ -1092,10 +1331,25 @@ class ImageGenerationPanelView(discord.ui.View):
             image, error = await self.image_client.generate_image(
                 self.prompt,
                 self.selected_model,
+                self.reference_images,
             )
             if error is not None:
                 self.last_error = error.message
                 self.last_status = "生成失败。"
+                # 无论是否有模型文本，都发送一条仅发起者可见的消息
+                try:
+                    if error.model_text:
+                        await interaction.followup.send(
+                            f"模型返回文本：{_truncate_text(error.model_text, 1800)}",
+                            ephemeral=True,
+                        )
+                    else:
+                        await interaction.followup.send(
+                            "模型未返回任何文本",
+                            ephemeral=True,
+                        )
+                except Exception as exc:
+                    log.warning("发送模型返回文本的私密消息失败: %s", exc)
                 if reservation is not None:
                     self.quota_status = await self.quota_service.refund_generation(reservation)
                 return
@@ -1136,21 +1390,94 @@ class ImageGenerationCog(commands.Cog):
     def _is_developer(self, user_id: int) -> bool:
         return user_id in self.developer_user_ids
 
+    async def _read_reference_image(
+        self,
+        attachment: discord.Attachment | None,
+    ) -> tuple[ReferenceImageInput | None, str | None]:
+        if attachment is None:
+            return None, None
+
+        content_type = str(attachment.content_type or "").strip().lower()
+        guessed_mime_type = _guess_mime_type_from_filename(attachment.filename).lower()
+        effective_mime_type = (
+            content_type if content_type.startswith("image/") else guessed_mime_type
+        )
+
+        if not effective_mime_type.startswith("image/"):
+            return None, "参考图必须是图片文件。"
+
+        try:
+            image_bytes = await attachment.read()
+        except Exception as exc:
+            log.error("读取参考图失败: %s", exc, exc_info=True)
+            return None, f"读取参考图失败：{exc}"
+
+        if not image_bytes:
+            return None, "参考图内容为空，请重新上传。"
+
+        return (
+            ReferenceImageInput(
+                data=image_bytes,
+                filename=attachment.filename or "reference_image",
+                mime_type=effective_mime_type,
+            ),
+            None,
+        )
+
+    async def _read_reference_images(
+        self,
+        attachments: list[discord.Attachment | None],
+    ) -> tuple[list[ReferenceImageInput], str | None]:
+        resolved_images: list[ReferenceImageInput] = []
+        for attachment in attachments:
+            resolved_image, error_message = await self._read_reference_image(attachment)
+            if error_message:
+                return [], error_message
+            if resolved_image is not None:
+                resolved_images.append(resolved_image)
+
+        return resolved_images, None
+
     @app_commands.command(name="绘制图片", description="打开图片生成面板")
-    @app_commands.describe(daily_limit="开发者可用：设置全局每日次数")
+    @app_commands.describe(
+        reference_image_1="可选：上传第 1 张参考图片",
+        reference_image_2="可选：上传第 2 张参考图片",
+        reference_image_3="可选：上传第 3 张参考图片",
+        daily_limit="开发者可用：设置全局每日次数",
+    )
     async def draw_image(
         self,
         interaction: discord.Interaction,
+        reference_image_1: discord.Attachment | None = None,
+        reference_image_2: discord.Attachment | None = None,
+        reference_image_3: discord.Attachment | None = None,
         daily_limit: app_commands.Range[int, 0, 9999] | None = None,
     ):
         is_developer = self._is_developer(interaction.user.id)
         initial_status_message: str | None = None
+        await interaction.response.defer(ephemeral=True)
+        resolved_reference_images, reference_image_error = await self._read_reference_images(
+            [
+                reference_image_1,
+                reference_image_2,
+                reference_image_3,
+            ]
+        )
+
+        if reference_image_error:
+            await interaction.edit_original_response(
+                content=reference_image_error,
+                embed=None,
+                view=None,
+            )
+            return
 
         if daily_limit is not None:
             if not is_developer:
-                await interaction.response.send_message(
-                    "只有 DEVELOPER_USER_IDS 中的开发者可以修改每日次数。",
-                    ephemeral=True,
+                await interaction.edit_original_response(
+                    content="只有 DEVELOPER_USER_IDS 中的开发者可以修改每日次数。",
+                    embed=None,
+                    view=None,
                 )
                 return
 
@@ -1165,13 +1492,14 @@ class ImageGenerationCog(commands.Cog):
             image_client=self.image_client,
             quota_service=self.quota_service,
             is_developer=is_developer,
+            reference_images=resolved_reference_images,
         )
         await view.initialize(initial_status_message=initial_status_message)
 
-        await interaction.response.send_message(
+        await interaction.edit_original_response(
+            content=None,
             embed=view._build_panel_embed(),
             view=view,
-            ephemeral=True,
         )
 
 

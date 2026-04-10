@@ -216,6 +216,11 @@ class ContextServiceTest:
         else:
             log.warning("ContextServiceTest 初始化时未收到有效的 bot 实例。")
 
+    def set_bot(self, bot: commands.Bot):
+        """在 bot 重建后刷新内部引用，复用已有缓存。"""
+        self.bot = bot
+        log.info("ContextServiceTest 已更新为新的 bot 实例。")
+
     # --- 引用消息缓存 ---
 
     def _get_cache_file_path(self, channel_id: int) -> str:
@@ -833,7 +838,7 @@ def initialize_context_service_test(bot: commands.Bot):
         _context_service_test_instance = ContextServiceTest(bot)
         log.info("全局 ContextServiceTest 实例已成功初始化。")
     else:
-        log.warning("尝试重复初始化 ContextServiceTest 实例，已跳过。")
+        _context_service_test_instance.set_bot(bot)
 
 
 def get_context_service() -> "ContextServiceTest":

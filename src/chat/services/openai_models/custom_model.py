@@ -16,8 +16,8 @@ from PIL import Image
 from dotenv import set_key
 
 from src import config
-from src.chat.services.kimi_gateway_provider_selector import (
-    KimiGatewayProviderSelectorService,
+from src.chat.services.vercel_gateway_provider_selector import (
+    VercelGatewayProviderSelectorService,
     ProviderSelection,
 )
 from src.chat.services.moonshot_vision_service import moonshot_vision_service
@@ -35,13 +35,14 @@ log = logging.getLogger(__name__)
 class CustomModelClient:
     _PRIMARY_API_KEY_ENV_NAME = "CUSTOM_MODEL_API_KEY"
     _LEGACY_API_KEY_ENV_NAME = "CUSTON_MODEL_API_KEY"
+    _TOOL_CALL_REASONING_PLACEHOLDER = "[tool-call reasoning omitted]"
     """Custom OpenAI 兼容通道客户端：负责配置管理、请求发送与 Custom 专属解析。"""
 
     def __init__(self) -> None:
         self._api_keys: List[str] = []
         self._active_api_key_index = 0
         self._key_rotation_lock = asyncio.Lock()
-        self._kimi_gateway_provider_selector = KimiGatewayProviderSelectorService()
+        self._gateway_selectors: Dict[str, VercelGatewayProviderSelectorService] = {}
         self.api_key: Optional[str] = None
         self.raw_api_key: Optional[str] = None
         self._api_key_source_type = "inline"
@@ -627,6 +628,231 @@ class CustomModelClient:
         return ""
 
     @classmethod
+    def normalize_tool_call_reasoning_content(cls, reasoning_content: Any) -> str:
+        extracted_from_content = cls._extract_text_from_openai_content(reasoning_content)
+        if extracted_from_content:
+            return extracted_from_content
+
+        if isinstance(reasoning_content, str):
+            normalized_reasoning = reasoning_content.strip()
+            if normalized_reasoning:
+                return normalized_reasoning
+
+        if isinstance(reasoning_content, dict):
+            extracted_from_block = cls._extract_reasoning_text_from_block(
+                reasoning_content
+            )
+            if extracted_from_block:
+                return extracted_from_block
+
+        return cls._TOOL_CALL_REASONING_PLACEHOLDER
+
+    @classmethod
+    def _normalize_assistant_tool_call_reasoning(
+        cls, block: Any, *, assume_assistant: bool = False
+    ) -> Any:
+        if not isinstance(block, dict):
+            return block
+
+        tool_calls = block.get("tool_calls")
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return block
+
+        role = str(block.get("role") or "").strip().lower()
+        is_assistant_block = role == "assistant" or (assume_assistant and not role)
+        if not is_assistant_block:
+            return block
+
+        existing_reasoning = block.get("reasoning_content")
+        if isinstance(existing_reasoning, str) and existing_reasoning.strip():
+            return block
+
+        normalized_block = dict(block)
+        normalized_block["reasoning_content"] = cls.normalize_tool_call_reasoning_content(
+            cls._extract_reasoning_text_from_block(block)
+        )
+        return normalized_block
+
+    @classmethod
+    def _collect_missing_assistant_tool_call_reasoning_indexes(
+        cls, messages: Any
+    ) -> List[int]:
+        if not isinstance(messages, list):
+            return []
+
+        missing_indexes: List[int] = []
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict):
+                continue
+
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list) or not tool_calls:
+                continue
+
+            role = str(message.get("role") or "").strip().lower()
+            if role != "assistant":
+                continue
+
+            reasoning_content = message.get("reasoning_content")
+            if not isinstance(reasoning_content, str) or not reasoning_content.strip():
+                missing_indexes.append(index)
+
+        return missing_indexes
+
+    @classmethod
+    def _preview_message_debug_text(cls, value: Any, *, max_length: int = 120) -> str:
+        if isinstance(value, str):
+            preview = value.strip()
+        else:
+            preview = cls._extract_text_from_openai_content(value)
+            if not preview and value is not None:
+                preview = str(value).strip()
+
+        preview = re.sub(r"\s+", " ", preview).strip()
+        if len(preview) > max_length:
+            preview = preview[: max_length - 3] + "..."
+        return preview
+
+    @classmethod
+    def _build_message_debug_summary(
+        cls, message: Any, *, index: int
+    ) -> Dict[str, Any]:
+        if not isinstance(message, dict):
+            return {"index": index, "message_type": type(message).__name__}
+
+        tool_calls = message.get("tool_calls")
+        tool_names: List[str] = []
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function_payload = tool_call.get("function")
+                if not isinstance(function_payload, dict):
+                    continue
+                tool_name = function_payload.get("name")
+                if isinstance(tool_name, str) and tool_name:
+                    tool_names.append(tool_name)
+
+        reasoning_content = message.get("reasoning_content")
+        reasoning_preview = cls._preview_message_debug_text(reasoning_content)
+        content_preview = cls._preview_message_debug_text(message.get("content"))
+
+        return {
+            "index": index,
+            "role": message.get("role"),
+            "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0,
+            "tool_names": tool_names,
+            "reasoning_type": (
+                type(reasoning_content).__name__
+                if reasoning_content is not None
+                else None
+            ),
+            "reasoning_length": (
+                len(reasoning_content.strip())
+                if isinstance(reasoning_content, str)
+                else None
+            ),
+            "reasoning_preview": reasoning_preview,
+            "content_type": (
+                type(message.get("content")).__name__
+                if message.get("content") is not None
+                else None
+            ),
+            "content_preview": content_preview,
+        }
+
+    @classmethod
+    def _extract_reasoning_error_message_index(
+        cls, error_text: str
+    ) -> Optional[int]:
+        match = re.search(
+            r"assistant tool call message at index (\d+)",
+            str(error_text or ""),
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _log_reasoning_error_message_window(
+        cls, messages: Any, *, target_index: int, error_text: str
+    ) -> None:
+        if not isinstance(messages, list):
+            log.error(
+                "[Custom] reasoning_content 缺失定位失败：messages 不是列表 | target_index=%s | error=%s",
+                target_index,
+                error_text,
+            )
+            return
+
+        start_index = max(target_index - 2, 0)
+        end_index = min(target_index + 3, len(messages))
+        window_summaries = [
+            cls._build_message_debug_summary(message, index=index)
+            for index, message in enumerate(
+                messages[start_index:end_index], start=start_index
+            )
+        ]
+        log.error(
+            "[Custom] 检测到 assistant tool-call reasoning_content 缺失报错 | target_index=%s | missing_indexes=%s | window=%s",
+            target_index,
+            cls._collect_missing_assistant_tool_call_reasoning_indexes(messages),
+            json.dumps(window_summaries, ensure_ascii=False),
+        )
+
+    @classmethod
+    def normalize_request_messages(cls, messages: Any) -> Any:
+        if not isinstance(messages, list):
+            return messages
+
+        changed = False
+        normalized_messages: List[Any] = []
+        for message in messages:
+            normalized_message = cls._normalize_assistant_tool_call_reasoning(message)
+            if normalized_message is not message:
+                changed = True
+            normalized_messages.append(normalized_message)
+
+        return normalized_messages if changed else messages
+
+    @classmethod
+    def normalize_chat_completion_result(
+        cls, result: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(result, dict):
+            return result
+
+        choices = result.get("choices")
+        if not isinstance(choices, list):
+            return result
+
+        normalized_result: Optional[Dict[str, Any]] = None
+
+        for choice_index, choice in enumerate(choices):
+            if not isinstance(choice, dict):
+                continue
+
+            for block_key in ("message", "delta"):
+                block = choice.get(block_key)
+                normalized_block = cls._normalize_assistant_tool_call_reasoning(
+                    block, assume_assistant=True
+                )
+                if normalized_block is block:
+                    continue
+
+                if normalized_result is None:
+                    normalized_result = copy.deepcopy(result)
+
+                normalized_result["choices"][choice_index][block_key] = normalized_block
+
+        return normalized_result if normalized_result is not None else result
+
+    @classmethod
     def diagnose_streaming_chat_completion_body(cls, body: str) -> Dict[str, Any]:
         normalized_body = str(body or "")
         diagnostics: Dict[str, Any] = {
@@ -1082,8 +1308,10 @@ class CustomModelClient:
         response_text = (response.text or "").lstrip()
         return "text/event-stream" in content_type or response_text.startswith("data:")
 
-    @staticmethod
-    def parse_streaming_chat_completion_body(body: str) -> Optional[Dict[str, Any]]:
+    @classmethod
+    def parse_streaming_chat_completion_body(
+        cls, body: str
+    ) -> Optional[Dict[str, Any]]:
         if not body or "data:" not in body:
             return None
 
@@ -1185,17 +1413,13 @@ class CustomModelClient:
                 if isinstance(delta_content, str):
                     content_chunks.append(delta_content)
                 elif isinstance(delta_content, list):
-                    extracted_delta_content = (
-                        CustomModelClient._extract_text_from_openai_content(
-                            delta_content
-                        )
+                    extracted_delta_content = cls._extract_text_from_openai_content(
+                        delta_content
                     )
                     if extracted_delta_content:
                         content_chunks.append(extracted_delta_content)
 
-                extracted_delta_reasoning = (
-                    CustomModelClient._extract_reasoning_text_from_block(delta)
-                )
+                extracted_delta_reasoning = cls._extract_reasoning_text_from_block(delta)
                 if extracted_delta_reasoning:
                     reasoning_chunks.append(extracted_delta_reasoning)
 
@@ -1213,16 +1437,14 @@ class CustomModelClient:
                 if isinstance(message_content, str) and message_content and not content_chunks:
                     content_chunks.append(message_content)
                 elif isinstance(message_content, list) and not content_chunks:
-                    extracted_message_content = (
-                        CustomModelClient._extract_text_from_openai_content(
-                            message_content
-                        )
+                    extracted_message_content = cls._extract_text_from_openai_content(
+                        message_content
                     )
                     if extracted_message_content:
                         content_chunks.append(extracted_message_content)
 
-                extracted_message_reasoning = (
-                    CustomModelClient._extract_reasoning_text_from_block(message_block)
+                extracted_message_reasoning = cls._extract_reasoning_text_from_block(
+                    message_block
                 )
                 if extracted_message_reasoning and not reasoning_chunks:
                     reasoning_chunks.append(extracted_message_reasoning)
@@ -1251,7 +1473,9 @@ class CustomModelClient:
             message["reasoning_content"] = final_reasoning
         if final_tool_calls:
             message["tool_calls"] = final_tool_calls
-            message.setdefault("reasoning_content", "")
+            message["reasoning_content"] = cls.normalize_tool_call_reasoning_content(
+                message.get("reasoning_content")
+            )
 
         final_finish_reason = latest_finish_reason or (
             "tool_calls" if final_tool_calls else "stop"
@@ -1324,6 +1548,8 @@ class CustomModelClient:
         payload: Dict[str, Any],
         override_base_url: Optional[str] = None,
         runtime_config: Optional[Dict[str, Any]] = None,
+        logical_request_id: Optional[str] = None,
+        is_final_network_attempt: bool = True,
     ) -> Dict[str, Any]:
         if runtime_config is None:
             runtime_config = self.refresh_from_env()
@@ -1338,6 +1564,19 @@ class CustomModelClient:
 
         api_url = self._build_chat_completions_url(api_url)
         request_payload = dict(payload)
+        request_payload["messages"] = self.normalize_request_messages(
+            request_payload.get("messages")
+        )
+        missing_reasoning_indexes = (
+            self._collect_missing_assistant_tool_call_reasoning_indexes(
+                request_payload.get("messages")
+            )
+        )
+        if missing_reasoning_indexes:
+            log.warning(
+                "[Custom] 请求发送前仍发现 assistant tool-call reasoning_content 缺失 | indexes=%s",
+                missing_reasoning_indexes,
+            )
         request_payload["stream"] = True
         request_payload["thinking"] = {"type": "disabled"}
         request_payload.pop("chat_template_kwargs", None)
@@ -1368,20 +1607,33 @@ class CustomModelClient:
             runtime_config.get("gateway_provider_name"),
         )
         is_vercel_gateway = "ai-gateway.vercel.sh" in api_url.lower()
-        is_kimi_k2_5_model = normalized_request_model == "moonshotai/kimi-k2.5"
-        selected_gateway_provider: Optional[ProviderSelection] = None
-        if is_vercel_gateway and is_kimi_k2_5_model:
-            selected_gateway_provider = (
-                await self._kimi_gateway_provider_selector.select_provider()
-            )
-            log.info(
-                "[Custom] 已选择 Kimi Gateway 供应商 | model=%s | 供应商=%s | 阶段=%s | 分数=%.6f | url=%s",
-                request_model_name,
-                selected_gateway_provider.provider_name,
-                selected_gateway_provider.stage,
-                selected_gateway_provider.effective_score,
-                api_url,
-            )
+        # 检查该模型是否有对应的供应商配置
+        selector = None
+        if is_vercel_gateway:
+            # 从 VercelGatewayProviderSelectorService.MODEL_PROVIDER_NAMES 中查找
+            from src.chat.services.vercel_gateway_provider_selector import VercelGatewayProviderSelectorService
+            if normalized_request_model in VercelGatewayProviderSelectorService.MODEL_PROVIDER_NAMES:
+                # 获取或创建选择器实例
+                if normalized_request_model not in self._gateway_selectors:
+                    self._gateway_selectors[normalized_request_model] = await VercelGatewayProviderSelectorService.get_or_create_instance(
+                        model_name=normalized_request_model
+                    )
+                selector = self._gateway_selectors[normalized_request_model]
+                selected_gateway_provider = await selector.select_provider(
+                    logical_request_id=logical_request_id
+                )
+                log.info(
+                    "[Custom] 已选择 Vercel Gateway 供应商 | model=%s | 供应商=%s | 阶段=%s | 分数=%.6f | url=%s",
+                    request_model_name,
+                    selected_gateway_provider.provider_name,
+                    selected_gateway_provider.stage,
+                    selected_gateway_provider.effective_score,
+                    api_url,
+                )
+            else:
+                selected_gateway_provider = None
+        else:
+            selected_gateway_provider = None
         provider_timeout_injected = False
         provider_only_injected = False
         provider_order_injected = False
@@ -1494,6 +1746,7 @@ class CustomModelClient:
             saw_non_sse_payload = False
             response_content_encoding = "<pending>"
             response_transfer_encoding = "<pending>"
+            provider_failure_reported = False
 
             try:
                 async with http_client.stream(
@@ -1540,17 +1793,45 @@ class CustomModelClient:
                             ):
                                 continue
 
-                        if selected_gateway_provider is not None:
+                        if selected_gateway_provider is not None and selector is not None:
                             if self._should_penalize_gateway_provider_response(
                                 current_response.status_code
                             ):
-                                await self._kimi_gateway_provider_selector.report_failure(
-                                    selected_gateway_provider.provider_name
+                                await selector.report_failure(
+                                    selected_gateway_provider
                                 )
+                                provider_failure_reported = True
                             else:
-                                await self._kimi_gateway_provider_selector.release_provider(
-                                    selected_gateway_provider.provider_name
+                                await selector.release_provider(
+                                    selected_gateway_provider,
+                                    manual_result_status=(
+                                        "failure"
+                                        if selected_gateway_provider.manual_test_run_id
+                                        else None
+                                    ),
+                                    error=httpx.HTTPStatusError(
+                                        combined_error_text,
+                                        request=current_response.request,
+                                        response=current_response,
+                                    ),
                                 )
+
+                        reasoning_error_index = self._extract_reasoning_error_message_index(
+                            response_text
+                        )
+                        if reasoning_error_index is not None:
+                            self._log_reasoning_error_message_window(
+                                request_payload.get("messages"),
+                                target_index=reasoning_error_index,
+                                error_text=response_text,
+                            )
+
+                        # 将 5xx 服务器错误（包括 500）作为网络异常抛出，以便上层重试
+                        if 500 <= current_response.status_code < 600:
+                            raise httpx.ConnectError(
+                                f"Server error {current_response.status_code}: {current_response.reason_phrase}",
+                                request=current_response.request,
+                            )
 
                         current_response.raise_for_status()
 
@@ -1714,15 +1995,15 @@ class CustomModelClient:
                     )
                     successful_request_elapsed_seconds = loop.time() - request_started_at
 
-                    if selected_gateway_provider is not None:
+                    if selected_gateway_provider is not None and selector is not None:
                         parsed_result = self._parse_chat_completion_response_body(
                             response
                         )
                         output_units = self._extract_output_units_from_result(
                             parsed_result
                         )
-                        await self._kimi_gateway_provider_selector.report_success(
-                            selected_gateway_provider.provider_name,
+                        await selector.report_success(
+                            selected_gateway_provider,
                             elapsed_seconds=successful_request_elapsed_seconds,
                             output_units=output_units,
                         )
@@ -1730,7 +2011,7 @@ class CustomModelClient:
                             output_units, 1
                         )
                         log.info(
-                            "[Custom] Kimi Gateway 供应商测速结果 | model=%s | 供应商=%s | 阶段=%s | 总耗时=%.2fs | 输出字数=%s | 每字耗时=%.6f | status=%s",
+                            "[Custom] Vercel Gateway 供应商测速结果 | model=%s | 供应商=%s | 阶段=%s | 总耗时=%.2fs | 输出字数=%s | 每字耗时=%.6f | status=%s",
                             request_model_name,
                             selected_gateway_provider.provider_name,
                             selected_gateway_provider.stage,
@@ -1742,9 +2023,19 @@ class CustomModelClient:
                     break
             except httpx.RequestError as exc:
                 elapsed_total_seconds = loop.time() - request_started_at
-                if selected_gateway_provider is not None:
-                    await self._kimi_gateway_provider_selector.report_failure(
-                        selected_gateway_provider.provider_name
+                if (
+                    selected_gateway_provider is not None
+                    and selector is not None
+                    and not provider_failure_reported
+                    and (
+                        is_final_network_attempt
+                        or selected_gateway_provider.manual_test_run_id is None
+                    )
+                ):
+                    await selector.report_failure(
+                        selected_gateway_provider,
+                        error=exc,
+                        network_error=True,
                     )
 
                 log.warning(

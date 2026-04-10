@@ -1,7 +1,7 @@
 from google.genai import types
 import discord
 import inspect
-from typing import Optional, Dict, Callable, Any, List
+from typing import Optional, Dict, Callable, Any, List, Tuple
 
 import logging
 
@@ -47,27 +47,64 @@ class ToolService:
         self, user_id_for_settings: Optional[str] = None
     ) -> List[Callable]:
         """
-        根据提供的用户ID动态获取可用的工具列表。
+        获取当前上下文可用的原始工具列表。
 
-        - 无论用户是否禁用工具，都返回所有工具声明。
-        - 工具执行时会检查是否被用户禁用，如果被禁用则返回错误提示。
+        全局工具开关会在调用链路中单独过滤，这里始终返回原始工具声明。
 
         Args:
-            user_id_for_settings: 用于查询工具设置的用户的ID。如果为 None，则返回默认工具。
+            user_id_for_settings: 兼容旧调用链保留的参数，当前已不再使用。
 
         Returns:
-            所有工具函数列表（包括被用户禁用的工具）。
+            所有原始工具函数列表。
         """
-        # 总是返回所有工具，让AI可以看到它们
-        # 工具执行时会检查是否被禁用
-        if not user_id_for_settings:
-            log.info("未提供 user_id_for_settings，使用默认工具集。")
-            return self.tool_declarations
-
-        log.info(
-            f"为用户 {user_id_for_settings} 返回所有工具声明（共 {len(self.tool_declarations)} 个）"
-        )
+        if user_id_for_settings:
+            log.info(
+                "当前已使用全局工具开关模式，忽略 user_id_for_settings=%s。",
+                user_id_for_settings,
+            )
         return self.tool_declarations
+
+    async def filter_tools_for_global_settings(
+        self, tools: List[Callable]
+    ) -> Tuple[List[Callable], List[str]]:
+        """
+        根据全局工具开关过滤工具列表。
+
+        Returns:
+            (filtered_tools, skipped_tool_names)
+        """
+        enabled_tool_names = (
+            await user_tool_settings_service.get_globally_enabled_tool_names()
+        )
+        if enabled_tool_names is None:
+            return tools, []
+
+        filtered_tools: List[Callable] = []
+        skipped_tools: List[str] = []
+
+        for tool in tools:
+            tool_name = getattr(tool, "__name__", "")
+            if not tool_name:
+                filtered_tools.append(tool)
+                continue
+
+            if tool_name in HIDDEN_TOOLS or tool_name in enabled_tool_names:
+                filtered_tools.append(tool)
+                continue
+
+            skipped_tools.append(tool_name)
+
+        return filtered_tools, skipped_tools
+
+    async def is_tool_globally_enabled(self, tool_name: str) -> bool:
+        """检查某个工具当前是否处于全局启用状态。"""
+        if tool_name in HIDDEN_TOOLS:
+            return True
+
+        enabled_tool_names = (
+            await user_tool_settings_service.get_globally_enabled_tool_names()
+        )
+        return enabled_tool_names is None or tool_name in enabled_tool_names
 
     async def execute_tool_call(
         self,
@@ -87,7 +124,7 @@ class ToolService:
             channel: 可选的当前消息所在的 Discord 频道对象。
             user_id: 可选的当前消息作者的 Discord ID，用作某些参数的备用值。
             log_detailed: 是否记录详细日志。
-            user_id_for_settings: 用于检查工具设置的用户ID（通常是帖子所有者的ID）。
+            user_id_for_settings: 兼容旧调用链保留的参数，当前已不再使用。
 
         Returns:
             一个格式化为 FunctionResponse 的 Part 对象，其中包含工具的输出。
@@ -111,33 +148,15 @@ class ToolService:
                 name=tool_name, response={"error": f"Tool '{tool_name}' not found."}
             )
 
-        # --- 检查工具是否被禁用 ---
-        if user_id_for_settings:
-            try:
-                # HIDDEN_TOOLS 中的工具是系统必须保留的，不应该让用户控制
-                if tool_name not in HIDDEN_TOOLS:
-                    user_settings = (
-                        await user_tool_settings_service.get_user_tool_settings(
-                            user_id_for_settings
-                        )
-                    )
-                    if user_settings and isinstance(user_settings, dict):
-                        enabled_tools = user_settings.get("enabled_tools", [])
-                        # 如果 enabled_tools 不为空且当前工具不在列表中，则禁用
-                        if enabled_tools and tool_name not in enabled_tools:
-                            log.info(
-                                f"工具 '{tool_name}' 被 {user_id_for_settings} 禁用，拒绝执行。"
-                            )
-                            # 返回错误信息，让AI解释给用户
-                            return types.Part.from_function_response(
-                                name=tool_name,
-                                response={
-                                    "error": f"工具 '{tool_name}' 被帖子所有者禁用了。ta不让我干这个活啦!"
-                                },
-                            )
-            except Exception as e:
-                log.error(f"检查工具设置时出错: {e}", exc_info=True)
-        # --- 结束检查 ---
+        try:
+            if not await self.is_tool_globally_enabled(tool_name):
+                log.info("工具 '%s' 当前已全局关闭，拒绝执行。", tool_name)
+                return types.Part.from_function_response(
+                    name=tool_name,
+                    response={"error": f"工具 '{tool_name}' 当前已被全局关闭。"},
+                )
+        except Exception as e:
+            log.error("检查全局工具设置时出错: %s", e, exc_info=True)
 
         try:
             # 步骤 1: 从模型响应中提取参数

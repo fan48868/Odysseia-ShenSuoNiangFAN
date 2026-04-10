@@ -5,6 +5,7 @@ import queue
 import sys
 import discord
 import time
+import threading
 import requests
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -16,7 +17,7 @@ from src.backup.backup_manager import backup_databases
 # 这样可以确保所有模块在加载时都能访问到 .env 文件中定义的配置
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT_DOTENV_PATH = os.path.join(PROJECT_ROOT, ".env")
-load_dotenv(dotenv_path=PROJECT_DOTENV_PATH, override=True, encoding="utf-8")
+load_dotenv(dotenv_path=PROJECT_DOTENV_PATH, override=False, encoding="utf-8")
 
 # 从我们自己的模块中导入
 from src import config
@@ -46,8 +47,21 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 # --- WebUI_start ---
-log_server_url = "http://config_web:80/api/log"
+log_server_url = os.getenv("WEBUI_LOG_SERVER_URL", "http://config_web:80/api/log")
 heartbeat_interval = 1.0  # 心跳包间隔
+enable_webui = os.getenv("ENABLE_WEBUI", "true").lower() == "true"
+webui_log_batch_size = int(os.getenv("WEBUI_LOG_BATCH_SIZE", "200"))
+webui_log_timeout = float(os.getenv("WEBUI_LOG_TIMEOUT", "5.0"))
+webui_log_backlog_limit = int(os.getenv("WEBUI_LOG_BACKLOG_LIMIT", "5000"))
+discord_reconnect_base_delay = float(
+    os.getenv("DISCORD_RECONNECT_BASE_DELAY", "5")
+)
+discord_reconnect_max_delay = float(
+    os.getenv("DISCORD_RECONNECT_MAX_DELAY", "300")
+)
+discord_reconnect_stable_reset_seconds = float(
+    os.getenv("DISCORD_RECONNECT_STABLE_RESET_SECONDS", "600")
+)
 
 log_queue = queue.Queue()
 
@@ -62,26 +76,34 @@ class QueueHandler(logging.Handler):
 
 
 def heartbeat_sender():
+    pending_logs = []
     while 1:
         time.sleep(heartbeat_interval)
-        logs_to_send = []
-        while not log_queue.empty():
+        while len(pending_logs) < webui_log_batch_size and not log_queue.empty():
             try:
-                logs_to_send.append(log_queue.get_nowait())
+                pending_logs.append(log_queue.get_nowait())
             except queue.Empty:
                 break
+
+        if len(pending_logs) > webui_log_backlog_limit:
+            pending_logs = pending_logs[-webui_log_backlog_limit:]
+
+        logs_to_send = pending_logs[:webui_log_batch_size]
 
         try:
             payload = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "logs": logs_to_send,
             }
-            response = requests.post(log_server_url, json=payload, timeout=2.0)
+            response = requests.post(log_server_url, json=payload, timeout=webui_log_timeout)
             if response.status_code != 200:
                 print(
                     f"Heartbeat Error: Received status {response.status_code}",
                     file=sys.stderr,
                 )  # 不适用logging
+            else:
+                if logs_to_send:
+                    pending_logs = pending_logs[len(logs_to_send):]
 
         except requests.exceptions.RequestException as e:
             print(
@@ -139,16 +161,17 @@ def setup_logging():
     )
     logging.Formatter.converter = time.gmtime
 
-    # queue_handler = QueueHandler(log_queue)
-    # queue_handler.setLevel(
-    #     logging.DEBUG
-    # )  # 这里如果想在WebUI看到仅INFO以上日志，请在这里修改
-    # queue_handler.setFormatter(web_log_formatter)
+    queue_handler = None
+    if enable_webui:
+        queue_handler = QueueHandler(log_queue)
+        queue_handler.setLevel(logging.DEBUG)
+        queue_handler.setFormatter(web_log_formatter)
 
     # 6. 为根 logger 添加所有处理器
     root_logger.addHandler(stdout_handler)
     root_logger.addHandler(stderr_handler)
-    # root_logger.addHandler(queue_handler) # 禁用未使用的WebUI日志队列处理器，防止内存泄漏
+    if queue_handler is not None:
+        root_logger.addHandler(queue_handler)
 
     # 5. 调整特定库的日志级别，以减少不必要的输出
     #    例如，google-generativeai 库在 INFO 级别会打印很多网络请求相关的日志
@@ -203,6 +226,7 @@ class GuidanceBot(commands.Bot):
         init_kwargs["max_messages"] = 10000
 
         super().__init__(**init_kwargs)
+        self.last_ready_monotonic = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """
@@ -283,6 +307,11 @@ class GuidanceBot(commands.Bot):
             for file in path.glob("*.py"):
                 if file.name.startswith("__"):
                     continue
+                
+                 # --- 临时禁用图像生成 ---
+                if file.name == "image_generation_cog.py":
+                    log.warning(f"已根据指令临时跳过加载: {file.name}")
+                    continue
 
 
                 # 从文件系统路径构建 Python 模块路径
@@ -303,6 +332,7 @@ class GuidanceBot(commands.Bot):
     async def on_ready(self):
         """当机器人成功连接到 Discord 时调用"""
         log = logging.getLogger(__name__)
+        self.last_ready_monotonic = time.monotonic()
         log.info("--- 机器人已上线 ---")
         if self.user:
             log.info(f"登录用户: {self.user} (ID: {self.user.id})")
@@ -345,6 +375,82 @@ class GuidanceBot(commands.Bot):
 
         log.info("--------------------")
         log.info("--- 启动成功 ---")
+
+    async def on_disconnect(self):
+        logging.getLogger(__name__).warning(
+            "与 Discord 网关的连接已断开，正在等待库内部恢复或外层监督重试。"
+        )
+
+    async def on_resumed(self):
+        logging.getLogger(__name__).info("已恢复与 Discord 网关的会话。")
+
+
+def _get_next_reconnect_delay(current_delay: float) -> float:
+    """计算下一次重连等待时间，并限制在最大退避窗口内。"""
+    if current_delay <= 0:
+        return discord_reconnect_base_delay
+    return min(current_delay * 2, discord_reconnect_max_delay)
+
+
+async def run_bot_forever(token: str):
+    """
+    持续监督 Discord Bot。
+
+    即使底层库在网络异常、代理切换或网关握手失败后最终抛出异常，
+    这里也会使用新的 Bot 实例继续尝试连接，而不是让整个进程退出。
+    """
+    log = logging.getLogger(__name__)
+    reconnect_delay = discord_reconnect_base_delay
+    work_db_service = WorkDBService()
+    from src.chat.services.context_service_test import initialize_context_service_test
+
+    attempt = 0
+    while True:
+        bot = GuidanceBot()
+        attempt += 1
+
+        guidance_db_manager.set_bot_instance(bot)
+        gemini_service.set_bot(bot)
+        initialize_context_service_test(bot)
+        initialize_review_service(bot, work_db_service)
+
+        try:
+            log.info(f"正在连接 Discord（第 {attempt} 次尝试）...")
+            await bot.start(token, reconnect=True)
+            log.warning("Discord Bot 连接已结束，准备重新尝试连接。")
+        except discord.LoginFailure:
+            log.critical("无法登录，请检查你的 DISCORD_TOKEN 是否正确。")
+            break
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            log.error(
+                f"Discord 连接失败或已中断，将在 {reconnect_delay:.1f} 秒后重试: {e}",
+                exc_info=True,
+            )
+        finally:
+            try:
+                if not bot.is_closed():
+                    await bot.close()
+            except Exception as close_error:
+                log.warning(f"关闭 Bot 实例时出现异常: {close_error}", exc_info=True)
+
+        uptime = None
+        if bot.last_ready_monotonic is not None:
+            uptime = time.monotonic() - bot.last_ready_monotonic
+
+        if uptime is not None and uptime >= discord_reconnect_stable_reset_seconds:
+            log.info(
+                f"本次连接已稳定运行约 {uptime:.1f} 秒，重连退避已重置为初始值。"
+            )
+            sleep_delay = discord_reconnect_base_delay
+            reconnect_delay = discord_reconnect_base_delay
+        else:
+            sleep_delay = reconnect_delay
+            reconnect_delay = _get_next_reconnect_delay(reconnect_delay)
+
+        log.info(f"将在 {sleep_delay:.1f} 秒后再次尝试连接 Discord。")
+        await asyncio.sleep(sleep_delay)
 
 
 def handle_exception(exc_type, exc_value, exc_traceback):
@@ -406,10 +512,11 @@ async def main():
         log.error(f"设置 asyncio 异常处理器失败: {e}", exc_info=True)
 
     # --- webui心跳启动进程 --
-    # log.info("启用webui心跳包")
-    # sender_thread = threading.Thread(target=heartbeat_sender,daemon=True)
-    # sender_thread.start()
-    # log.info("Webui心跳包已启用")
+    if enable_webui:
+        log.info("启用 WebUI 心跳与日志上报")
+        sender_thread = threading.Thread(target=heartbeat_sender, daemon=True)
+        sender_thread.start()
+        log.info("WebUI 心跳与日志上报已启用")
 
     # 3. 异步初始化数据库
     log.info("正在异步初始化数据库...")
@@ -436,36 +543,17 @@ async def main():
     scheduler.start()
     log.info("已启动每日数据库备份任务。")
 
-    # 4. 创建并运行机器人实例
-    bot = GuidanceBot()
-    guidance_db_manager.set_bot_instance(bot)
-    # 在机器人启动时，将 bot 实例注入到 GeminiService 中
-    # 这是确保工具能够访问 Discord API 的关键步骤
-    gemini_service.set_bot(bot)
-    # 为 context_service_test 注入 bot 实例，使其能够访问缓存
-    # 为 context_service_test 注入 bot 实例，使其能够访问缓存
-    from src.chat.services.context_service_test import initialize_context_service_test
-
-    initialize_context_service_test(bot)
-    # 初始化所有需要的服务实例
-    work_db_service = WorkDBService()
-    # 初始化审核服务，并将 bot 和其他服务实例注入
-    initialize_review_service(bot, work_db_service)
-
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         log.critical("错误: DISCORD_TOKEN 未在 .env 文件中设置！")
         return
 
     try:
-        await bot.start(token)
-    except discord.LoginFailure:
-        log.critical("无法登录，请检查你的 DISCORD_TOKEN 是否正确。")
+        await run_bot_forever(token)
     except Exception as e:
-        log.critical(f"启动机器人时发生未知错误: {e}", exc_info=True)
+        log.critical(f"监督 Bot 运行时发生未知错误: {e}", exc_info=True)
     finally:
-        # 在机器人关闭时，确保数据库连接被关闭
-        log.info("机器人已下线。")
+        log.info("机器人监督器已停止。")
 
 
 if __name__ == "__main__":
