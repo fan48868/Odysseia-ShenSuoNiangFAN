@@ -1562,48 +1562,50 @@ class OpenAIService:
                 openai_messages.append(msg_to_append)
 
                 if not tool_calls:
-                    if content:
-                        has_forbidden_phrase = bool(
-                            re.search(
-                                r"不过话说回来|话说回来|话又说回来|不过话又说回来|不过说真的",
-                                content,
-                            )
-                        )
-                        content_len = len(content)
+                    # ========== 以下违禁词检测与表情包限制已注释 ==========
+                    # if content:
+                    #     has_forbidden_phrase = bool(
+                    #         re.search(
+                    #             r"不过话说回来|话说回来|话又说回来|不过话又说回来|不过说真的",
+                    #             content,
+                    #         )
+                    #     )
+                    #     content_len = len(content)
 
-                        if has_forbidden_phrase and content_len <= 800:
-                            if bad_format_retries < 3:
-                                log.warning(
-                                    f"[{channel_label}] 检测到违禁词 (尝试 {bad_format_retries + 1}/3)，正在重试..."
-                                )
-                                openai_messages.append(
-                                    {
-                                        "role": "user",
-                                        "content": "[系统提示] 检测到你使用了“不过说真的|不过话说回来|话说回来|话又说回来”。这是被禁止的。请重新生成回复，去掉这个短语，保持语气自然。",
-                                    }
-                                )
-                                bad_format_retries += 1
-                                continue
-                            return self._apply_blacklist_notice(
-                                "抱歉，我的说话格式一直达不到要求，我是杂鱼",
-                                blacklist_punishment_active,
-                            )
-                        elif has_forbidden_phrase:
-                            log.info(
-                                f"[{channel_label}] 检测到违禁词，但回复长度为 {content_len} (>800)，按成本优化策略放行。"
-                            )
+                    #     if has_forbidden_phrase and content_len <= 800:
+                    #         if bad_format_retries < 3:
+                    #             log.warning(
+                    #                 f"[{channel_label}] 检测到违禁词 (尝试 {bad_format_retries + 1}/3)，正在重试..."
+                    #             )
+                    #             openai_messages.append(
+                    #                 {
+                    #                     "role": "user",
+                    #                     "content": "[系统提示] 检测到你使用了“不过说真的|不过话说回来|话说回来|话又说回来”。这是被禁止的。请重新生成回复，去掉这个短语，保持语气自然。",
+                    #                 }
+                    #             )
+                    #             bad_format_retries += 1
+                    #             continue
+                    #         return self._apply_blacklist_notice(
+                    #             "抱歉，我的说话格式一直达不到要求，我是杂鱼",
+                    #             blacklist_punishment_active,
+                    #         )
+                    #     elif has_forbidden_phrase:
+                    #         log.info(
+                    #             f"[{channel_label}] 检测到违禁词，但回复长度为 {content_len} (>800)，按成本优化策略放行。"
+                    #         )
 
-                    allowed_emoji_names = {"开心","乖巧","害羞","吃瓜","偷笑","裂开","呜呜","收到","打哈欠","得意","点赞","眩晕","疑惑","比心","desuwa","伤心","生气","加油", "好奇","邀请","傲娇","祝福","你好","叹气","投降",}
-                    removed_emoji_tags: List[str] = []
+                    # allowed_emoji_names = {"开心","乖巧","害羞","吃瓜","偷笑","裂开","呜呜","收到","打哈欠","得意","点赞","眩晕","疑惑","比心","desuwa","伤心","生气","加油", "好奇","邀请","傲娇","祝福","你好","叹气","投降",}
+                    # removed_emoji_tags: List[str] = []
 
-                    def _strip_disallowed_emoji_tag(match):
-                        emoji_name = match.group(1).strip()
-                        if emoji_name in allowed_emoji_names:
-                            return match.group(0)
+                    # def _strip_disallowed_emoji_tag(match):
+                    #     emoji_name = match.group(1).strip()
+                    #     if emoji_name in allowed_emoji_names:
+                    #         return match.group(0)
 
-                        removed_emoji_tags.append(match.group(0))
-                        return ""
+                    #     removed_emoji_tags.append(match.group(0))
+                    #     return ""
 
+                    # 保留移除思维链标签的逻辑（不涉及违禁词和表情）
                     if content:
                         # 先处理只有闭合标签的半截思维链，直接移除从开头到闭合标签的全部内容
                         partial_thinking_match = re.search(
@@ -1634,22 +1636,28 @@ class OpenAIService:
                                 flags=re.DOTALL,
                             )
 
-                        # 进一步增强正则，处理 </tag>、<tag/>、<tag /> 等标签格式
-                        content = re.sub(
-                            r"</?((?!@)[^<>\s/]{1,20})\s*/?>",
-                            _strip_disallowed_emoji_tag,
-                            content,
-                        )
+                        # ========== 表情标签过滤已注释 ==========
+                        # # 进一步增强正则，处理 </tag>、<tag/>、<tag /> 等标签格式
+                        # content = re.sub(
+                        #     r"</?((?!@)[^<>\s/]{1,20})\s*/?>",
+                        #     _strip_disallowed_emoji_tag,
+                        #     content,
+                        # )
+                        # =====================================
 
-                    if removed_emoji_tags:
-                        unique_removed_tags = list(dict.fromkeys(removed_emoji_tags))
-                        log.warning(
-                            f"[{channel_label}] 检测并剔除非白名单表情标签 | user_id=%s | model=%s | count=%s | removed=%s",
-                            user_id,
-                            effective_model_name,
-                            len(removed_emoji_tags),
-                            unique_removed_tags,
-                        )
+                    # ========== 表情标签警告日志已注释 ==========
+                    # if removed_emoji_tags:
+                    #     unique_removed_tags = list(dict.fromkeys(removed_emoji_tags))
+                    #     log.warning(
+                    #         f"[{channel_label}] 检测并剔除非白名单表情标签 | user_id=%s | model=%s | count=%s | removed=%s",
+                    #         user_id,
+                    #         effective_model_name,
+                    #         len(removed_emoji_tags),
+                    #         unique_removed_tags,
+                    #     )
+
+                    # 更新 msg_to_append 的 content 为经过思维链清理后的内容
+                    msg_to_append["content"] = content
 
                     if log_detailed:
                         log.info(f"--- [{channel_label}] 模型决策：直接生成文本回复 (未调用工具) ---")
