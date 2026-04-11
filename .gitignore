@@ -311,3 +311,4 @@ src/backup/chat.db.bak.*
 src/backup/forum_sync_status.db.bak.*
 src/backup/world_book.sqlite3.bak.*
 src/backup/guidance.db.bak.*
+web/gunicorn.ctl
