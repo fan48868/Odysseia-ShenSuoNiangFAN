@@ -527,13 +527,13 @@ async def main():
     await world_book_db_manager.init_async()
     await chat_db_manager.init_async()
 
-    # 3.5. 初始化商店商品
-    # 商品已迁移到PostgreSQL，不再需要从配置文件初始化
-    # from src.chat.features.odysseia_coin.service.coin_service import (
-    #     _setup_initial_items,
-    # )
-    # await _setup_initial_items()
-    # log.info("已初始化商店商品。")
+    # 3.5. 首次部署时初始化商店商品
+    try:
+        from src.chat.features.odysseia_coin.service.coin_service import coin_service
+
+        await coin_service.seed_default_shop_items_if_empty()
+    except Exception as e:
+        log.error(f"初始化默认商店商品失败: {e}", exc_info=True)
 
     log.info("已加载并注册 AI 工具。")
 

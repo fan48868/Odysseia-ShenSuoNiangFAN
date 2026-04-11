@@ -234,6 +234,53 @@ class CoinService:
             await session.commit()
             log.info(f"已添加或更新商品: {name} ({category})")
 
+    async def seed_default_shop_items_if_empty(self) -> int:
+        """
+        仅在商店商品表为空时写入默认商品。
+
+        这样可以保证首次部署或删库重建后能自动补货，同时避免每次启动都重置
+        已有的 PostgreSQL 商品数据。
+        """
+        async with AsyncSessionLocal() as session:
+            existing_names = (
+                await session.execute(select(ShopItem.name).limit(1))
+            ).scalars().all()
+            if existing_names:
+                log.info("商店商品已存在，跳过默认商品初始化。")
+                return 0
+
+            from src.chat.config import shop_config
+
+            shop_items = shop_config.SHOP_ITEMS
+            brain_girl_eating_images = getattr(
+                shop_config, "BRAIN_GIRL_EATING_IMAGES", {}
+            )
+
+            for (
+                name,
+                description,
+                price,
+                category,
+                target,
+                effect_id,
+            ) in shop_items:
+                session.add(
+                    ShopItem(
+                        name=name,
+                        description=description,
+                        price=price,
+                        category=category,
+                        target=target,
+                        effect_id=effect_id,
+                        cg_url=brain_girl_eating_images.get(name),
+                        is_available=1,
+                    )
+                )
+
+            await session.commit()
+            log.info("商店为空，已初始化 %s 个默认商品。", len(shop_items))
+            return len(shop_items)
+
     async def get_items_by_category(self, category: str) -> list:
         """根据类别获取所有可用的商品（PostgreSQL）"""
         async with AsyncSessionLocal() as session:

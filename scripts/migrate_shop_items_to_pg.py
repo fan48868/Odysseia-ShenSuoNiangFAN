@@ -20,7 +20,7 @@ from sqlalchemy import select, delete
 
 from src.database.database import AsyncSessionLocal
 from src.database.models import ShopItem
-from src.chat.config.shop_config import SHOP_ITEMS, BRAIN_GIRL_EATING_IMAGES
+from src.chat.config import shop_config
 
 
 async def recreate_shop_items():
@@ -38,15 +38,19 @@ async def recreate_shop_items():
         # 重新导入商品
         print("开始重新导入商品数据...")
         success_count = 0
-        total_items = len(SHOP_ITEMS)
+        total_items = len(shop_config.SHOP_ITEMS)
 
-        for item_data in SHOP_ITEMS:
+        brain_girl_eating_images = getattr(
+            shop_config, "BRAIN_GIRL_EATING_IMAGES", {}
+        )
+
+        for item_data in shop_config.SHOP_ITEMS:
             # 解包商品数据
             # 格式: (name, description, price, category, target, effect_id)
             name, description, price, category, target, effect_id = item_data
 
             # 从 BRAIN_GIRL_EATING_IMAGES 获取 cg_url
-            cg_url = BRAIN_GIRL_EATING_IMAGES.get(name)
+            cg_url = brain_girl_eating_images.get(name)
 
             # 创建新商品
             new_item = ShopItem(
@@ -78,12 +82,16 @@ async def migrate_shop_items():
     print("开始迁移商店商品数据...")
 
     # 统计信息
-    total_items = len(SHOP_ITEMS)
+    total_items = len(shop_config.SHOP_ITEMS)
     success_count = 0
     skip_count = 0
 
     async with AsyncSessionLocal() as session:
-        for item_data in SHOP_ITEMS:
+        brain_girl_eating_images = getattr(
+            shop_config, "BRAIN_GIRL_EATING_IMAGES", {}
+        )
+
+        for item_data in shop_config.SHOP_ITEMS:
             # 解包商品数据
             # 格式: (name, description, price, category, target, effect_id)
             name, description, price, category, target, effect_id = item_data
@@ -100,7 +108,7 @@ async def migrate_shop_items():
                 continue
 
             # 从 BRAIN_GIRL_EATING_IMAGES 获取 cg_url
-            cg_url = BRAIN_GIRL_EATING_IMAGES.get(name)
+            cg_url = brain_girl_eating_images.get(name)
 
             # 创建新商品
             new_item = ShopItem(
@@ -136,7 +144,11 @@ async def update_existing_cg_urls():
     not_found_count = 0
 
     async with AsyncSessionLocal() as session:
-        for name, cg_url in BRAIN_GIRL_EATING_IMAGES.items():
+        brain_girl_eating_images = getattr(
+            shop_config, "BRAIN_GIRL_EATING_IMAGES", {}
+        )
+
+        for name, cg_url in brain_girl_eating_images.items():
             # 查找商品
             result = await session.execute(
                 select(ShopItem).where(ShopItem.name == name)
