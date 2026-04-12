@@ -42,6 +42,22 @@ def test_build_delivery_nonce_length():
     assert len(nonce) == 24
 
 
+def test_retry_delay_schedule():
+    assert sender._get_retry_delay_seconds(sender.PendingTextDelivery(1, "x")) == 5.0
+    assert (
+        sender._get_retry_delay_seconds(
+            sender.PendingTextDelivery(1, "x", retry_cycle_count=2)
+        )
+        == 5.0
+    )
+    assert (
+        sender._get_retry_delay_seconds(
+            sender.PendingTextDelivery(1, "x", retry_cycle_count=3)
+        )
+        == 10.0
+    )
+
+
 @pytest.mark.asyncio
 async def test_verify_sent_message_prefers_cache(monkeypatch: pytest.MonkeyPatch):
     bot = FakeBot()
@@ -79,6 +95,29 @@ async def test_send_text_reply_with_recovery_enqueues_on_uncertain_error(
     assert len(queue) == 1
     assert queue[0].reply_to_message_id == 321
     assert queue[0].content == "hello"
+
+
+@pytest.mark.asyncio
+async def test_send_text_reply_with_recovery_retries_once_before_enqueue():
+    bot = FakeBot()
+    channel = FakeChannel()
+    bot._channels[channel.id] = channel
+    message = SimpleNamespace(id=321, channel=channel)
+    attempt_counter = {"count": 0}
+
+    async def failing_reply(content, mention_author=True, nonce=None):
+        attempt_counter["count"] += 1
+        raise OSError("Cannot connect to host discord.com:443 ssl:default [None]")
+
+    channel.reply = failing_reply
+
+    delivered = await sender.send_text_reply_with_recovery(bot, message, "hello")
+
+    assert delivered is False
+    assert attempt_counter["count"] == 2
+    queue = getattr(bot, "_pending_text_deliveries")
+    assert len(queue) == 1
+    assert queue[0].retry_cycle_count == 0
 
 
 @pytest.mark.asyncio

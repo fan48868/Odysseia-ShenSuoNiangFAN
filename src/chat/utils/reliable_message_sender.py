@@ -8,11 +8,12 @@ import discord
 
 log = logging.getLogger(__name__)
 
-VERIFY_DELAY_SECONDS = 1.0
+VERIFY_DELAY_SECONDS = 2.0
 _QUEUE_ATTR = "_pending_text_deliveries"
 _QUEUE_LOCK_ATTR = "_pending_text_deliveries_lock"
 _FLUSH_LOCK_ATTR = "_pending_text_deliveries_flush_lock"
 _FLUSH_TASK_ATTR = "_pending_text_deliveries_flush_task"
+_WAKE_EVENT_ATTR = "_pending_text_deliveries_wake_event"
 
 DeliveryStatus = Literal["confirmed", "missing", "uncertain"]
 
@@ -25,6 +26,7 @@ class PendingTextDelivery:
     mention_author: bool = False
     sent_message_id: Optional[int] = None
     attempt_count: int = 0
+    retry_cycle_count: int = 0
     last_error: Optional[str] = None
 
 
@@ -37,6 +39,8 @@ def initialize_reliable_delivery_state(bot: discord.Client) -> None:
         setattr(bot, _FLUSH_LOCK_ATTR, asyncio.Lock())
     if not hasattr(bot, _FLUSH_TASK_ATTR):
         setattr(bot, _FLUSH_TASK_ATTR, None)
+    if not hasattr(bot, _WAKE_EVENT_ATTR):
+        setattr(bot, _WAKE_EVENT_ATTR, asyncio.Event())
 
 
 def _get_queue(bot: discord.Client) -> list[PendingTextDelivery]:
@@ -62,6 +66,17 @@ def _get_flush_task(bot: discord.Client) -> Optional[asyncio.Task]:
 def _set_flush_task(bot: discord.Client, task: Optional[asyncio.Task]) -> None:
     initialize_reliable_delivery_state(bot)
     setattr(bot, _FLUSH_TASK_ATTR, task)
+
+
+def _get_wake_event(bot: discord.Client) -> asyncio.Event:
+    initialize_reliable_delivery_state(bot)
+    return getattr(bot, _WAKE_EVENT_ATTR)
+
+
+def _get_retry_delay_seconds(delivery: PendingTextDelivery) -> float:
+    if delivery.retry_cycle_count < 3:
+        return 5.0
+    return 10.0
 
 
 def _is_transient_send_error(exc: Exception) -> bool:
@@ -218,6 +233,16 @@ async def enqueue_pending_text_delivery(
         delivery.attempt_count,
         delivery.sent_message_id,
     )
+    schedule_pending_text_delivery_flush(bot, reason="enqueue")
+
+
+async def _requeue_pending_delivery(
+    bot: discord.Client, delivery: PendingTextDelivery
+) -> None:
+    delivery.retry_cycle_count += 1
+    queue_lock = _get_queue_lock(bot)
+    async with queue_lock:
+        _get_queue(bot).append(delivery)
 
 
 async def send_text_reply_with_recovery(
@@ -255,11 +280,12 @@ async def send_pending_text_delivery_with_recovery(
     if status == "confirmed":
         return True
 
-    if status == "missing":
+    if status != "confirmed":
         log.warning(
-            "发送返回成功但消息未确认存在，立即重试一次 | channel_id=%s | reply_to=%s",
+            "发送未确认成功，立即补发重试一次 | channel_id=%s | reply_to=%s | status=%s",
             delivery.channel_id,
             delivery.reply_to_message_id,
+            status,
         )
         status = await _attempt_delivery(bot, delivery)
         if status == "confirmed":
@@ -289,9 +315,8 @@ async def flush_pending_text_deliveries(bot: discord.Client) -> None:
                 if delivery.sent_message_id is not None:
                     channel = await _resolve_channel(bot, delivery.channel_id)
                     if channel is None:
-                        async with queue_lock:
-                            _get_queue(bot).insert(0, delivery)
-                        return
+                        await _requeue_pending_delivery(bot, delivery)
+                        continue
 
                     status = await verify_sent_message(
                         bot,
@@ -307,9 +332,8 @@ async def flush_pending_text_deliveries(bot: discord.Client) -> None:
                         )
                         continue
                     if status == "uncertain":
-                        async with queue_lock:
-                            _get_queue(bot).insert(0, delivery)
-                        return
+                        await _requeue_pending_delivery(bot, delivery)
+                        continue
 
                 status = await _attempt_delivery(bot, delivery)
                 if status == "confirmed":
@@ -321,14 +345,12 @@ async def flush_pending_text_deliveries(bot: discord.Client) -> None:
                     )
                     continue
 
-                async with queue_lock:
-                    _get_queue(bot).insert(0, delivery)
-                return
+                await _requeue_pending_delivery(bot, delivery)
+                continue
             except Exception as exc:
                 if _is_transient_send_error(exc):
-                    async with queue_lock:
-                        _get_queue(bot).insert(0, delivery)
-                    return
+                    await _requeue_pending_delivery(bot, delivery)
+                    continue
 
                 log.error(
                     "待补发频道回复出现永久性错误，已放弃该条消息 | channel_id=%s | reply_to=%s | error=%s",
@@ -340,16 +362,46 @@ async def flush_pending_text_deliveries(bot: discord.Client) -> None:
 
 
 def schedule_pending_text_delivery_flush(
-    bot: discord.Client, *, reason: str
+    bot: discord.Client, *, reason: str, immediate: bool = False
 ) -> None:
     initialize_reliable_delivery_state(bot)
+    wake_event = _get_wake_event(bot)
+    if immediate:
+        wake_event.set()
+
     existing_task = _get_flush_task(bot)
     if existing_task is not None and not existing_task.done():
         return
 
     async def _runner() -> None:
+        should_wait_before_retry = not immediate
         try:
-            await flush_pending_text_deliveries(bot)
+            while True:
+                queue_lock = _get_queue_lock(bot)
+                async with queue_lock:
+                    queue = list(_get_queue(bot))
+
+                if not queue:
+                    return
+
+                if should_wait_before_retry:
+                    next_delay = _get_retry_delay_seconds(queue[0])
+                    log.info(
+                        "待补发频道回复仍有 %s 条，%.1f 秒后继续尝试 | first_retry_cycle=%s",
+                        len(queue),
+                        next_delay,
+                        queue[0].retry_cycle_count,
+                    )
+
+                    try:
+                        await asyncio.wait_for(wake_event.wait(), timeout=next_delay)
+                    except asyncio.TimeoutError:
+                        pass
+                    finally:
+                        wake_event.clear()
+
+                should_wait_before_retry = True
+                await flush_pending_text_deliveries(bot)
         finally:
             _set_flush_task(bot, None)
 

@@ -380,7 +380,7 @@ class GuidanceBot(commands.Bot):
 
         log.info("--------------------")
         log.info("--- 启动成功 ---")
-        schedule_pending_text_delivery_flush(self, reason="on_ready")
+        schedule_pending_text_delivery_flush(self, reason="on_ready", immediate=True)
 
     async def on_disconnect(self):
         logging.getLogger(__name__).warning(
@@ -389,7 +389,7 @@ class GuidanceBot(commands.Bot):
 
     async def on_resumed(self):
         logging.getLogger(__name__).info("已恢复与 Discord 网关的会话。")
-        schedule_pending_text_delivery_flush(self, reason="on_resumed")
+        schedule_pending_text_delivery_flush(self, reason="on_resumed", immediate=True)
 
 
 def _get_next_reconnect_delay(current_delay: float) -> float:
