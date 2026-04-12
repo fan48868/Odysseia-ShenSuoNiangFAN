@@ -38,6 +38,10 @@ from src.chat.services.gemini_service import gemini_service
 from src.chat.services.review_service import initialize_review_service
 from src.chat.features.work_game.services.work_db_service import WorkDBService
 from src.chat.utils.command_sync import sync_commands
+from src.chat.utils.reliable_message_sender import (
+    initialize_reliable_delivery_state,
+    schedule_pending_text_delivery_flush,
+)
 from src.chat.config import chat_config
 
 current_script_path = os.path.abspath(__file__)
@@ -227,6 +231,7 @@ class GuidanceBot(commands.Bot):
 
         super().__init__(**init_kwargs)
         self.last_ready_monotonic = None
+        initialize_reliable_delivery_state(self)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """
@@ -375,6 +380,7 @@ class GuidanceBot(commands.Bot):
 
         log.info("--------------------")
         log.info("--- 启动成功 ---")
+        schedule_pending_text_delivery_flush(self, reason="on_ready")
 
     async def on_disconnect(self):
         logging.getLogger(__name__).warning(
@@ -383,6 +389,7 @@ class GuidanceBot(commands.Bot):
 
     async def on_resumed(self):
         logging.getLogger(__name__).info("已恢复与 Discord 网关的会话。")
+        schedule_pending_text_delivery_flush(self, reason="on_resumed")
 
 
 def _get_next_reconnect_delay(current_delay: float) -> float:

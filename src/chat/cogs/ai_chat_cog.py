@@ -6,7 +6,6 @@ import logging
 from typing import Optional
 import re
 import io
-import asyncio
 
 # 导入新的 Service
 from src.chat.services.chat_service import chat_service
@@ -26,6 +25,12 @@ from src.chat.features.chat_settings.services.chat_settings_service import (
     chat_settings_service,
 )
 from src.chat.services.context_service_test import get_context_service
+from src.chat.utils.reliable_message_sender import (
+    PendingTextDelivery,
+    enqueue_pending_text_delivery,
+    send_channel_text_with_recovery,
+    send_text_reply_with_recovery,
+)
 
 log = logging.getLogger(__name__)
 
@@ -67,9 +72,62 @@ class AIChatCog(commands.Cog):
         if not chunks:
             return
 
-        await message.reply(chunks[0], mention_author=True)
-        for chunk in chunks[1:]:
-            await message.channel.send(chunk)
+        queue_remaining_from = None
+
+        delivered_now = await self._send_channel_reply_with_recovery(
+            message, chunks[0], mention_author=True
+        )
+        if delivered_now:
+            for index, chunk in enumerate(chunks[1:], start=1):
+                delivered_now = await self._send_channel_message_with_recovery(
+                    message.channel, chunk
+                )
+                if not delivered_now:
+                    queue_remaining_from = index + 1
+                    break
+        else:
+            queue_remaining_from = 1
+
+        if delivered_now and queue_remaining_from is None:
+            return
+
+        for chunk in chunks[queue_remaining_from:]:
+            await enqueue_pending_text_delivery(
+                self.bot,
+                PendingTextDelivery(
+                    channel_id=message.channel.id,
+                    content=chunk,
+                ),
+            )
+
+    async def _send_channel_reply_with_recovery(
+        self,
+        message: discord.Message,
+        content: str,
+        *,
+        mention_author: bool = True,
+    ) -> bool:
+        if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
+            await message.reply(content, mention_author=mention_author)
+            return True
+
+        return await send_text_reply_with_recovery(
+            self.bot,
+            message,
+            content,
+            mention_author=mention_author,
+        )
+
+    async def _send_channel_message_with_recovery(
+        self,
+        channel: discord.abc.Messageable,
+        content: str,
+    ) -> bool:
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            await channel.send(content)
+            return True
+
+        return await send_channel_text_with_recovery(self.bot, channel, content)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -144,108 +202,96 @@ class AIChatCog(commands.Cog):
 
             # 在退出 typing 状态后发送回复
             if response_text:
-                target_retry_error = "Cannot connect to host discord.com:443 ssl:default [None]"
-                retry_delays = [2, 4, 6]  # 仅用于目标错误
-                retry_count = 0
+                try:
+                    last_tools = getattr(gemini_service, "last_called_tools", [])
 
-                while True:
-                    try:
-                        last_tools = getattr(gemini_service, "last_called_tools", [])
-
-                        if "summarize_channel" in last_tools:
-                            log.info("调用了总结工具, 尝试转为图片发送。")
-                            image_bytes = text_to_summary_image(response_text)
-                            if image_bytes:
-                                with io.BytesIO(image_bytes) as image_file:
-                                    await message.reply(
-                                        file=discord.File(image_file, "summary.png"),
-                                        mention_author=True,
-                                    )
-                                return
-                            else:
-                                log.error("总结图片生成失败，将作为文本尝试发送。")
-
-                        is_unrestricted = (
-                            message.channel.id in chat_config.UNRESTRICTED_CHANNEL_IDS
-                            or isinstance(message.channel, discord.Thread)
-                        )
-                        if is_unrestricted:
-                            await message.reply(response_text, mention_author=True)
-                            return
-
-                        if (
-                            self._get_text_length_without_emojis(response_text)
-                            > MESSAGE_SETTINGS["DM_THRESHOLD"]
-                        ):
-                            try:
-                                channel_mention = (
-                                    message.channel.mention
-                                    if isinstance(
-                                        message.channel,
-                                        (discord.TextChannel, discord.Thread),
-                                    )
-                                    else "你们的私信"
-                                )
-
-                                await message.author.send(
-                                    f"刚刚在 {channel_mention} 频道里，你想听我说的话有点多，在这里悄悄告诉你哦：\n\n{response_text}"
-                                )
-                                log.info(
-                                    f"回复因过长已通过私信发送给 {message.author.display_name}"
-                                )
-                            except discord.Forbidden:
-                                log.warning(
-                                    f"无法通过私信发送给 {message.author.display_name}，将在原频道回复提示信息。"
-                                )
+                    if "summarize_channel" in last_tools:
+                        log.info("调用了总结工具, 尝试转为图片发送。")
+                        image_bytes = text_to_summary_image(response_text)
+                        if image_bytes:
+                            with io.BytesIO(image_bytes) as image_file:
                                 await message.reply(
-                                    "字太多啦，我不要刷屏。你的私信又关了，我就不给你讲啦！",
+                                    file=discord.File(image_file, "summary.png"),
                                     mention_author=True,
                                 )
                             return
+                        else:
+                            log.error("总结图片生成失败，将作为文本尝试发送。")
 
-                        await message.reply(response_text, mention_author=True)
-                        return
-
-                    except discord.errors.HTTPException as e:
-                        log.warning(f"发送回复时发生HTTP错误: {e}")
-                        if (
-                            e.status == 400
-                            and e.code == 50035
-                            and "Must be 2000 or fewer in length" in str(e)
-                        ):
-                            try:
-                                await self._send_long_response_in_channel(
-                                    message, response_text
-                                )
-                                log.info(
-                                    f"因消息超长，已在原频道分段发送给 {message.author.display_name}"
-                                )
-                            except Exception as split_error:
-                                log.error(
-                                    f"消息分段发送失败: {split_error}", exc_info=True
-                                )
-                                await message.reply(
-                                    "由于回复内容过长，分段发送也失败啦！",
-                                    mention_author=True,
-                                )
-                        return
-
-                    except Exception as e:
-                        log.error(f"发送回复时发生未知错误: {e}", exc_info=True)
-
-                        if target_retry_error not in str(e):
-                            return
-
-                        if retry_count >= len(retry_delays):
-                            log.error("目标网络错误重试 3 次后仍失败，放弃本次回复。")
-                            return
-
-                        delay = retry_delays[retry_count]
-                        retry_count += 1
-                        log.warning(
-                            f"命中目标网络错误，将在 {delay} 秒后进行第 {retry_count}/3 次重试。"
+                    is_unrestricted = (
+                        message.channel.id in chat_config.UNRESTRICTED_CHANNEL_IDS
+                        or isinstance(message.channel, discord.Thread)
+                    )
+                    if is_unrestricted:
+                        await self._send_channel_reply_with_recovery(
+                            message, response_text, mention_author=True
                         )
-                        await asyncio.sleep(delay)
+                        return
+
+                    if (
+                        self._get_text_length_without_emojis(response_text)
+                        > MESSAGE_SETTINGS["DM_THRESHOLD"]
+                    ):
+                        try:
+                            channel_mention = (
+                                message.channel.mention
+                                if isinstance(
+                                    message.channel,
+                                    (discord.TextChannel, discord.Thread),
+                                )
+                                else "你们的私信"
+                            )
+
+                            await message.author.send(
+                                f"刚刚在 {channel_mention} 频道里，你想听我说的话有点多，在这里悄悄告诉你哦：\n\n{response_text}"
+                            )
+                            log.info(
+                                f"回复因过长已通过私信发送给 {message.author.display_name}"
+                            )
+                        except discord.Forbidden:
+                            log.warning(
+                                f"无法通过私信发送给 {message.author.display_name}，将在原频道回复提示信息。"
+                            )
+                            await self._send_channel_reply_with_recovery(
+                                message,
+                                "字太多啦，我不要刷屏。你的私信又关了，我就不给你讲啦！",
+                                mention_author=True,
+                            )
+                        return
+
+                    await self._send_channel_reply_with_recovery(
+                        message, response_text, mention_author=True
+                    )
+                    return
+
+                except discord.errors.HTTPException as e:
+                    log.warning(f"发送回复时发生HTTP错误: {e}")
+                    if (
+                        e.status == 400
+                        and e.code == 50035
+                        and "Must be 2000 or fewer in length" in str(e)
+                    ):
+                        try:
+                            await self._send_long_response_in_channel(
+                                message, response_text
+                            )
+                            log.info(
+                                f"因消息超长，已在原频道分段发送给 {message.author.display_name}"
+                            )
+                        except Exception as split_error:
+                            log.error(
+                                f"消息分段发送失败: {split_error}", exc_info=True
+                            )
+                            await self._send_channel_reply_with_recovery(
+                                message,
+                                "由于回复内容过长，分段发送也失败啦！",
+                                mention_author=True,
+                            )
+                    return
+
+                except Exception as e:
+                    log.error(f"发送回复时发生未知错误: {e}", exc_info=True)
+                    return
         finally:
             if priority_marked:
                 try:
