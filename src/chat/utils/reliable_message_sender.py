@@ -2,7 +2,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
+from typing import Literal, Optional
 
 import discord
 
@@ -94,6 +94,11 @@ def _find_cached_message(
     return None
 
 
+def _build_delivery_nonce() -> str:
+    # Discord 要求 nonce 长度不超过 25 个字符。
+    return uuid.uuid4().hex[:24]
+
+
 async def _resolve_channel(
     bot: discord.Client, channel_id: int
 ) -> Optional[discord.abc.Messageable]:
@@ -153,7 +158,7 @@ async def verify_sent_message(
 async def _dispatch_text_delivery(
     channel: discord.abc.Messageable, delivery: PendingTextDelivery
 ) -> discord.Message:
-    nonce = uuid.uuid4().hex
+    nonce = _build_delivery_nonce()
 
     if delivery.reply_to_message_id is not None:
         if not hasattr(channel, "get_partial_message"):

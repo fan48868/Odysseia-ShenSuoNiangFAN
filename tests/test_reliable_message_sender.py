@@ -34,6 +34,14 @@ class FakeChannel:
         return SimpleNamespace(id=456)
 
 
+def test_build_delivery_nonce_length():
+    nonce = sender._build_delivery_nonce()
+
+    assert isinstance(nonce, str)
+    assert len(nonce) <= 25
+    assert len(nonce) == 24
+
+
 @pytest.mark.asyncio
 async def test_verify_sent_message_prefers_cache(monkeypatch: pytest.MonkeyPatch):
     bot = FakeBot()
