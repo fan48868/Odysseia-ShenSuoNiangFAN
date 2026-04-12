@@ -25,7 +25,6 @@ from src.chat.config import chat_config
 from src.chat.features.chat_settings.services.chat_settings_service import (
     chat_settings_service,
 )
-from src.chat.features.odysseia_coin.service.coin_service import coin_service
 from src.chat.services.context_service_test import get_context_service
 
 log = logging.getLogger(__name__)
@@ -126,17 +125,6 @@ class AIChatCog(commands.Cog):
                 ):
                     log.info(
                         f"私信总开关已关闭，用户 {message.author.id} 非开发者，跳过私信处理。"
-                    )
-                    return
-
-            # 新增：检查是否在帖子中，以及帖子创建者是否禁用了回复
-            if isinstance(message.channel, discord.Thread):
-                thread_owner = message.channel.owner
-                if thread_owner and await coin_service.blocks_thread_replies(
-                    thread_owner.id
-                ):
-                    log.info(
-                        f"帖子 '{message.channel.name}' 的创建者 {thread_owner.id} 已禁用回复，跳过消息处理。"
                     )
                     return
 

@@ -60,44 +60,12 @@ class ChatService:
             )
 
         if not effective_config.get("is_chat_enabled", True):
-            # 检查是否满足通行许可的例外条件
-            pass_is_granted = False
-            if isinstance(message.channel, discord.Thread) and message.channel.owner_id:
-                # 修正逻辑：只有当帖主明确设置了个人CD时，才算拥有"通行许可"
-                owner_id = message.channel.owner_id
-                query = "SELECT thread_cooldown_seconds, thread_cooldown_duration, thread_cooldown_limit FROM user_coins WHERE user_id = ?"
-                owner_config_row = await chat_db_manager._execute(
-                    chat_db_manager._db_transaction, query, (owner_id,), fetch="one"
-                )
-
-                if owner_config_row:
-                    has_personal_cd = owner_config_row[
-                        "thread_cooldown_seconds"
-                    ] is not None or (
-                        owner_config_row["thread_cooldown_duration"] is not None
-                        and owner_config_row["thread_cooldown_limit"] is not None
-                    )
-                    if has_personal_cd:
-                        pass_is_granted = True
-                        log.info(
-                            f"帖主 {owner_id} 拥有个人CD设置（通行许可），覆盖频道 {message.channel.id} 的聊天限制。"
-                        )
-
-            # 如果没有授予通行权，则按原逻辑返回 False
-            if not pass_is_granted:
-                log.info(f"频道 {message.channel.id} 聊天已禁用，跳过前置检查。")
-                return False
-
-        # 3. 新版冷却时间检查
-        if await chat_settings_service.is_user_on_cooldown(
-            author.id, message.channel.id, effective_config
-        ):
             log.info(
-                f"用户 {author.id} 在频道 {message.channel.id} 处于新版冷却状态，跳过前置检查。"
+                f"频道 {message.channel.id} 聊天已禁用，跳过前置检查。"
             )
             return False
 
-        # 4. 黑名单检查
+        # 3. 黑名单检查
         if await chat_db_manager.is_user_blacklisted(author.id, guild_id):
             log.info(
                 f"用户 {author.id} 在服务器 {guild_id} 被拉黑，已启用惩戒替换。"
@@ -124,13 +92,6 @@ class ChatService:
         """
         author = message.author
         guild_id = message.guild.id if message.guild else 0
-
-        # --- 获取最新的有效配置 ---
-        effective_config = {}
-        if isinstance(message.channel, discord.abc.GuildChannel):
-            effective_config = await chat_settings_service.get_effective_channel_config(
-                message.channel
-            )
 
         # --- 个人记忆消息计数 ---
         user_profile_data = await world_book_service.get_profile_by_discord_id(
@@ -310,7 +271,7 @@ class ChatService:
             )
 
             if not ai_response:
-                log.info(f"AI服务未返回回复（可能由于冷却），跳过用户 {author.id}。")
+                log.info(f"AI服务未返回回复，跳过用户 {author.id}。")
                 return None
 
             # --- 新增：调用新的个人记忆服务 ---
@@ -324,11 +285,6 @@ class ChatService:
                         ai_response=ai_response,
                     )
                 )
-
-            # 更新新系统的CD
-            await chat_settings_service.update_user_cooldown(
-                author.id, message.channel.id, effective_config
-            )
 
             # 5. --- 后处理与格式化 ---
             final_response = self._format_ai_response(ai_response)

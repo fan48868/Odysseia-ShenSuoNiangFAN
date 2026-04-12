@@ -228,6 +228,16 @@ class TutorialManagementView(discord.ui.View):
             return discord.Embed(title="错误", description="面板未初始化。")
         return await self.panel.create_embed()
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message(
+                "这不是你的知识库界面哦！", ephemeral=True
+            )
+            return False
+
+        self.interaction = interaction
+        return True
+
     async def on_timeout(self):
         for item in self.children:
             if isinstance(item, (discord.ui.Button, discord.ui.Select)):

@@ -85,9 +85,7 @@ async def apply_settings():
                 entity_id=entity_id,
                 entity_type=entity_type,
                 is_chat_enabled=setting.get("is_chat_enabled"),
-                cooldown_seconds=setting.get("cooldown_seconds"),
-                cooldown_duration=setting.get("cooldown_duration"),
-                cooldown_limit=setting.get("cooldown_limit"),
+                active_chat_cache_enabled=setting.get("active_chat_cache_enabled"),
             )
             logging.info(f"成功应用设置 -> 实体ID: {entity_id} ({entity_type})")
             success_count += 1
