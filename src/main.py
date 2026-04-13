@@ -8,16 +8,15 @@ import time
 import threading
 import requests
 from discord.ext import commands
-from dotenv import load_dotenv
 from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.backup.backup_manager import backup_databases
+from src.runtime_env import load_project_dotenv
 
 # 在所有其他导入之前，尽早加载环境变量
 # 这样可以确保所有模块在加载时都能访问到 .env 文件中定义的配置
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROJECT_DOTENV_PATH = os.path.join(PROJECT_ROOT, ".env")
-load_dotenv(dotenv_path=PROJECT_DOTENV_PATH, override=False, encoding="utf-8")
+PROJECT_DOTENV_PATH = load_project_dotenv(__file__, parents=1)
 
 # 从我们自己的模块中导入
 from src import config
