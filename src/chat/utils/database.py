@@ -215,6 +215,15 @@ class ChatDatabaseManager:
                 );
             """)
 
+            cursor.execute("PRAGMA table_info(users);")
+            user_columns = [info[1] for info in cursor.fetchall()]
+            if "toilet_enabled" not in user_columns:
+                cursor.execute("""
+                    ALTER TABLE users
+                    ADD COLUMN toilet_enabled BOOLEAN NOT NULL DEFAULT 0;
+                """)
+                log.info("已向 users 表添加 toilet_enabled 列。")
+
             # --- 类脑币系统表 ---
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_coins (
@@ -946,7 +955,11 @@ class ChatDatabaseManager:
     # --- 用户档案管理 ---
     async def get_user_profile(self, user_id: int) -> Optional[sqlite3.Row]:
         """获取用户的核心档案信息，例如是否解锁了个人记忆功能。"""
-        query = "SELECT user_id, has_personal_memory, personal_summary FROM users WHERE user_id = ?"
+        query = """
+            SELECT user_id, has_personal_memory, personal_summary, toilet_enabled
+            FROM users
+            WHERE user_id = ?
+        """
         try:
             return await self._execute(
                 self._db_transaction, query, (user_id,), fetch="one"
@@ -976,6 +989,27 @@ class ChatDatabaseManager:
         except sqlite3.OperationalError as e:
             log.error(f"为用户 {user_id} 更新或创建个人记忆摘要失败: {e}")
             raise
+
+    async def get_toilet_enabled(self, user_id: int) -> bool:
+        """获取用户是否启用了马桶过滤。"""
+        query = "SELECT toilet_enabled FROM users WHERE user_id = ?"
+        row = await self._execute(
+            self._db_transaction, query, (user_id,), fetch="one"
+        )
+        return bool(row["toilet_enabled"]) if row else False
+
+    async def set_toilet_enabled(self, user_id: int, enabled: bool) -> None:
+        """更新或创建用户的马桶过滤状态。"""
+        query = """
+            INSERT INTO users (user_id, toilet_enabled)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                toilet_enabled = excluded.toilet_enabled;
+        """
+        await self._execute(
+            self._db_transaction, query, (user_id, int(enabled)), commit=True
+        )
+        log.info("已更新用户 %s 的马桶状态为: %s", user_id, enabled)
 
     # --- 聊天设置管理 ---
 

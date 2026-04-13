@@ -192,6 +192,11 @@ class GuidanceBot(commands.Bot):
     """机器人类，继承自 commands.Bot"""
 
     def __init__(self):
+        class BakaHelpCommand(commands.MinimalHelpCommand):
+            async def send_bot_help(self, mapping):
+                destination = self.get_destination()
+                await destination.send("# BAKA")
+
         # 设置机器人需要监听的事件
         intents = discord.Intents.default()
         intents.members = True  # 需要监听成员加入、角色变化
@@ -222,7 +227,10 @@ class GuidanceBot(commands.Bot):
             "command_prefix": "!",
             "intents": intents,
             "debug_guilds": self.debug_guild_ids,
+            "help_command": None,
         }
+        if os.getenv("BAKA", "").strip().lower() == "true":
+            init_kwargs["help_command"] = BakaHelpCommand()
         if config.PROXY_URL:
             init_kwargs["proxy"] = config.PROXY_URL
 

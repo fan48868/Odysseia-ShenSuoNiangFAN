@@ -19,6 +19,7 @@ COMMUNITY_MEMBER_UPLOAD_EFFECT_ID = "upload_community_member"
 SELL_BODY_EVENT_SUBMISSION_EFFECT_ID = "submit_sell_body_event"
 CLEAR_PERSONAL_MEMORY_ITEM_EFFECT_ID = "clear_personal_memory"
 VIEW_PERSONAL_MEMORY_ITEM_EFFECT_ID = "view_personal_memory"
+TOILET_FILTER_ITEM_EFFECT_ID = "toggle_toilet_filter"
 
 REMOVED_ITEM_EFFECT_IDS = {
     "disable_thread_commentor",
@@ -513,6 +514,20 @@ class CoinService:
                     True,
                     None,
                     _select_random_cg_url(item.get("cg_url")),
+                )
+            elif item_effect == TOILET_FILTER_ITEM_EFFECT_ID:
+                current_state = await chat_db_manager.get_toilet_enabled(user_id)
+                user_profile = await chat_db_manager.get_user_profile(user_id)
+                if not user_profile:
+                    await chat_db_manager.set_toilet_enabled(user_id, current_state)
+
+                return (
+                    True,
+                    "",
+                    new_balance,
+                    False,
+                    None,
+                    None,
                 )
             else:
                 # 其他未知效果，不使用背包系统

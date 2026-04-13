@@ -15,6 +15,7 @@ from src.chat.features.odysseia_coin.service.coin_service import (
     SELL_BODY_EVENT_SUBMISSION_EFFECT_ID,
     CLEAR_PERSONAL_MEMORY_ITEM_EFFECT_ID,
     VIEW_PERSONAL_MEMORY_ITEM_EFFECT_ID,
+    TOILET_FILTER_ITEM_EFFECT_ID,
 )
 
 # SHOP_ITEMS列表仅用于数据迁移，实际商品数据存储在PostgreSQL的shop.shop_items表中
@@ -35,6 +36,14 @@ SHOP_ITEMS = [
         "物品-给自己",
         "self",
         CLEAR_PERSONAL_MEMORY_ITEM_EFFECT_ID,
+    ),
+    (
+        "马桶",
+        "控制神所娘是否向你抛屎",
+        0,
+        "物品-给自己",
+        "self",
+        TOILET_FILTER_ITEM_EFFECT_ID,
     ),
     (
         "知识纸条",

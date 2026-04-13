@@ -20,6 +20,7 @@ from src.chat.features.odysseia_coin.service.coin_service import (
     WORLD_BOOK_CONTRIBUTION_ITEM_EFFECT_ID,
     COMMUNITY_MEMBER_UPLOAD_EFFECT_ID,
     SELL_BODY_EVENT_SUBMISSION_EFFECT_ID,
+    TOILET_FILTER_ITEM_EFFECT_ID,
 )
 from src.chat.config import chat_config
 from src.chat.features.odysseia_coin.service.shop_service import shop_service
@@ -29,6 +30,7 @@ from src.chat.features.tools.tool_metadata import (
 from src.chat.features.tools.services.user_tool_settings_service import (
     user_tool_settings_service,
 )
+from src.chat.utils.database import chat_db_manager
 
 
 if TYPE_CHECKING:
@@ -58,6 +60,53 @@ class ShopSelect(discord.ui.Select[ViewT]):
     @property
     def view(self) -> ViewT:
         return cast(ViewT, super().view)
+
+
+TOILET_PANEL_TEXT = "这是一个神奇马桶，启动后，会拦截神所娘抛给你的💩"
+TOILET_ENABLED_TEXT = "已启用马桶，以后神所娘不能朝你抛屎了"
+TOILET_DISABLED_TEXT = "马桶已关闭，神所娘可以继续朝你扔大份了😈"
+
+
+class ToiletToggleView(discord.ui.View):
+    """购买马桶后展示的状态控制面板。"""
+
+    def __init__(self, owner_id: int, enabled: bool):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.enabled = enabled
+        self.toggle_button = discord.ui.Button()
+        self.toggle_button.callback = self.toggle_callback
+        self._sync_button_state()
+        self.add_item(self.toggle_button)
+
+    def _sync_button_state(self):
+        self.toggle_button.label = "当前已启用" if self.enabled else "当前已禁用"
+        self.toggle_button.style = (
+            discord.ButtonStyle.success
+            if self.enabled
+            else discord.ButtonStyle.danger
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "这不是你的马桶面板。", ephemeral=True
+            )
+            return False
+        return True
+
+    async def toggle_callback(self, interaction: discord.Interaction):
+        self.enabled = not self.enabled
+        await chat_db_manager.set_toilet_enabled(self.owner_id, self.enabled)
+        self._sync_button_state()
+        await interaction.response.edit_message(content=TOILET_PANEL_TEXT, view=self)
+        await interaction.followup.send(
+            TOILET_ENABLED_TEXT if self.enabled else TOILET_DISABLED_TEXT,
+            ephemeral=True,
+        )
+
+    async def on_timeout(self):
+        self.toggle_button.disabled = True
 
 
 # --- 活动UI组件 ---
@@ -548,7 +597,9 @@ class PurchaseButton(ShopButton["SimpleShopView"]):
         )
 
         final_message = message
-        if success and embed_data:
+        if success and item.get("effect_id") == TOILET_FILTER_ITEM_EFFECT_ID:
+            await self.send_toilet_status_panel(interaction)
+        elif success and embed_data:
             embed = discord.Embed(
                 title=embed_data["title"],
                 description=embed_data["description"],
@@ -565,6 +616,15 @@ class PurchaseButton(ShopButton["SimpleShopView"]):
         if success:
             self.view.balance = new_balance
             await self.view._update_shop_embed(interaction)
+
+    async def send_toilet_status_panel(self, interaction: discord.Interaction):
+        enabled = await chat_db_manager.get_toilet_enabled(interaction.user.id)
+        view = ToiletToggleView(interaction.user.id, enabled)
+        await interaction.followup.send(
+            TOILET_PANEL_TEXT,
+            view=view,
+            ephemeral=True,
+        )
 
 
 class RefreshBalanceButton(ShopButton["SimpleShopView"]):

@@ -620,6 +620,18 @@ class GeminiService:
         # 3. Replace custom emoji placeholders using the centralized function
         formatted = replace_emojis(formatted)
 
+        if await chat_db_manager.get_toilet_enabled(user_id):
+            filtered_response = formatted
+            stripped = formatted.strip()
+            if stripped in {"💩", "# 💩"}:
+                filtered_response = formatted.replace("💩", "🐷")
+            else:
+                filtered_response = formatted.replace("💩", "")
+
+            if filtered_response != formatted:
+                log.info("已为用户 %s 剔除💩。", user_id)
+                formatted = filtered_response
+
         return formatted
 
     @staticmethod
