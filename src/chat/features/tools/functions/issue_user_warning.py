@@ -4,6 +4,7 @@ from typing import Dict, Any
 from datetime import datetime, timezone, timedelta
 import random
 import discord
+from src.chat.features.tools.tool_metadata import tool_metadata
 
 from src.chat.utils.database import chat_db_manager
 from src.chat.config import chat_config
@@ -14,6 +15,12 @@ log = logging.getLogger(__name__)
 _admin_roles_env = os.getenv("ADMIN_ROLE_IDS", "")
 ADMIN_ROLE_IDS = {role_id.strip() for role_id in _admin_roles_env.split(",") if role_id.strip()}
 
+@tool_metadata(
+    name="警告工具",
+    description="对用户发出警告",
+    emoji="🛡️",
+    category="工具",
+)
 # （如果你用到了工具装饰器，记得加上 @tool_metadata）
 async def issue_user_warning(**kwargs) -> Dict[str, Any]:
     """

@@ -33,7 +33,7 @@ DISABLED_TOOLS = (
 
 # 隐藏的工具列表（用户在UI中看不到，也无法禁用的工具）
 # 这些工具是系统必须保留的，不应该让用户控制
-HIDDEN_TOOLS = ["issue_user_warning"]
+HIDDEN_TOOLS = [""]
 
 # --- Gemini AI 配置 ---
 # 定义要使用的 Gemini 模型名称
