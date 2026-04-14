@@ -599,23 +599,17 @@ class OpenAIService:
                 effective_model_name
             )
             if validation_error:
-                return self._apply_blacklist_notice(
-                    validation_error, blacklist_punishment_active
-                )
+                return validation_error
         elif is_custom_model:
             validation_error = self.custom_model_client.get_validation_error(
                 runtime_config=custom_runtime_config
             )
             if validation_error:
-                return self._apply_blacklist_notice(
-                    validation_error, blacklist_punishment_active
-                )
+                return validation_error
         else:
             validation_error = self.kimi_model_client.get_validation_error()
             if validation_error:
-                return self._apply_blacklist_notice(
-                    validation_error, blacklist_punishment_active
-                )
+                return validation_error
 
         should_enable_kimi_web_search = False
         if is_kimi_model:
@@ -1470,10 +1464,7 @@ class OpenAIService:
                             used_api_url=used_api_url,
                             response_text=response_text,
                         )
-                        return self._apply_blacklist_notice(
-                            "custom 通道返回了无法解析的流式响应，请稍后再试。",
-                            blacklist_punishment_active,
-                        )
+                        return "custom 通道返回了无法解析的流式响应，请稍后再试。"
 
                 try:
                     if result is None:
@@ -1496,10 +1487,7 @@ class OpenAIService:
                             used_kimi_key_tail,
                             body_preview,
                         )
-                        return self._apply_blacklist_notice(
-                            "Kimi 通道返回了非标准响应（非 JSON），请稍后再试。",
-                            blacklist_punishment_active,
-                        )
+                        return "Kimi 通道返回了非标准响应（非 JSON），请稍后再试。"
 
                     if is_custom_model:
                         body_preview = response_text[:1200] if response_text else "<empty>"
@@ -1514,10 +1502,7 @@ class OpenAIService:
                             used_api_url,
                             body_preview,
                         )
-                        return self._apply_blacklist_notice(
-                            "custom 通道返回了非标准响应（非 JSON），请稍后再试。",
-                            blacklist_punishment_active,
-                        )
+                        return "custom 通道返回了非标准响应（非 JSON），请稍后再试。"
 
                     raise
 
@@ -1702,9 +1687,7 @@ class OpenAIService:
                     response_text = await self.post_process_response(
                         content, user_id, guild_id
                     )
-                    return self._apply_blacklist_notice(
-                        response_text, blacklist_punishment_active
-                    )
+                    return response_text
 
                 if log_detailed:
                     log.info(
@@ -1821,10 +1804,7 @@ class OpenAIService:
                     )
 
             self.last_called_tools = called_tool_names
-            return self._apply_blacklist_notice(
-                "哎呀，我好像陷入了一个复杂的思考循环里，换个话题聊聊吧！",
-                blacklist_punishment_active,
-            )
+            return "哎呀，我好像陷入了一个复杂的思考循环里，换个话题聊聊吧！"
 
         except NoAvailableKimiKeyError as e:
             err_msg = str(e) or "所有 Key 当前不可用（可能均在冷却或次日封禁中）。"
@@ -1832,9 +1812,7 @@ class OpenAIService:
             # 仅在特定消息时发送私信
             if "冷却" in err_msg:
                 await self.kimi_model_client.notify_alert(err_msg)
-            return self._apply_blacklist_notice(
-                err_msg, blacklist_punishment_active
-            )
+            return err_msg
 
         except httpx.HTTPStatusError as e:
             error_info = f"{type(e).__name__}: {str(e)}"
@@ -1848,11 +1826,7 @@ class OpenAIService:
             log.error(f"{channel_label} API 调用失败: {error_info}", exc_info=True)
             log.error(f"{channel_label} 致命错误详情: {response_text}")
 
-            short_detail = response_text[:500] if response_text else "无响应体"
-            return self._apply_blacklist_notice(
-                f"{channel_label} 连接失败: {error_info}。详情: {short_detail}",
-                blacklist_punishment_active,
-            )
+            return f"{channel_label} 连接失败: {error_info}。详情: {short_detail}"
 
         except Exception as e:
             if isinstance(e, httpx.RequestError):
@@ -1870,19 +1844,10 @@ class OpenAIService:
                     err_fields["request_url"],
                     exc_info=True,
                 )
-                return self._apply_blacklist_notice(
-                    (
-                        f"哎呀，{channel_label} 网关好像闹别扭了：{err_fields['exc_type']}。"
-                        "等会再试吧。"
-                    ),
-                    blacklist_punishment_active,
-                )
+                return f"哎呀，{channel_label} 网关好像闹别扭了：{err_fields['exc_type']}。等会再试吧。"
 
             error_info = f"{type(e).__name__}: {str(e)}"
             log.error(f"{channel_label} API 调用失败: {error_info}", exc_info=True)
-            return self._apply_blacklist_notice(
-                f"{channel_label} 连接失败: {error_info}。请检查日志或配置。",
-                blacklist_punishment_active,
-            )
+            return f"{channel_label} 连接失败: {error_info}。请检查日志或配置。"
         finally:
             await http_client.aclose()
