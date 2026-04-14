@@ -380,24 +380,28 @@ class AIChatCog(commands.Cog):
                     location_name,
                 )
 
+            async def _run_generation_and_delivery() -> None:
+                generated_reply = await _run_generation()
+                if generated_reply is None:
+                    await reply_recovery_manager.drop_task(
+                        task_id, reason=f"{reason}_no_reply"
+                    )
+                    return
+
+                last_tools = list(getattr(gemini_service, "last_called_tools", []))
+                await self._deliver_generated_reply(
+                    message,
+                    generated_reply,
+                    task_id=task_id,
+                    attempt_token=attempt_token,
+                    last_tools=last_tools,
+                )
+
             if use_typing:
                 async with self._best_effort_typing(message.channel):
-                    generated_reply = await _run_generation()
+                    await _run_generation_and_delivery()
             else:
-                generated_reply = await _run_generation()
-
-            if generated_reply is None:
-                await reply_recovery_manager.drop_task(task_id, reason=f"{reason}_no_reply")
-                return
-
-            last_tools = list(getattr(gemini_service, "last_called_tools", []))
-            await self._deliver_generated_reply(
-                message,
-                generated_reply,
-                task_id=task_id,
-                attempt_token=attempt_token,
-                last_tools=last_tools,
-            )
+                await _run_generation_and_delivery()
         except Exception as exc:
             log.error(
                 "处理回复任务失败 | task_id=%s | reason=%s | error=%s",
