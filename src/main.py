@@ -41,6 +41,7 @@ from src.chat.utils.reliable_message_sender import (
     initialize_reliable_delivery_state,
     schedule_pending_text_delivery_flush,
 )
+from src.chat.services.reply_recovery_manager import reply_recovery_manager
 from src.chat.config import chat_config
 
 current_script_path = os.path.abspath(__file__)
@@ -56,6 +57,9 @@ enable_webui = os.getenv("ENABLE_WEBUI", "true").lower() == "true"
 webui_log_batch_size = int(os.getenv("WEBUI_LOG_BATCH_SIZE", "200"))
 webui_log_timeout = float(os.getenv("WEBUI_LOG_TIMEOUT", "5.0"))
 webui_log_backlog_limit = int(os.getenv("WEBUI_LOG_BACKLOG_LIMIT", "5000"))
+webui_log_max_consecutive_failures = int(
+    os.getenv("WEBUI_LOG_MAX_CONSECUTIVE_FAILURES", "5")
+)
 discord_reconnect_base_delay = float(
     os.getenv("DISCORD_RECONNECT_BASE_DELAY", "5")
 )
@@ -80,6 +84,7 @@ class QueueHandler(logging.Handler):
 
 def heartbeat_sender():
     pending_logs = []
+    consecutive_failures = 0
     while 1:
         time.sleep(heartbeat_interval)
         while len(pending_logs) < webui_log_batch_size and not log_queue.empty():
@@ -100,19 +105,34 @@ def heartbeat_sender():
             }
             response = requests.post(log_server_url, json=payload, timeout=webui_log_timeout)
             if response.status_code != 200:
+                consecutive_failures += 1
                 print(
                     f"Heartbeat Error: Received status {response.status_code}",
                     file=sys.stderr,
                 )  # 不适用logging
             else:
+                consecutive_failures = 0
                 if logs_to_send:
                     pending_logs = pending_logs[len(logs_to_send):]
 
         except requests.exceptions.RequestException as e:
+            consecutive_failures += 1
             print(
                 f"Heartbeat Error: Could not connet to {log_server_url}.\nDetail:{e}",
                 file=sys.stderr,
             )
+
+        if (
+            webui_log_max_consecutive_failures > 0
+            and consecutive_failures >= webui_log_max_consecutive_failures
+        ):
+            print(
+                "Heartbeat Disabled: WebUI 日志上报连续失败 "
+                f"{consecutive_failures} 次，已停止继续尝试。"
+                f" target={log_server_url}",
+                file=sys.stderr,
+            )
+            break
 
 
 # --- WebUI_end ---
@@ -387,6 +407,7 @@ class GuidanceBot(commands.Bot):
 
         log.info("--------------------")
         log.info("--- 启动成功 ---")
+        await reply_recovery_manager.resume_unfinished_tasks(self, reason="on_ready")
         schedule_pending_text_delivery_flush(self, reason="on_ready", immediate=True)
 
     async def on_disconnect(self):
@@ -396,6 +417,7 @@ class GuidanceBot(commands.Bot):
 
     async def on_resumed(self):
         logging.getLogger(__name__).info("已恢复与 Discord 网关的会话。")
+        await reply_recovery_manager.resume_unfinished_tasks(self, reason="on_resumed")
         schedule_pending_text_delivery_flush(self, reason="on_resumed", immediate=True)
 
 

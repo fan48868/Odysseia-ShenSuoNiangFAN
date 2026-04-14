@@ -6,6 +6,8 @@ from typing import Literal, Optional
 
 import discord
 
+from src.chat.services.reply_recovery_manager import reply_recovery_manager
+
 log = logging.getLogger(__name__)
 
 VERIFY_DELAY_SECONDS = 2.0
@@ -24,6 +26,10 @@ class PendingTextDelivery:
     content: str
     reply_to_message_id: Optional[int] = None
     mention_author: bool = False
+    task_id: Optional[int] = None
+    chunk_index: int = 0
+    chunk_total: int = 1
+    attempt_token: Optional[str] = None
     sent_message_id: Optional[int] = None
     attempt_count: int = 0
     retry_cycle_count: int = 0
@@ -193,6 +199,16 @@ async def _dispatch_text_delivery(
 async def _attempt_delivery(
     bot: discord.Client, delivery: PendingTextDelivery
 ) -> DeliveryStatus:
+    if not await reply_recovery_manager.is_attempt_current(
+        delivery.task_id, delivery.attempt_token
+    ):
+        log.info(
+            "检测到过期回复投递任务，已跳过发送 | task_id=%s | chunk_index=%s",
+            delivery.task_id,
+            delivery.chunk_index,
+        )
+        return "missing"
+
     channel = await _resolve_channel(bot, delivery.channel_id)
     if channel is None:
         delivery.last_error = "channel_unavailable"
@@ -216,7 +232,16 @@ async def _attempt_delivery(
     delivery.attempt_count += 1
     delivery.last_error = None
 
-    return await verify_sent_message(bot, channel, sent_message.id)
+    status = await verify_sent_message(bot, channel, sent_message.id)
+    if status == "confirmed":
+        await reply_recovery_manager.mark_chunk_confirmed(
+            delivery.task_id,
+            chunk_index=delivery.chunk_index,
+            message_id=sent_message.id,
+            chunk_total=delivery.chunk_total,
+            attempt_token=delivery.attempt_token,
+        )
+    return status
 
 
 async def enqueue_pending_text_delivery(
@@ -257,6 +282,7 @@ async def send_text_reply_with_recovery(
         content=content,
         reply_to_message_id=message.id,
         mention_author=mention_author,
+        task_id=getattr(message, "id", None),
     )
     return await send_pending_text_delivery_with_recovery(bot, delivery)
 
@@ -313,6 +339,16 @@ async def flush_pending_text_deliveries(bot: discord.Client) -> None:
 
             try:
                 if delivery.sent_message_id is not None:
+                    if not await reply_recovery_manager.is_attempt_current(
+                        delivery.task_id, delivery.attempt_token
+                    ):
+                        log.info(
+                            "待补发队列中的过期回复已丢弃 | task_id=%s | chunk_index=%s",
+                            delivery.task_id,
+                            delivery.chunk_index,
+                        )
+                        continue
+
                     channel = await _resolve_channel(bot, delivery.channel_id)
                     if channel is None:
                         await _requeue_pending_delivery(bot, delivery)
@@ -329,6 +365,13 @@ async def flush_pending_text_deliveries(bot: discord.Client) -> None:
                             "待补发频道回复已确认存在，无需重发 | channel_id=%s | message_id=%s",
                             delivery.channel_id,
                             delivery.sent_message_id,
+                        )
+                        await reply_recovery_manager.mark_chunk_confirmed(
+                            delivery.task_id,
+                            chunk_index=delivery.chunk_index,
+                            message_id=delivery.sent_message_id,
+                            chunk_total=delivery.chunk_total,
+                            attempt_token=delivery.attempt_token,
                         )
                         continue
                     if status == "uncertain":
