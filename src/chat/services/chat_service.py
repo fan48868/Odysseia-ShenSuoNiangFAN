@@ -103,14 +103,15 @@ class ChatService:
             )
             # 可选：给用户一个提示回复（若上下文允许）
             # await message.reply("你已被加入黑名单，无法使用此功能。")
-         return False   # 直接终止前置检查，不进入 AI 调用流程
+            return False   # 直接终止前置检查，不进入 AI 调用流程
+
         # # 4. 黑名单检查   
         # if await chat_db_manager.is_user_blacklisted(author.id, guild_id):
         #     log.info(
         #         f"用户 {author.id} 在服务器 {guild_id} 被拉黑，已启用惩戒替换。"
         #     )
 
-        # return True
+        #     return True  #可能错误
 
     async def handle_chat_message(
         self,

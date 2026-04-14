@@ -1444,9 +1444,9 @@ class MemoryCommands(commands.Cog):
     # async def view_and_edit_memory(self, interaction: discord.Interaction):
     #     user_id = interaction.user.id
         
-        try:
-            current_summary_raw = await _get_personal_summary_raw(user_id)
-            current_summary = _prepare_memory_summary_for_view(current_summary_raw)
+    #     try:
+    #         current_summary_raw = await _get_personal_summary_raw(user_id)
+    #         current_summary = _prepare_memory_summary_for_view(current_summary_raw)
                 
     #         view = MemoryView(
     #             actor_user_id=user_id,
