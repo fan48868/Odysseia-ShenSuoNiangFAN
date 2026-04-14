@@ -503,47 +503,47 @@ class LeaderboardButton(ShopButton["SimpleShopView"]):
         await interaction.response.edit_message(embeds=[embed], view=leaderboard_view)
 
 
-# class PurchaseButton(ShopButton["SimpleShopView"]):
-#     """购买所选商品的按钮。"""
+class PurchaseButton(ShopButton["SimpleShopView"]):
+    """购买所选商品的按钮。"""
 
-#     def __init__(self):
-#         super().__init__(label="购买", style=discord.ButtonStyle.primary, emoji="💰")
+    def __init__(self):
+        super().__init__(label="购买", style=discord.ButtonStyle.primary, emoji="💰")
 
-#     async def callback(self, interaction: discord.Interaction):
-#         if self.view.selected_item_id is None:
-#             await interaction.response.send_message(
-#                 "请先从下拉菜单中选择一个商品。", ephemeral=True
-#             )
-#             return
+    async def callback(self, interaction: discord.Interaction):
+        if self.view.selected_item_id is None:
+            await interaction.response.send_message(
+                "请先从下拉菜单中选择一个商品。", ephemeral=True
+            )
+            return
 
-#         selected_item = next(
-#             (
-#                 item
-#                 for item in self.view.items
-#                 if item["item_id"] == self.view.selected_item_id
-#             ),
-#             None,
-#         )
-#         if not selected_item:
-#             await interaction.response.send_message("选择的商品无效。", ephemeral=True)
-#             return
+        selected_item = next(
+            (
+                item
+                for item in self.view.items
+                if item["item_id"] == self.view.selected_item_id
+            ),
+            None,
+        )
+        if not selected_item:
+            await interaction.response.send_message("选择的商品无效。", ephemeral=True)
+            return
 
-#         item_effect = selected_item.get("effect_id")
+        item_effect = selected_item.get("effect_id")
 
-#         if item_effect == PERSONAL_MEMORY_ITEM_EFFECT_ID:
-#             await self.handle_personal_memory_purchase(interaction, selected_item)
-#             return
+        if item_effect == PERSONAL_MEMORY_ITEM_EFFECT_ID:
+            await self.handle_personal_memory_purchase(interaction, selected_item)
+            return
 
-#         modal_effects = [
-#             WORLD_BOOK_CONTRIBUTION_ITEM_EFFECT_ID,
-#             COMMUNITY_MEMBER_UPLOAD_EFFECT_ID,
-#             SELL_BODY_EVENT_SUBMISSION_EFFECT_ID,
-#         ]
-#         if item_effect in modal_effects:
-#             await self.handle_standard_modal_purchase(interaction, selected_item)
-#             return
+        modal_effects = [
+            WORLD_BOOK_CONTRIBUTION_ITEM_EFFECT_ID,
+            COMMUNITY_MEMBER_UPLOAD_EFFECT_ID,
+            SELL_BODY_EVENT_SUBMISSION_EFFECT_ID,
+        ]
+        if item_effect in modal_effects:
+            await self.handle_standard_modal_purchase(interaction, selected_item)
+            return
 
-#         await self.handle_standard_purchase(interaction, selected_item)
+        await self.handle_standard_purchase(interaction, selected_item)
 
     async def handle_personal_memory_purchase(
         self, interaction: discord.Interaction, item: Dict[str, Any]
