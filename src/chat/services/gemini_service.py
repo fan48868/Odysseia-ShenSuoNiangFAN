@@ -622,16 +622,16 @@ class GeminiService:
 
         return formatted
 
-    @staticmethod
-    def _apply_blacklist_notice(
-        response: str, blacklist_punishment_active: bool
-    ) -> str:
-        if not blacklist_punishment_active or not response:
-            return response
-        notice = "(当前在黑名单中，已将消息替换) \n"
-        if response.startswith(notice):
-            return response
-        return f"{notice}{response}"
+    # @staticmethod
+    # def _apply_blacklist_notice(
+    #     response: str, blacklist_punishment_active: bool
+    # ) -> str:
+    #     if not blacklist_punishment_active or not response:
+    #         return response
+    #     notice = "(当前在黑名单中，已将消息替换) \n"
+    #     if response.startswith(notice):
+    #         return response
+    #     return f"{notice}{response}"
 
     def _handle_safety_ratings(
         self, response: types.GenerateContentResponse, key: str

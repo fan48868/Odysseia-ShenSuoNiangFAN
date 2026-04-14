@@ -25,13 +25,13 @@ from src.chat.features.chat_settings.services.chat_settings_service import (
 
 log = logging.getLogger(__name__)
 
-# 黑名单惩戒短语（随机替换用户发言）
-BLACKLIST_PUNISHMENT_PHRASES = [
-    "我是杂鱼",
-    "我是fw",
-    "我刚刚在放屁",
-    "我错了",
-]
+# # 黑名单惩戒短语（随机替换用户发言）
+# BLACKLIST_PUNISHMENT_PHRASES = [
+#     "我是杂鱼",
+#     "我是fw",
+#     "我刚刚在放屁",
+#     "我错了",
+# ]
 
 
 class ChatService:
@@ -99,10 +99,18 @@ class ChatService:
         # 4. 黑名单检查
         if await chat_db_manager.is_user_blacklisted(author.id, guild_id):
             log.info(
-                f"用户 {author.id} 在服务器 {guild_id} 被拉黑，已启用惩戒替换。"
+                f"用户 {author.id} 在服务器 {guild_id} 处于黑名单，已拒绝消息处理。"
             )
+            # 可选：给用户一个提示回复（若上下文允许）
+            # await message.reply("你已被加入黑名单，无法使用此功能。")
+         return False   # 直接终止前置检查，不进入 AI 调用流程
+        # # 4. 黑名单检查   
+        # if await chat_db_manager.is_user_blacklisted(author.id, guild_id):
+        #     log.info(
+        #         f"用户 {author.id} 在服务器 {guild_id} 被拉黑，已启用惩戒替换。"
+        #     )
 
-        return True
+        # return True
 
     async def handle_chat_message(
         self,
@@ -152,19 +160,19 @@ class ChatService:
                     author.id, guild_id
                 )
 
-            if is_blacklisted:
-                punishment_phrase = random.choice(BLACKLIST_PUNISHMENT_PHRASES)
-                user_content = punishment_phrase
-                replied_content = ""
-                image_data_list = []
-                video_data_list = []
-                processed_data["user_content"] = user_content
-                processed_data["replied_content"] = replied_content
-                processed_data["image_data_list"] = image_data_list
-                processed_data["video_data_list"] = video_data_list
-                # log.info(
-                 #   f"用户 {author.id} 在服务器 {guild_id} 被拉黑，已替换发言为惩戒短语: {punishment_phrase}"
-                #)
+            # if is_blacklisted:
+            #     punishment_phrase = random.choice(BLACKLIST_PUNISHMENT_PHRASES)
+            #     user_content = punishment_phrase
+            #     replied_content = ""
+            #     image_data_list = []
+            #     video_data_list = []
+            #     processed_data["user_content"] = user_content
+            #     processed_data["replied_content"] = replied_content
+            #     processed_data["image_data_list"] = image_data_list
+            #     processed_data["video_data_list"] = video_data_list
+            #     # log.info(
+            #      #   f"用户 {author.id} 在服务器 {guild_id} 被拉黑，已替换发言为惩戒短语: {punishment_phrase}"
+            #     #)
 
             # 2. --- 上下文与知识库检索 ---
             # 获取频道历史上下文
