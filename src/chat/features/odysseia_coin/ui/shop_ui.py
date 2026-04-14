@@ -75,7 +75,8 @@ class SimpleShopView(discord.ui.View):
             self.grouped_items[category].append(item)
 
         # 添加核心按钮
-        self.add_item(CategorySelect(list(self.grouped_items.keys())))
+        if self.grouped_items:
+            self.add_item(CategorySelect(list(self.grouped_items.keys())))
         self.add_item(PurchaseButton())
         self.add_item(RefreshBalanceButton())
         self.add_item(LoanButton())
@@ -226,6 +227,16 @@ class TutorialManagementView(discord.ui.View):
         if not self.panel:
             return discord.Embed(title="错误", description="面板未初始化。")
         return await self.panel.create_embed()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message(
+                "这不是你的知识库界面哦！", ephemeral=True
+            )
+            return False
+
+        self.interaction = interaction
+        return True
 
     async def on_timeout(self):
         for item in self.children:

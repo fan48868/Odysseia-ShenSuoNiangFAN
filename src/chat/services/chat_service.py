@@ -4,6 +4,7 @@ import asyncio
 import discord
 import logging
 import random
+from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
 import discord.abc
 
@@ -12,13 +13,8 @@ from src.chat.services.gemini_service import gemini_service
 from src.chat.services.context_service_test import get_context_service  # 导入测试服务
 from src.chat.features.world_book.services.world_book_service import world_book_service
 from src.chat.features.affection.service.affection_service import affection_service
-from src.chat.features.odysseia_coin.service.coin_service import coin_service
 from src.chat.utils.database import chat_db_manager
-from src.chat.features.personal_memory.services.personal_memory_service import (
-    personal_memory_service,
-)
 from src.chat.config import chat_config
-from src.chat.config.chat_config import DEBUG_CONFIG
 from src.chat.features.chat_settings.services.chat_settings_service import (
     chat_settings_service,
 )
@@ -32,6 +28,13 @@ log = logging.getLogger(__name__)
 #     "我刚刚在放屁",
 #     "我错了",
 # ]
+
+
+@dataclass
+class GeneratedReply:
+    response_text: str
+    user_name: str
+    user_content_for_memory: str
 
 
 class ChatService:
@@ -59,44 +62,12 @@ class ChatService:
             )
 
         if not effective_config.get("is_chat_enabled", True):
-            # 检查是否满足通行许可的例外条件
-            pass_is_granted = False
-            if isinstance(message.channel, discord.Thread) and message.channel.owner_id:
-                # 修正逻辑：只有当帖主明确设置了个人CD时，才算拥有"通行许可"
-                owner_id = message.channel.owner_id
-                query = "SELECT thread_cooldown_seconds, thread_cooldown_duration, thread_cooldown_limit FROM user_coins WHERE user_id = ?"
-                owner_config_row = await chat_db_manager._execute(
-                    chat_db_manager._db_transaction, query, (owner_id,), fetch="one"
-                )
-
-                if owner_config_row:
-                    has_personal_cd = owner_config_row[
-                        "thread_cooldown_seconds"
-                    ] is not None or (
-                        owner_config_row["thread_cooldown_duration"] is not None
-                        and owner_config_row["thread_cooldown_limit"] is not None
-                    )
-                    if has_personal_cd:
-                        pass_is_granted = True
-                        log.info(
-                            f"帖主 {owner_id} 拥有个人CD设置（通行许可），覆盖频道 {message.channel.id} 的聊天限制。"
-                        )
-
-            # 如果没有授予通行权，则按原逻辑返回 False
-            if not pass_is_granted:
-                log.info(f"频道 {message.channel.id} 聊天已禁用，跳过前置检查。")
-                return False
-
-        # 3. 新版冷却时间检查
-        if await chat_settings_service.is_user_on_cooldown(
-            author.id, message.channel.id, effective_config
-        ):
             log.info(
-                f"用户 {author.id} 在频道 {message.channel.id} 处于新版冷却状态，跳过前置检查。"
+                f"频道 {message.channel.id} 聊天已禁用，跳过前置检查。"
             )
             return False
 
-        # 4. 黑名单检查
+        # 3. 黑名单检查
         if await chat_db_manager.is_user_blacklisted(author.id, guild_id):
             log.info(
                 f"用户 {author.id} 在服务器 {guild_id} 处于黑名单，已拒绝消息处理。"
@@ -115,13 +86,13 @@ class ChatService:
 
         # return True  #可能错误
 
-    async def handle_chat_message(
+    async def generate_reply_for_message(
         self,
         message: discord.Message,
         processed_data: Dict[str, Any],
         guild_name: str,
         location_name: str,
-    ) -> Optional[str]:
+    ) -> Optional[GeneratedReply]:
         """
         处理聊天消息，生成并返回AI的最终回复。
 
@@ -130,19 +101,11 @@ class ChatService:
             processed_data (Dict[str, Any]): 由 MessageProcessor 处理后的数据。
 
         Returns:
-            str: AI生成的最终回复文本。如果为 None，则表示不应回复。
+            GeneratedReply: AI 生成结果以及发送成功后执行副作用所需的最小上下文。
         """
         author = message.author
         guild_id = message.guild.id if message.guild else 0
 
-        # --- 获取最新的有效配置 ---
-        effective_config = {}
-        if isinstance(message.channel, discord.abc.GuildChannel):
-            effective_config = await chat_settings_service.get_effective_channel_config(
-                message.channel
-            )
-
-        # --- 个人记忆消息计数 ---
         user_profile_data = await world_book_service.get_profile_by_discord_id(
             author.id,
             user_name=author.display_name,
@@ -267,26 +230,9 @@ class ChatService:
             # --- 新增：集中获取所有上下文数据 ---
             affection_status = await affection_service.get_affection_status(author.id)
 
-            # 3. --- 好感度与奖励更新（前置） ---
-            try:
-                # 在生成回复前更新好感度，以确保日志顺序正确
-                await affection_service.increase_affection_on_message(author.id)
-            except Exception as aff_e:
-                log.error(f"增加用户 {author.id} 的好感度时出错: {aff_e}")
-
-            try:
-                # 发放每日首次对话奖励
-                if await coin_service.grant_daily_message_reward(author.id):
-                    log.info(f"已为用户 {author.id} 发放每日首次对话奖励。")
-            except Exception as coin_e:
-                log.error(f"为用户 {author.id} 发放每日对话奖励时出错: {coin_e}")
-
-            # 4. --- 调用AI生成回复 ---
+            # 3. --- 调用AI生成回复 ---
             # PromptService 内部会处理合并用户消息的逻辑，这里我们总是传递 final_content
             # 记录发送给AI的核心上下文
-           # if DEBUG_CONFIG["LOG_FINAL_CONTEXT"]:
-               # log.info(f"发送给AI -> 最终上下文: {channel_context}")
-
             # --- 获取当前设置的AI模型 ---
             current_model = await chat_settings_service.get_current_ai_model()
             log.info(f"当前使用的AI模型: {current_model}")
@@ -320,27 +266,10 @@ class ChatService:
             )
 
             if not ai_response:
-                log.info(f"AI服务未返回回复（可能由于冷却），跳过用户 {author.id}。")
+                log.info(f"AI服务未返回回复，跳过用户 {author.id}。")
                 return None
 
-            # --- 新增：调用新的个人记忆服务 ---
-            # 在获得AI回复后，记录这次对话并根据需要触发总结（改为异步后台任务，不阻塞回复）
-            if user_profile_data:
-                asyncio.create_task(
-                    personal_memory_service.update_and_conditionally_summarize_memory(
-                        user_id=author.id,
-                        user_name=author.display_name,
-                        user_content=user_content,
-                        ai_response=ai_response,
-                    )
-                )
-
-            # 更新新系统的CD
-            await chat_settings_service.update_user_cooldown(
-                author.id, message.channel.id, effective_config
-            )
-
-            # 5. --- 后处理与格式化 ---
+            # 4. --- 后处理与格式化 ---
             final_response = self._format_ai_response(ai_response)
 
             # --- 新增：为特定工具调用添加后缀 ---
@@ -352,16 +281,36 @@ class ChatService:
                 # 清空列表，避免影响下一次对话
                 gemini_service.last_called_tools = []
 
-            # 6. --- 异步执行后续任务（不阻塞回复） ---
-            # 此处现在只应包含不影响核心回复流程的日志记录等任务
-            # self._log_rag_summary(author, final_content, world_book_entries, final_response)
-
-           # log.info(f"已为用户 {author.display_name} 生成AI回复: {final_response}")
-            return final_response
+            return GeneratedReply(
+                response_text=final_response,
+                user_name=author.display_name,
+                user_content_for_memory=user_content,
+            )
 
         except Exception as e:
             log.error(f"[ChatService] 处理聊天消息时出错: {e}", exc_info=True)
-            return "抱歉，处理你的消息时出现了问题，请稍后再试。"
+            return GeneratedReply(
+                response_text="抱歉，处理你的消息时出现了问题，请稍后再试。",
+                user_name=author.display_name,
+                user_content_for_memory=processed_data.get("user_content", ""),
+            )
+
+    async def handle_chat_message(
+        self,
+        message: discord.Message,
+        processed_data: Dict[str, Any],
+        guild_name: str,
+        location_name: str,
+    ) -> Optional[str]:
+        generated_reply = await self.generate_reply_for_message(
+            message,
+            processed_data,
+            guild_name,
+            location_name,
+        )
+        if generated_reply is None:
+            return None
+        return generated_reply.response_text
 
     def _format_ai_response(self, ai_response: str) -> str:
         """清理和格式化AI的原始回复。"""

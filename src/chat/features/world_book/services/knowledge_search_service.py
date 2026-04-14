@@ -2,7 +2,7 @@
 import asyncio
 import logging
 import re
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Tuple
 
 from sqlalchemy import text
 from src.database.database import AsyncSessionLocal
@@ -24,7 +24,10 @@ class KnowledgeSearchService:
             "TOP_K_VECTOR": 30,  # 增加召回量，防止指令词(如"开始xx模式")导致核心词排名下降
             "TOP_K_FTS": 30,     # 增加召回量，提高关键字匹配的容错率
             "RRF_K": 60,
-            "HYBRID_SEARCH_FINAL_K": 5, # 返回更多结果给上层，避免过早截断
+            "HYBRID_SEARCH_POOL_K": 10, # SQL 侧保留适度候选池，兼顾最终配比与查询开销
+            "FINAL_RESULT_LIMIT": 5, # 最终注入给上层的结果数量
+            "MAX_MEMBER_RESULTS": 2, # 最终结果里，成员名片类结果最多保留 2 条
+            "TARGET_KNOWLEDGE_RESULTS": 3, # 最终结果里，优先保证 3 条知识条目
             "VECTOR_DISTANCE_THRESHOLD": 0.5, # 向量搜索距离阈值，过滤不相关结果
             "KEYWORD_WEIGHT": 3.0, # 关键字搜索权重，提高精确匹配的重要性
             "EMBEDDING_TIMEOUT_SECONDS": 7.0, # embedding 生成超时保护
@@ -138,13 +141,127 @@ class KnowledgeSearchService:
                 "top_k_vector": self.config["TOP_K_VECTOR"],
                 "top_k_fts": self.config["TOP_K_FTS"],
                 "rrf_k": self.config["RRF_K"],
-                "final_k": self.config["HYBRID_SEARCH_FINAL_K"],
+                "final_k": self.config["HYBRID_SEARCH_POOL_K"],
                 "max_distance": self.config["VECTOR_DISTANCE_THRESHOLD"],
                 "keyword_weight": self.config["KEYWORD_WEIGHT"],
             },
         )
         # SQLAlchemy 2.x 的 Row 对象需要通过 ._mapping 转换为字典
         return [dict(row._mapping) for row in result.fetchall()]
+
+    def _format_result(
+        self,
+        *,
+        parent_id: Any,
+        chunk_text: str,
+        source_table: str,
+        distance: float,
+        is_user_card: bool = False,
+    ) -> Dict[str, Any]:
+        metadata = {"source_table": source_table}
+        if is_user_card:
+            metadata["is_user_card"] = True
+
+        return {
+            "id": parent_id,
+            "content": chunk_text,
+            "distance": distance,
+            "metadata": metadata,
+        }
+
+    def _select_final_results(
+        self,
+        search_results: List[Dict[str, Any]],
+        user_card_chunk: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        对混合检索结果做最终收口：
+        1. 发起者名片强制置顶。
+        2. 社区成员结果最多 2 条（包含发起者自己的名片）。
+        3. 优先保留 3 条知识条目。
+        4. 按 source_table + parent_id 去重，避免同一名片/知识条目重复出现。
+        """
+        final_limit = self.config["FINAL_RESULT_LIMIT"]
+        member_limit = self.config["MAX_MEMBER_RESULTS"]
+        target_knowledge = min(self.config["TARGET_KNOWLEDGE_RESULTS"], final_limit)
+
+        final_results: List[Dict[str, Any]] = []
+        deferred_candidates: List[Tuple[str, Dict[str, Any]]] = []
+        seen_entries: set[Tuple[str, str]] = set()
+
+        member_count = 0
+        knowledge_count = 0
+
+        if user_card_chunk:
+            user_parent_id = user_card_chunk.get("parent_id")
+            if user_parent_id is not None:
+                seen_entries.add(("community", str(user_parent_id)))
+                final_results.append(
+                    self._format_result(
+                        parent_id=user_parent_id,
+                        chunk_text=user_card_chunk.get("chunk_text", ""),
+                        source_table="community",
+                        distance=0.0,
+                        is_user_card=True,
+                    )
+                )
+                member_count = 1
+
+        unique_candidates: List[Tuple[str, Dict[str, Any]]] = []
+        for res in search_results:
+            source_table = str(res.get("source_table") or "")
+            document_id = res.get("document_id")
+            if not source_table or document_id is None:
+                continue
+
+            dedupe_key = (source_table, str(document_id))
+            if dedupe_key in seen_entries:
+                continue
+            seen_entries.add(dedupe_key)
+
+            rrf_score = float(res.get("rrf_score") or 0.0)
+            unique_candidates.append(
+                (
+                    source_table,
+                    self._format_result(
+                        parent_id=document_id,
+                        chunk_text=res.get("chunk_text", ""),
+                        source_table=source_table,
+                        distance=1.0 - rrf_score,
+                    ),
+                )
+            )
+
+        for source_table, result in unique_candidates:
+            if len(final_results) >= final_limit:
+                break
+
+            if source_table == "community":
+                if member_count >= member_limit:
+                    continue
+                final_results.append(result)
+                member_count += 1
+                continue
+
+            if knowledge_count < target_knowledge:
+                final_results.append(result)
+                knowledge_count += 1
+            else:
+                deferred_candidates.append((source_table, result))
+
+        if len(final_results) < final_limit:
+            for source_table, result in deferred_candidates:
+                if len(final_results) >= final_limit:
+                    break
+                if source_table == "community" and member_count >= member_limit:
+                    continue
+                if source_table == "community":
+                    member_count += 1
+                else:
+                    knowledge_count += 1
+                final_results.append(result)
+
+        return final_results
 
     async def search(
         self,
@@ -233,35 +350,7 @@ class KnowledgeSearchService:
             log.info(f"知识库混合搜索未找到的相关文档。")
             return []
 
-        # 转换为 world_book_service 期望的格式
-        # 'content' 字段直接使用 chunk_text
-        formatted_results = []
-
-        # 1. 首先添加用户自己的名片（如果存在）
-        if user_card_chunk:
-            formatted_results.append({
-                "id": user_card_chunk.get("parent_id"),
-                "content": user_card_chunk.get("chunk_text"),
-                "distance": 0.0,  # 强制置顶，相关性设为最高
-                "metadata": {"source_table": "community", "is_user_card": True},
-            })
-
-        for res in search_results:
-            # 去重：如果搜索结果中包含用户自己的名片，则跳过
-            if user_card_chunk and str(res.get("document_id")) == str(user_card_chunk.get("parent_id")):
-                continue
-
-            rrf_score = float(res["rrf_score"])  # 确保为浮点数
-            formatted_results.append(
-                {
-                    "id": res.get("document_id"),
-                    "content": res.get("chunk_text"),
-                    "distance": 1.0 - rrf_score,  # 将rrf_score转换为类似距离的度量
-                    "metadata": {"source_table": res.get("source_table")},
-                }
-            )
-
-        return formatted_results
+        return self._select_final_results(search_results, user_card_chunk)
 
 
 # 创建服务的单例

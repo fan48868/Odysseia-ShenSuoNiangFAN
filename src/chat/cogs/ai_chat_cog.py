@@ -1,34 +1,41 @@
 # -*- coding: utf-8 -*-
 
+import asyncio
+import io
+import logging
+import re
+from contextlib import asynccontextmanager
+from typing import Optional
+
 import discord
 from discord.ext import commands
-import logging
-from typing import Optional
-import re
-import io
-import asyncio
 
-# 导入新的 Service
-from src.chat.services.chat_service import chat_service
-from src.chat.services.message_processor import message_processor
-from src.chat.services.gemini_service import gemini_service
-from src.chat.features.tools.functions.summarize_channel import text_to_summary_image
-
-
-# 导入上下文服务
-
-# 导入数据库管理器以进行黑名单检查和斜杠命令
 from src import config
-from src.chat.utils.database import chat_db_manager
-from src.chat.config.chat_config import CHAT_ENABLED, MESSAGE_SETTINGS
 from src.chat.config import chat_config
+from src.chat.config.chat_config import CHAT_ENABLED, MESSAGE_SETTINGS
 from src.chat.features.chat_settings.services.chat_settings_service import (
     chat_settings_service,
 )
-from src.chat.features.odysseia_coin.service.coin_service import coin_service
+from src.chat.features.tools.functions.summarize_channel import text_to_summary_image
+from src.chat.services.chat_service import GeneratedReply, chat_service
 from src.chat.services.context_service_test import get_context_service
+from src.chat.services.gemini_service import gemini_service
+from src.chat.services.message_processor import message_processor
+from src.chat.services.reply_recovery_manager import (
+    ReplyRecoveryTask,
+    ReplySideEffectPayload,
+    reply_recovery_manager,
+)
+from src.chat.utils.database import chat_db_manager
+from src.chat.utils.reliable_message_sender import (
+    PendingTextDelivery,
+    enqueue_pending_text_delivery,
+    send_pending_text_delivery_with_recovery,
+)
 
 log = logging.getLogger(__name__)
+
+TYPING_ENTER_TIMEOUT_SECONDS = 1.5
 
 
 class AIChatCog(commands.Cog):
@@ -36,21 +43,34 @@ class AIChatCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # 服务实例的注入已由 main.py 统一处理，此处不再需要
 
     def _get_text_length_without_emojis(self, text: str) -> int:
-        """计算移除Discord自定义表情后的文本长度。"""
-        # 匹配 <a:name:id> 或 <:name:id> 格式的表情
         emoji_pattern = r"<a?:.+?:\d+>"
         text_without_emojis = re.sub(emoji_pattern, "", text)
         return len(text_without_emojis)
 
-    async def _send_long_response_in_channel(
-        self, message: discord.Message, response_text: str
-    ) -> None:
-        """将超长回复拆分后在当前频道连续发送，避免截断或私信。"""
+    def _is_unrestricted_channel(self, channel: discord.abc.Messageable) -> bool:
+        return bool(
+            getattr(channel, "id", None) in chat_config.UNRESTRICTED_CHANNEL_IDS
+            or isinstance(channel, discord.Thread)
+        )
+
+    def _build_location_context(
+        self, message: discord.Message
+    ) -> tuple[str, str]:
+        guild_name = message.guild.name if message.guild else "私信"
+        if isinstance(message.channel, discord.Thread):
+            parent_channel_name = (
+                message.channel.parent.name if message.channel.parent else "未知频道"
+            )
+            return guild_name, f"{parent_channel_name} -> {message.channel.name}"
+        if isinstance(message.channel, discord.abc.GuildChannel):
+            return guild_name, message.channel.name
+        return guild_name, "私信中"
+
+    def _split_response_chunks(self, response_text: str) -> list[str]:
         max_len = 1900
-        chunks = []
+        chunks: list[str] = []
         remaining = response_text
 
         while remaining:
@@ -65,38 +85,420 @@ class AIChatCog(commands.Cog):
             chunks.append(remaining[:split_pos].rstrip())
             remaining = remaining[split_pos:].lstrip()
 
+        return chunks
+
+    @asynccontextmanager
+    async def _best_effort_typing(self, channel: discord.abc.Messageable):
+        typing_cm = None
+        entered = False
+        try:
+            typing_cm = channel.typing()
+            await asyncio.wait_for(
+                typing_cm.__aenter__(), timeout=TYPING_ENTER_TIMEOUT_SECONDS
+            )
+            entered = True
+        except Exception as exc:
+            log.warning("输入中状态启动失败，已降级继续处理 | error=%s", exc)
+
+        try:
+            yield
+        finally:
+            if entered and typing_cm is not None:
+                try:
+                    await typing_cm.__aexit__(None, None, None)
+                except Exception as exc:
+                    log.warning("输入中状态关闭失败，已忽略 | error=%s", exc)
+
+    async def _send_channel_reply_with_recovery(
+        self,
+        message: discord.Message,
+        content: str,
+        *,
+        mention_author: bool = True,
+        task_id: Optional[int] = None,
+        chunk_index: int = 0,
+        chunk_total: int = 1,
+        attempt_token: Optional[str] = None,
+    ) -> bool:
+        if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
+            if not await reply_recovery_manager.is_attempt_current(task_id, attempt_token):
+                return False
+            sent_message = await message.reply(content, mention_author=mention_author)
+            await reply_recovery_manager.mark_chunk_confirmed(
+                task_id,
+                chunk_index=chunk_index,
+                message_id=sent_message.id,
+                chunk_total=chunk_total,
+                attempt_token=attempt_token,
+            )
+            return True
+
+        return await send_pending_text_delivery_with_recovery(
+            self.bot,
+            PendingTextDelivery(
+                channel_id=message.channel.id,
+                content=content,
+                reply_to_message_id=message.id,
+                mention_author=mention_author,
+                task_id=task_id,
+                chunk_index=chunk_index,
+                chunk_total=chunk_total,
+                attempt_token=attempt_token,
+            ),
+        )
+
+    async def _send_channel_message_with_recovery(
+        self,
+        channel: discord.abc.Messageable,
+        content: str,
+        *,
+        task_id: Optional[int] = None,
+        chunk_index: int = 0,
+        chunk_total: int = 1,
+        attempt_token: Optional[str] = None,
+    ) -> bool:
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            if not await reply_recovery_manager.is_attempt_current(task_id, attempt_token):
+                return False
+            sent_message = await channel.send(content)
+            await reply_recovery_manager.mark_chunk_confirmed(
+                task_id,
+                chunk_index=chunk_index,
+                message_id=sent_message.id,
+                chunk_total=chunk_total,
+                attempt_token=attempt_token,
+            )
+            return True
+
+        return await send_pending_text_delivery_with_recovery(
+            self.bot,
+            PendingTextDelivery(
+                channel_id=channel.id,
+                content=content,
+                task_id=task_id,
+                chunk_index=chunk_index,
+                chunk_total=chunk_total,
+                attempt_token=attempt_token,
+            ),
+        )
+
+    async def _queue_remaining_chunks(
+        self,
+        message: discord.Message,
+        chunks: list[str],
+        *,
+        start_index: int,
+        task_id: int,
+        attempt_token: str,
+    ) -> None:
+        chunk_total = len(chunks)
+        for chunk_index in range(start_index, chunk_total):
+            await enqueue_pending_text_delivery(
+                self.bot,
+                PendingTextDelivery(
+                    channel_id=message.channel.id,
+                    content=chunks[chunk_index],
+                    reply_to_message_id=message.id if chunk_index == 0 else None,
+                    mention_author=chunk_index == 0,
+                    task_id=task_id,
+                    chunk_index=chunk_index,
+                    chunk_total=chunk_total,
+                    attempt_token=attempt_token,
+                ),
+            )
+
+    async def _send_recoverable_text_response(
+        self,
+        message: discord.Message,
+        response_text: str,
+        *,
+        task_id: int,
+        attempt_token: str,
+    ) -> bool:
+        chunks = self._split_response_chunks(response_text)
         if not chunks:
+            await reply_recovery_manager.drop_task(task_id, reason="empty_response_chunks")
+            return False
+
+        if not await reply_recovery_manager.begin_delivery(
+            task_id, attempt_token, chunk_total=len(chunks)
+        ):
+            return False
+
+        snapshot = await reply_recovery_manager.get_task_snapshot(task_id)
+        confirmed_chunks = set(snapshot.delivery_state.get("confirmed_chunks", [])) if snapshot else set()
+
+        queue_remaining_from: Optional[int] = None
+        for chunk_index, chunk in enumerate(chunks):
+            if chunk_index in confirmed_chunks:
+                continue
+
+            if not await reply_recovery_manager.is_attempt_current(task_id, attempt_token):
+                return False
+
+            if chunk_index == 0:
+                delivered_now = await self._send_channel_reply_with_recovery(
+                    message,
+                    chunk,
+                    mention_author=True,
+                    task_id=task_id,
+                    chunk_index=chunk_index,
+                    chunk_total=len(chunks),
+                    attempt_token=attempt_token,
+                )
+            else:
+                delivered_now = await self._send_channel_message_with_recovery(
+                    message.channel,
+                    chunk,
+                    task_id=task_id,
+                    chunk_index=chunk_index,
+                    chunk_total=len(chunks),
+                    attempt_token=attempt_token,
+                )
+
+            if delivered_now:
+                continue
+
+            queue_remaining_from = chunk_index + 1
+            break
+
+        if queue_remaining_from is not None:
+            await self._queue_remaining_chunks(
+                message,
+                chunks,
+                start_index=queue_remaining_from,
+                task_id=task_id,
+                attempt_token=attempt_token,
+            )
+            return False
+
+        return True
+
+    async def _send_summary_image_response(
+        self,
+        message: discord.Message,
+        response_text: str,
+        *,
+        task_id: int,
+    ) -> None:
+        await reply_recovery_manager.drop_task(task_id, reason="summary_image_response")
+        image_bytes = text_to_summary_image(response_text)
+        if not image_bytes:
+            raise RuntimeError("总结图片生成失败")
+
+        with io.BytesIO(image_bytes) as image_file:
+            await message.reply(
+                file=discord.File(image_file, "summary.png"),
+                mention_author=True,
+            )
+
+    async def _send_overflow_dm_response(
+        self,
+        message: discord.Message,
+        response_text: str,
+        *,
+        task_id: int,
+    ) -> None:
+        await reply_recovery_manager.drop_task(task_id, reason="dm_overflow_response")
+        channel_mention = (
+            message.channel.mention
+            if isinstance(message.channel, (discord.TextChannel, discord.Thread))
+            else "你们的私信"
+        )
+        await message.author.send(
+            f"刚刚在 {channel_mention} 频道里，你想听我说的话有点多，在这里悄悄告诉你哦：\n\n{response_text}"
+        )
+
+    async def _deliver_generated_reply(
+        self,
+        message: discord.Message,
+        generated_reply: GeneratedReply,
+        *,
+        task_id: int,
+        attempt_token: str,
+        last_tools: list[str],
+    ) -> None:
+        response_text = generated_reply.response_text
+
+        if "summarize_channel" in last_tools:
+            log.info("调用了总结工具, 使用图片发送并跳过恢复闭环。")
+            await self._send_summary_image_response(
+                message, response_text, task_id=task_id
+            )
             return
 
-        await message.reply(chunks[0], mention_author=True)
-        for chunk in chunks[1:]:
-            await message.channel.send(chunk)
+        if (
+            not self._is_unrestricted_channel(message.channel)
+            and self._get_text_length_without_emojis(response_text)
+            > MESSAGE_SETTINGS["DM_THRESHOLD"]
+        ):
+            await self._send_overflow_dm_response(
+                message, response_text, task_id=task_id
+            )
+            return
+
+        if not await reply_recovery_manager.store_response_text(
+            task_id,
+            attempt_token,
+            response_text,
+            side_effect_payload=ReplySideEffectPayload(
+                user_name=generated_reply.user_name,
+                user_content=generated_reply.user_content_for_memory,
+                ai_response=response_text,
+            ),
+        ):
+            return
+
+        await self._send_recoverable_text_response(
+            message,
+            response_text,
+            task_id=task_id,
+            attempt_token=attempt_token,
+        )
+
+    async def _generate_and_deliver_reply(
+        self,
+        message: discord.Message,
+        processed_data: dict,
+        *,
+        task_id: int,
+        reason: str,
+        use_typing: bool,
+    ) -> None:
+        try:
+            attempt_token = await reply_recovery_manager.start_attempt(task_id)
+            if attempt_token is None:
+                return
+
+            guild_name, location_name = self._build_location_context(message)
+
+            async def _run_generation() -> Optional[GeneratedReply]:
+                return await chat_service.generate_reply_for_message(
+                    message,
+                    processed_data,
+                    guild_name,
+                    location_name,
+                )
+
+            async def _run_generation_and_delivery() -> None:
+                generated_reply = await _run_generation()
+                if generated_reply is None:
+                    await reply_recovery_manager.drop_task(
+                        task_id, reason=f"{reason}_no_reply"
+                    )
+                    return
+
+                last_tools = list(getattr(gemini_service, "last_called_tools", []))
+                await self._deliver_generated_reply(
+                    message,
+                    generated_reply,
+                    task_id=task_id,
+                    attempt_token=attempt_token,
+                    last_tools=last_tools,
+                )
+
+            if use_typing:
+                async with self._best_effort_typing(message.channel):
+                    await _run_generation_and_delivery()
+            else:
+                await _run_generation_and_delivery()
+        except Exception as exc:
+            log.error(
+                "处理回复任务失败 | task_id=%s | reason=%s | error=%s",
+                task_id,
+                reason,
+                exc,
+                exc_info=True,
+            )
+            await reply_recovery_manager.drop_task(task_id, reason=f"{reason}_exception")
+
+    async def _fetch_source_message(
+        self, task: ReplyRecoveryTask
+    ) -> Optional[discord.Message]:
+        channel = self.bot.get_channel(task.channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(task.channel_id)
+            except Exception as exc:
+                log.warning(
+                    "恢复任务时获取频道失败 | task_id=%s | channel_id=%s | error=%s",
+                    task.message_id,
+                    task.channel_id,
+                    exc,
+                )
+                return None
+
+        fetch_message = getattr(channel, "fetch_message", None)
+        if fetch_message is None:
+            return None
+
+        try:
+            return await fetch_message(task.message_id)
+        except discord.NotFound:
+            return None
+        except Exception as exc:
+            log.warning(
+                "恢复任务时获取原消息失败 | task_id=%s | error=%s",
+                task.message_id,
+                exc,
+                exc_info=True,
+            )
+            return None
+
+    async def resume_reply_task(self, task_id: int, reason: str) -> None:
+        snapshot = await reply_recovery_manager.get_task_snapshot(task_id)
+        if snapshot is None or snapshot.task_state in {"completed", "dropped"}:
+            return
+
+        message = await self._fetch_source_message(snapshot)
+        if message is None:
+            await reply_recovery_manager.drop_task(
+                task_id, reason=f"{reason}_source_message_missing"
+            )
+            return
+
+        if snapshot.response_text:
+            attempt_token = await reply_recovery_manager.start_attempt(task_id)
+            if attempt_token is None:
+                return
+            await self._send_recoverable_text_response(
+                message,
+                snapshot.response_text,
+                task_id=task_id,
+                attempt_token=attempt_token,
+            )
+            return
+
+        processed_data = await message_processor.process_message(message, self.bot)
+        if processed_data is None:
+            await reply_recovery_manager.drop_task(
+                task_id, reason=f"{reason}_message_unavailable"
+            )
+            return
+
+        await self._generate_and_deliver_reply(
+            message,
+            processed_data,
+            task_id=task_id,
+            reason=reason,
+            use_typing=False,
+        )
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """
-        监听所有消息，当bot被@mention时进行回复
-        """
         priority_marked = False
         if not CHAT_ENABLED:
             return
 
-        # 忽略机器人自己的消息
         if message.author.bot:
             return
 
-        # --- 核心前置检查 ---
-        # 在处理任何逻辑之前，首先检查消息是否应该被 message_processor 忽略
-        # 这会处理置顶帖和禁用频道的情况
         processed_data = await message_processor.process_message(message, self.bot)
         if processed_data is None:
-            # 如果返回 None，说明消息来自一个应被忽略的源（如置顶帖），直接退出
             return
 
-        # 检查消息是否符合处理条件：私聊 或 在服务器中被@
         is_dm = message.guild is None
         is_mentioned = self.bot.user in message.mentions
-
         if not is_dm and not is_mentioned:
             return
 
@@ -110,14 +512,15 @@ class AIChatCog(commands.Cog):
                 log.warning(
                     "[主动聊天缓存] ContextServiceTest 尚未初始化，无法标记高优先级频道。"
                 )
-            except Exception as e:
+            except Exception as exc:
                 log.warning(
-                    f"[主动聊天缓存] 标记频道 {message.channel.id} 为高优先级失败: {e}",
+                    "[主动聊天缓存] 标记频道 %s 为高优先级失败: %s",
+                    message.channel.id,
+                    exc,
                     exc_info=True,
                 )
 
         try:
-            # 新增：私信总开关（开发者豁免）
             if is_dm:
                 dm_enabled = await chat_settings_service.is_global_dm_enabled()
                 if (
@@ -125,139 +528,26 @@ class AIChatCog(commands.Cog):
                     and message.author.id not in config.DEVELOPER_USER_IDS
                 ):
                     log.info(
-                        f"私信总开关已关闭，用户 {message.author.id} 非开发者，跳过私信处理。"
+                        "私信总开关已关闭，用户 %s 非开发者，跳过私信处理。",
+                        message.author.id,
                     )
                     return
 
-            # 新增：检查是否在帖子中，以及帖子创建者是否禁用了回复
-            if isinstance(message.channel, discord.Thread):
-                thread_owner = message.channel.owner
-                if thread_owner and await coin_service.blocks_thread_replies(
-                    thread_owner.id
-                ):
-                    log.info(
-                        f"帖子 '{message.channel.name}' 的创建者 {thread_owner.id} 已禁用回复，跳过消息处理。"
-                    )
-                    return
-
-            # 黑名单检查
             if await chat_db_manager.is_user_globally_blacklisted(message.author.id):
                 log.info(f"用户 {message.author.id} 在全局黑名单中，已跳过。")
                 return
 
-            # 在显示“输入中”之前执行所有前置检查
             if not await chat_service.should_process_message(message):
                 return
 
-            # 显示"正在输入"状态，直到AI响应生成完毕
-            response_text = None
-            async with message.channel.typing():
-                response_text = await self.handle_chat_message(message, processed_data)
-
-            # 在退出 typing 状态后发送回复
-            if response_text:
-                target_retry_error = "Cannot connect to host discord.com:443 ssl:default [None]"
-                retry_delays = [2, 4, 6]  # 仅用于目标错误
-                retry_count = 0
-
-                while True:
-                    try:
-                        last_tools = getattr(gemini_service, "last_called_tools", [])
-
-                        if "summarize_channel" in last_tools:
-                            log.info("调用了总结工具, 尝试转为图片发送。")
-                            image_bytes = text_to_summary_image(response_text)
-                            if image_bytes:
-                                with io.BytesIO(image_bytes) as image_file:
-                                    await message.reply(
-                                        file=discord.File(image_file, "summary.png"),
-                                        mention_author=True,
-                                    )
-                                return
-                            else:
-                                log.error("总结图片生成失败，将作为文本尝试发送。")
-
-                        is_unrestricted = (
-                            message.channel.id in chat_config.UNRESTRICTED_CHANNEL_IDS
-                            or isinstance(message.channel, discord.Thread)
-                        )
-                        if is_unrestricted:
-                            await message.reply(response_text, mention_author=True)
-                            return
-
-                        if (
-                            self._get_text_length_without_emojis(response_text)
-                            > MESSAGE_SETTINGS["DM_THRESHOLD"]
-                        ):
-                            try:
-                                channel_mention = (
-                                    message.channel.mention
-                                    if isinstance(
-                                        message.channel,
-                                        (discord.TextChannel, discord.Thread),
-                                    )
-                                    else "你们的私信"
-                                )
-
-                                await message.author.send(
-                                    f"刚刚在 {channel_mention} 频道里，你想听我说的话有点多，在这里悄悄告诉你哦：\n\n{response_text}"
-                                )
-                                log.info(
-                                    f"回复因过长已通过私信发送给 {message.author.display_name}"
-                                )
-                            except discord.Forbidden:
-                                log.warning(
-                                    f"无法通过私信发送给 {message.author.display_name}，将在原频道回复提示信息。"
-                                )
-                                await message.reply(
-                                    "字太多啦，我不要刷屏。你的私信又关了，我就不给你讲啦！",
-                                    mention_author=True,
-                                )
-                            return
-
-                        await message.reply(response_text, mention_author=True)
-                        return
-
-                    except discord.errors.HTTPException as e:
-                        log.warning(f"发送回复时发生HTTP错误: {e}")
-                        if (
-                            e.status == 400
-                            and e.code == 50035
-                            and "Must be 2000 or fewer in length" in str(e)
-                        ):
-                            try:
-                                await self._send_long_response_in_channel(
-                                    message, response_text
-                                )
-                                log.info(
-                                    f"因消息超长，已在原频道分段发送给 {message.author.display_name}"
-                                )
-                            except Exception as split_error:
-                                log.error(
-                                    f"消息分段发送失败: {split_error}", exc_info=True
-                                )
-                                await message.reply(
-                                    "由于回复内容过长，分段发送也失败啦！",
-                                    mention_author=True,
-                                )
-                        return
-
-                    except Exception as e:
-                        log.error(f"发送回复时发生未知错误: {e}", exc_info=True)
-
-                        if target_retry_error not in str(e):
-                            return
-
-                        if retry_count >= len(retry_delays):
-                            log.error("目标网络错误重试 3 次后仍失败，放弃本次回复。")
-                            return
-
-                        delay = retry_delays[retry_count]
-                        retry_count += 1
-                        log.warning(
-                            f"命中目标网络错误，将在 {delay} 秒后进行第 {retry_count}/3 次重试。"
-                        )
-                        await asyncio.sleep(delay)
+            task_id = await reply_recovery_manager.register_message_task(message)
+            await self._generate_and_deliver_reply(
+                message,
+                processed_data,
+                task_id=task_id,
+                reason="on_message",
+                use_typing=True,
+            )
         finally:
             if priority_marked:
                 try:
@@ -265,47 +555,6 @@ class AIChatCog(commands.Cog):
                 except Exception:
                     pass
 
-    async def handle_chat_message(
-        self, message: discord.Message, processed_data: dict
-    ) -> Optional[str]:
-        """
-        处理聊天消息（包括私聊和@mention），协调各个服务生成AI回复并返回其内容
-        """
-        try:
-            # 1. MessageProcessor 的处理已前移到 on_message 中
-
-            # 2. 使用 ChatService 获取AI回复
-            # --- 新增：获取并传递位置信息 ---
-            guild_name = message.guild.name if message.guild else "私信"
-            location_name = ""
-            if isinstance(message.channel, discord.Thread):
-                # 如果是帖子（子区），显示“父频道 -> 帖子名”
-                parent_channel_name = (
-                    message.channel.parent.name
-                    if message.channel.parent
-                    else "未知频道"
-                )
-                location_name = f"{parent_channel_name} -> {message.channel.name}"
-            elif isinstance(message.channel, discord.abc.GuildChannel):
-                # 确保是服务器频道再获取名字
-                location_name = message.channel.name
-            else:
-                # 否则（如私信），提供一个默认值
-                location_name = "私信中"
-
-            final_response = await chat_service.handle_chat_message(
-                message, processed_data, guild_name, location_name
-            )
-
-            # 3. 返回回复内容
-            return final_response
-
-        except Exception as e:
-            log.error(f"[AIChatCog] 处理@mention消息时发生顶层错误: {e}", exc_info=True)
-            # 确保即使发生意外错误也有反馈
-            return "抱歉，处理你的请求时遇到了一个未知错误。"
-
 
 async def setup(bot: commands.Bot):
-    """将这个Cog添加到机器人中"""
     await bot.add_cog(AIChatCog(bot))

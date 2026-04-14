@@ -247,11 +247,21 @@ class SubmissionService:
             A tuple of (success, message).
         """
         item_id = purchase_info.get("item_id")
-        price = purchase_info.get("price")
-
-        if not item_id or not price:
-            log.error(f"个人档案购买信息不完整: item_id={item_id}, price={price}")
+        if item_id is None:
+            log.error(f"个人档案购买信息不完整: item_id={item_id}, purchase_info={purchase_info}")
             return False, "❌ 内部错误：商品信息不完整，无法完成购买。"
+
+        current_item = await coin_service.get_item_by_id(item_id)
+        if not current_item:
+            log.error(f"个人档案商品不存在或已下架: item_id={item_id}")
+            return False, "❌ 这个名片商品不存在或已下架，请重新打开商店后再试。"
+
+        price = current_item.get("price", 0)
+        purchase_info = {
+            **purchase_info,
+            "item_id": item_id,
+            "price": price,
+        }
 
         # 1. 扣款
         success, message, new_balance, _, _, _ = await coin_service.purchase_item(

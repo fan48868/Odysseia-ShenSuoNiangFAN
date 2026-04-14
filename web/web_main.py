@@ -7,7 +7,6 @@ from collections import deque
 from datetime import datetime, timedelta
 
 import psutil
-from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,8 +21,9 @@ project_root = os.path.dirname(current_dir)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-dotenv_path = os.path.join(project_root, ".env")
-load_dotenv(dotenv_path=dotenv_path, override=False, encoding="utf-8")
+from src.runtime_env import load_project_dotenv
+
+dotenv_path = load_project_dotenv(__file__, parents=1)
 
 template_dir = current_dir
 static_dir = os.path.join(template_dir, "root")

@@ -215,6 +215,15 @@ class ChatDatabaseManager:
                 );
             """)
 
+            cursor.execute("PRAGMA table_info(users);")
+            user_columns = [info[1] for info in cursor.fetchall()]
+            if "toilet_enabled" not in user_columns:
+                cursor.execute("""
+                    ALTER TABLE users
+                    ADD COLUMN toilet_enabled BOOLEAN NOT NULL DEFAULT 0;
+                """)
+                log.info("已向 users 表添加 toilet_enabled 列。")
+
             # --- 类脑币系统表 ---
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_coins (
@@ -282,56 +291,14 @@ class ChatDatabaseManager:
                 """)
                 log.info("已向 user_coins 表添加 coffee_effect_expires_at 列。")
 
-            if "has_withered_sunflower" not in columns_coins:
-                cursor.execute("""
-                    ALTER TABLE user_coins
-                    ADD COLUMN has_withered_sunflower BOOLEAN DEFAULT NULL;
-                """)
-                log.info("已向 user_coins 表添加 has_withered_sunflower 列。")
-
-            if "blocks_thread_replies" not in columns_coins:
-                cursor.execute("""
-                    ALTER TABLE user_coins
-                    ADD COLUMN blocks_thread_replies BOOLEAN NOT NULL DEFAULT 0;
-                """)
-                log.info("已向 user_coins 表添加 blocks_thread_replies 列。")
-
-            if "thread_cooldown_seconds" not in columns_coins:
-                cursor.execute(
-                    "ALTER TABLE user_coins ADD COLUMN thread_cooldown_seconds INTEGER;"
-                )
-                log.info("已向 user_coins 表添加 thread_cooldown_seconds 列。")
-
-            if "thread_cooldown_duration" not in columns_coins:
-                cursor.execute(
-                    "ALTER TABLE user_coins ADD COLUMN thread_cooldown_duration INTEGER;"
-                )
-                log.info("已向 user_coins 表添加 thread_cooldown_duration 列。")
-
-            if "thread_cooldown_limit" not in columns_coins:
-                cursor.execute(
-                    "ALTER TABLE user_coins ADD COLUMN thread_cooldown_limit INTEGER;"
-                )
-                log.info("已向 user_coins 表添加 thread_cooldown_limit 列。")
-
             # 个人记忆功能的'memory_feature_unlocked'列已迁移至'users'表，此处不再需要
             # 保留此注释以作记录
 
-            # --- 聊天CD与功能开关 ---
+            # --- 聊天功能开关 ---
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS global_chat_config (
                     guild_id INTEGER PRIMARY KEY,
-                    chat_enabled BOOLEAN NOT NULL DEFAULT 1,
-                    warm_up_enabled BOOLEAN NOT NULL DEFAULT 1
-                );
-            """)
-
-            # --- 暖贴功能频道设置 ---
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS warm_up_channels (
-                    guild_id INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL,
-                    PRIMARY KEY (guild_id, channel_id)
+                    chat_enabled BOOLEAN NOT NULL DEFAULT 1
                 );
             """)
 
@@ -342,47 +309,13 @@ class ChatDatabaseManager:
                     entity_id INTEGER NOT NULL, -- 频道ID或分类ID
                     entity_type TEXT NOT NULL, -- 'channel' or 'category'
                     is_chat_enabled BOOLEAN, -- 可空，为空则继承上级或全局
-                    cooldown_seconds INTEGER, -- 可空
                     active_chat_cache_enabled BOOLEAN, -- 可空，仅具体频道使用；仅明确为true时开启
                     UNIQUE(guild_id, entity_id)
                 );
             """)
 
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS user_channel_cooldown (
-                    user_id INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL,
-                    last_message_timestamp TIMESTAMP NOT NULL,
-                    PRIMARY KEY (user_id, channel_id)
-                );
-            """)
-
-            # --- 新增：频率限制CD的时间戳记录表 ---
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS user_channel_timestamps (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL,
-                    timestamp TEXT NOT NULL
-                );
-            """)
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_user_channel_ts ON user_channel_timestamps (user_id, channel_id, timestamp)"
-            )
-
-            # --- 扩展 channel_chat_config 以支持频率限制 ---
             cursor.execute("PRAGMA table_info(channel_chat_config);")
             column_names_config = [info[1] for info in cursor.fetchall()]
-            if "cooldown_duration" not in column_names_config:
-                cursor.execute(
-                    "ALTER TABLE channel_chat_config ADD COLUMN cooldown_duration INTEGER;"
-                )
-                log.info("已向 channel_chat_config 表添加 cooldown_duration 列。")
-            if "cooldown_limit" not in column_names_config:
-                cursor.execute(
-                    "ALTER TABLE channel_chat_config ADD COLUMN cooldown_limit INTEGER;"
-                )
-                log.info("已向 channel_chat_config 表添加 cooldown_limit 列。")
             if "active_chat_cache_enabled" not in column_names_config:
                 cursor.execute(
                     "ALTER TABLE channel_chat_config ADD COLUMN active_chat_cache_enabled BOOLEAN;"
@@ -1022,7 +955,11 @@ class ChatDatabaseManager:
     # --- 用户档案管理 ---
     async def get_user_profile(self, user_id: int) -> Optional[sqlite3.Row]:
         """获取用户的核心档案信息，例如是否解锁了个人记忆功能。"""
-        query = "SELECT user_id, has_personal_memory, personal_summary FROM users WHERE user_id = ?"
+        query = """
+            SELECT user_id, has_personal_memory, personal_summary, toilet_enabled
+            FROM users
+            WHERE user_id = ?
+        """
         try:
             return await self._execute(
                 self._db_transaction, query, (user_id,), fetch="one"
@@ -1052,6 +989,27 @@ class ChatDatabaseManager:
         except sqlite3.OperationalError as e:
             log.error(f"为用户 {user_id} 更新或创建个人记忆摘要失败: {e}")
             raise
+
+    async def get_toilet_enabled(self, user_id: int) -> bool:
+        """获取用户是否启用了马桶过滤。"""
+        query = "SELECT toilet_enabled FROM users WHERE user_id = ?"
+        row = await self._execute(
+            self._db_transaction, query, (user_id,), fetch="one"
+        )
+        return bool(row["toilet_enabled"]) if row else False
+
+    async def set_toilet_enabled(self, user_id: int, enabled: bool) -> None:
+        """更新或创建用户的马桶过滤状态。"""
+        query = """
+            INSERT INTO users (user_id, toilet_enabled)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                toilet_enabled = excluded.toilet_enabled;
+        """
+        await self._execute(
+            self._db_transaction, query, (user_id, int(enabled)), commit=True
+        )
+        log.info("已更新用户 %s 的马桶状态为: %s", user_id, enabled)
 
     # --- 聊天设置管理 ---
 
@@ -1083,14 +1041,11 @@ class ChatDatabaseManager:
         self,
         guild_id: int,
         chat_enabled: Optional[bool] = None,
-        warm_up_enabled: Optional[bool] = None,
     ) -> None:
         """更新或创建服务器的全局聊天配置。"""
         updates = {}
         if chat_enabled is not None:
             updates["chat_enabled"] = chat_enabled
-        if warm_up_enabled is not None:
-            updates["warm_up_enabled"] = warm_up_enabled
 
         if not updates:
             return
@@ -1136,30 +1091,21 @@ class ChatDatabaseManager:
         entity_id: int,
         entity_type: str,
         is_chat_enabled: Optional[bool],
-        cooldown_seconds: Optional[int],
-        cooldown_duration: Optional[int],
-        cooldown_limit: Optional[int],
         active_chat_cache_enabled: Optional[bool],
     ) -> None:
-        """更新或创建频道/分类的聊天配置，支持两种CD模式。"""
+        """更新或创建频道/分类的聊天配置。"""
         query = """
             INSERT INTO channel_chat_config (
                 guild_id,
                 entity_id,
                 entity_type,
                 is_chat_enabled,
-                cooldown_seconds,
-                cooldown_duration,
-                cooldown_limit,
                 active_chat_cache_enabled
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, entity_id) DO UPDATE SET
                 entity_type = excluded.entity_type,
                 is_chat_enabled = excluded.is_chat_enabled,
-                cooldown_seconds = excluded.cooldown_seconds,
-                cooldown_duration = excluded.cooldown_duration,
-                cooldown_limit = excluded.cooldown_limit,
                 active_chat_cache_enabled = excluded.active_chat_cache_enabled;
         """
         params = (
@@ -1167,121 +1113,12 @@ class ChatDatabaseManager:
             entity_id,
             entity_type,
             is_chat_enabled,
-            cooldown_seconds,
-            cooldown_duration,
-            cooldown_limit,
             active_chat_cache_enabled,
         )
         await self._execute(self._db_transaction, query, params, commit=True)
         log.info(
             f"已更新服务器 {guild_id} 的实体 {entity_id} ({entity_type}) 的聊天配置。"
         )
-
-    async def get_user_cooldown(
-        self, user_id: int, channel_id: int
-    ) -> Optional[sqlite3.Row]:
-        """获取用户的最后消息时间戳。"""
-        query = "SELECT last_message_timestamp FROM user_channel_cooldown WHERE user_id = ? AND channel_id = ?"
-        return await self._execute(
-            self._db_transaction, query, (user_id, channel_id), fetch="one"
-        )
-
-    async def update_user_cooldown(self, user_id: int, channel_id: int) -> None:
-        """更新用户的最后消息时间戳。"""
-        query = """
-            INSERT INTO user_channel_cooldown (user_id, channel_id, last_message_timestamp)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(user_id, channel_id) DO UPDATE SET
-                last_message_timestamp = CURRENT_TIMESTAMP;
-        """
-        await self._execute(
-            self._db_transaction, query, (user_id, channel_id), commit=True
-        )
-
-    async def add_user_timestamp(self, user_id: int, channel_id: int) -> None:
-        """为频率限制系统记录一条新的消息时间戳。"""
-        query = "INSERT INTO user_channel_timestamps (user_id, channel_id, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)"
-        await self._execute(
-            self._db_transaction, query, (user_id, channel_id), commit=True
-        )
-
-    async def get_user_timestamps_in_window(
-        self, user_id: int, channel_id: int, window_seconds: int
-    ) -> List[sqlite3.Row]:
-        """获取用户在指定时间窗口内的所有消息时间戳。"""
-        query = """
-            SELECT timestamp FROM user_channel_timestamps
-            WHERE user_id = ? AND channel_id = ? AND timestamp >= datetime('now', ?)
-        """
-        time_modifier = f"-{window_seconds} seconds"
-        return await self._execute(
-            self._db_transaction,
-            query,
-            (user_id, channel_id, time_modifier),
-            fetch="all",
-        )
-
-    async def update_user_thread_cooldown_settings(
-        self, user_id: int, settings: Dict[str, Any]
-    ) -> None:
-        """更新用户的个人帖子默认冷却设置。"""
-        # 确保用户记录存在
-        await self._execute(
-            self._db_transaction,
-            "INSERT OR IGNORE INTO user_coins (user_id) VALUES (?)",
-            (user_id,),
-            commit=True,
-        )
-
-        query = """
-            UPDATE user_coins
-            SET
-                thread_cooldown_seconds = ?,
-                thread_cooldown_duration = ?,
-                thread_cooldown_limit = ?
-            WHERE user_id = ?
-        """
-        params = (
-            settings.get("cooldown_seconds"),
-            settings.get("cooldown_duration"),
-            settings.get("cooldown_limit"),
-            user_id,
-        )
-        await self._execute(self._db_transaction, query, params, commit=True)
-        log.info(f"已更新用户 {user_id} 的个人帖子冷却设置: {settings}")
-
-    # --- 暖贴频道管理 ---
-    async def get_warm_up_channels(self, guild_id: int) -> List[int]:
-        """获取服务器的所有暖贴频道ID。"""
-        query = "SELECT channel_id FROM warm_up_channels WHERE guild_id = ?"
-        rows = await self._execute(
-            self._db_transaction, query, (guild_id,), fetch="all"
-        )
-        return [row["channel_id"] for row in rows]
-
-    async def add_warm_up_channel(self, guild_id: int, channel_id: int) -> None:
-        """添加一个暖贴频道。"""
-        query = "INSERT OR IGNORE INTO warm_up_channels (guild_id, channel_id) VALUES (?, ?)"
-        await self._execute(
-            self._db_transaction, query, (guild_id, channel_id), commit=True
-        )
-        log.info(f"已为服务器 {guild_id} 添加暖贴频道 {channel_id}。")
-
-    async def remove_warm_up_channel(self, guild_id: int, channel_id: int) -> None:
-        """移除一个暖贴频道。"""
-        query = "DELETE FROM warm_up_channels WHERE guild_id = ? AND channel_id = ?"
-        await self._execute(
-            self._db_transaction, query, (guild_id, channel_id), commit=True
-        )
-        log.info(f"已为服务器 {guild_id} 移除暖贴频道 {channel_id}。")
-
-    async def is_warm_up_channel(self, guild_id: int, channel_id: int) -> bool:
-        """检查一个频道是否是暖贴频道。"""
-        query = "SELECT 1 FROM warm_up_channels WHERE guild_id = ? AND channel_id = ?"
-        row = await self._execute(
-            self._db_transaction, query, (guild_id, channel_id), fetch="one"
-        )
-        return row is not None
 
     # --- 打工游戏状态管理 ---
     async def get_user_work_status(self, user_id: int) -> Optional[sqlite3.Row]:

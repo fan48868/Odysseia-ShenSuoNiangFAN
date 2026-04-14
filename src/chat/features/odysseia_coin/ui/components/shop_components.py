@@ -19,11 +19,9 @@ from src.chat.features.odysseia_coin.service.coin_service import (
     PERSONAL_MEMORY_ITEM_EFFECT_ID,
     WORLD_BOOK_CONTRIBUTION_ITEM_EFFECT_ID,
     COMMUNITY_MEMBER_UPLOAD_EFFECT_ID,
-    ENABLE_THREAD_REPLIES_EFFECT_ID,
     SELL_BODY_EVENT_SUBMISSION_EFFECT_ID,
+    TOILET_FILTER_ITEM_EFFECT_ID,
 )
-from src.chat.features.chat_settings.ui.channel_settings_modal import ChatSettingsModal
-from src.chat.utils.database import chat_db_manager
 from src.chat.config import chat_config
 from src.chat.features.odysseia_coin.service.shop_service import shop_service
 from src.chat.features.tools.tool_metadata import (
@@ -32,6 +30,7 @@ from src.chat.features.tools.tool_metadata import (
 from src.chat.features.tools.services.user_tool_settings_service import (
     user_tool_settings_service,
 )
+from src.chat.utils.database import chat_db_manager
 
 
 if TYPE_CHECKING:
@@ -61,6 +60,53 @@ class ShopSelect(discord.ui.Select[ViewT]):
     @property
     def view(self) -> ViewT:
         return cast(ViewT, super().view)
+
+
+TOILET_PANEL_TEXT = "这是一个神奇马桶，启动后，会拦截狮子娘抛给你的💩"
+TOILET_ENABLED_TEXT = "已启用马桶，以后狮子娘不能朝你抛屎了"
+TOILET_DISABLED_TEXT = "马桶已关闭，狮子娘可以继续朝你扔大份了😈"
+
+
+class ToiletToggleView(discord.ui.View):
+    """购买马桶后展示的状态控制面板。"""
+
+    def __init__(self, owner_id: int, enabled: bool):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.enabled = enabled
+        self.toggle_button = discord.ui.Button()
+        self.toggle_button.callback = self.toggle_callback
+        self._sync_button_state()
+        self.add_item(self.toggle_button)
+
+    def _sync_button_state(self):
+        self.toggle_button.label = "当前已启用" if self.enabled else "当前已禁用"
+        self.toggle_button.style = (
+            discord.ButtonStyle.success
+            if self.enabled
+            else discord.ButtonStyle.danger
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "这不是你的马桶面板。", ephemeral=True
+            )
+            return False
+        return True
+
+    async def toggle_callback(self, interaction: discord.Interaction):
+        self.enabled = not self.enabled
+        await chat_db_manager.set_toilet_enabled(self.owner_id, self.enabled)
+        self._sync_button_state()
+        await interaction.response.edit_message(content=TOILET_PANEL_TEXT, view=self)
+        await interaction.followup.send(
+            TOILET_ENABLED_TEXT if self.enabled else TOILET_DISABLED_TEXT,
+            ephemeral=True,
+        )
+
+    async def on_timeout(self):
+        self.toggle_button.disabled = True
 
 
 # --- 活动UI组件 ---
@@ -573,7 +619,9 @@ class PurchaseButton(ShopButton["SimpleShopView"]):
         )
 
         final_message = message
-        if success and embed_data:
+        if success and item.get("effect_id") == TOILET_FILTER_ITEM_EFFECT_ID:
+            await self.send_toilet_status_panel(interaction)
+        elif success and embed_data:
             embed = discord.Embed(
                 title=embed_data["title"],
                 description=embed_data["description"],
@@ -591,73 +639,14 @@ class PurchaseButton(ShopButton["SimpleShopView"]):
             self.view.balance = new_balance
             await self.view._update_shop_embed(interaction)
 
-            if (
-                should_show_modal
-                and item.get("effect_id") == ENABLE_THREAD_REPLIES_EFFECT_ID
-            ):
-                await self.handle_thread_settings_modal(interaction)
-
-    async def handle_thread_settings_modal(self, interaction: discord.Interaction):
-        try:
-            user_settings_query = "SELECT thread_cooldown_seconds, thread_cooldown_duration, thread_cooldown_limit FROM user_coins WHERE user_id = ?"
-            user_settings_row = await chat_db_manager._execute(
-                chat_db_manager._db_transaction,
-                user_settings_query,
-                (interaction.user.id,),
-                fetch="one",
-            )
-            current_config = {}
-            if user_settings_row:
-                current_config = {
-                    "cooldown_seconds": user_settings_row["thread_cooldown_seconds"],
-                    "cooldown_duration": user_settings_row["thread_cooldown_duration"],
-                    "cooldown_limit": user_settings_row["thread_cooldown_limit"],
-                }
-
-            async def modal_callback(
-                modal_interaction: discord.Interaction, settings: Dict[str, Any]
-            ):
-                await chat_db_manager.update_user_thread_cooldown_settings(
-                    interaction.user.id, settings
-                )
-                await modal_interaction.response.send_message(
-                    "✅ 你的个人帖子冷却设置已保存！", ephemeral=True
-                )
-
-            modal = ChatSettingsModal(
-                title="设置你的帖子默认冷却",
-                current_config=current_config,
-                on_submit_callback=modal_callback,
-                include_enable_option=False,
-            )
-
-            view = discord.ui.View(timeout=180)
-            button = discord.ui.Button(
-                label="点此设置帖子冷却", style=discord.ButtonStyle.primary
-            )
-
-            async def button_callback(interaction: discord.Interaction):
-                await interaction.response.send_modal(modal)
-                button.disabled = True
-                await interaction.edit_original_response(view=view)
-
-            button.callback = button_callback
-            view.add_item(button)
-
-            await interaction.followup.send(
-                "请点击下方按钮来配置你的帖子或子区里类脑娘的活跃时间,默认是1分钟两次哦",
-                view=view,
-                ephemeral=True,
-            )
-        except Exception as e:
-            log.error(
-                f"为用户 {interaction.user.id} 显示帖子冷却设置模态框时出错: {e}",
-                exc_info=True,
-            )
-            await interaction.followup.send(
-                "❌ 打开设置界面时遇到问题，但你的购买已成功。请联系管理员。",
-                ephemeral=True,
-            )
+    async def send_toilet_status_panel(self, interaction: discord.Interaction):
+        enabled = await chat_db_manager.get_toilet_enabled(interaction.user.id)
+        view = ToiletToggleView(interaction.user.id, enabled)
+        await interaction.followup.send(
+            TOILET_PANEL_TEXT,
+            view=view,
+            ephemeral=True,
+        )
 
 
 class RefreshBalanceButton(ShopButton["SimpleShopView"]):
@@ -821,13 +810,20 @@ class SearchModeButton(ShopButton["TutorialManagementView"]):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if view is None:
+            await interaction.response.send_message(
+                "知识库界面已失效，请重新打开。", ephemeral=True
+            )
+            return
+
         await interaction.response.defer(ephemeral=True)
 
         from src.chat.features.tutorial_search.services.thread_settings_service import (
             thread_settings_service,
         )
 
-        thread_id = self.view.shop_data.thread_id
+        thread_id = view.shop_data.thread_id
         if not thread_id:
             await interaction.followup.send(
                 "❌ 错误：无法找到当前帖子的ID。请确保你在一个帖子中。", ephemeral=True
@@ -842,10 +838,10 @@ class SearchModeButton(ShopButton["TutorialManagementView"]):
         await thread_settings_service.set_search_mode(str(thread_id), new_mode)
 
         # 刷新视图
-        await self.view.initialize()
-        self.view.update_components()
-        embed = await self.view.create_embed()
-        await interaction.edit_original_response(embeds=[embed], view=self.view)
+        await view.initialize()
+        view.update_components()
+        embed = await view.create_embed()
+        await interaction.edit_original_response(embeds=[embed], view=view)
 
 
 class AddTutorialButton(ShopButton["TutorialManagementView"]):
@@ -857,7 +853,14 @@ class AddTutorialButton(ShopButton["TutorialManagementView"]):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        modal = TutorialModal(self.view)
+        view = self.view
+        if view is None:
+            await interaction.response.send_message(
+                "知识库界面已失效，请重新打开。", ephemeral=True
+            )
+            return
+
+        modal = TutorialModal(view)
         await interaction.response.send_modal(modal)
 
 
@@ -872,10 +875,18 @@ class KnowledgeBaseButton(ShopButton["SimpleShopView"]):
     async def callback(self, interaction: discord.Interaction):
         from ..shop_ui import TutorialManagementView
 
+        main_view = self.view
+        if main_view is None:
+            await interaction.response.send_message(
+                "商店界面已失效，请重新打开。", ephemeral=True
+            )
+            return
+
         # 此视图将在下一步中创建
         tutorial_view = TutorialManagementView(
-            bot=self.view.bot, author=self.view.author, shop_data=self.view.shop_data
+            bot=main_view.bot, author=main_view.author, shop_data=main_view.shop_data
         )
+        tutorial_view.interaction = interaction
         await tutorial_view.initialize()
         embed = await tutorial_view.create_embed()
         await interaction.response.edit_message(embeds=[embed], view=tutorial_view)
@@ -916,14 +927,21 @@ class ManageTutorialsButton(ShopButton["TutorialManagementView"]):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        panel = self.view.panel
+        view = self.view
+        if view is None:
+            await interaction.response.send_message(
+                "知识库界面已失效，请重新打开。", ephemeral=True
+            )
+            return
+
+        panel = view.panel
         if not panel:
             await interaction.response.send_message(
                 "发生错误，无法找到教程面板。", ephemeral=True
             )
             return
 
-        tutorials = self.view.shop_data.tutorials
+        tutorials = view.shop_data.tutorials
         if not tutorials:
             await interaction.response.send_message(
                 "你还没有可以管理的教程。", ephemeral=True
@@ -932,11 +950,11 @@ class ManageTutorialsButton(ShopButton["TutorialManagementView"]):
 
         # 调用面板的方法切换到管理模式
         panel.enter_management_mode()
-        self.view.update_components()  # 视图现在将从面板获取组件
+        view.update_components()  # 视图现在将从面板获取组件
 
         # 使用新的嵌入和组件更新消息
-        embed = await self.view.create_embed()
-        await interaction.response.edit_message(embeds=[embed], view=self.view)
+        embed = await view.create_embed()
+        await interaction.response.edit_message(embeds=[embed], view=view)
 
 
 class TutorialActionSelect(ShopSelect["TutorialManagementView"]):
@@ -961,12 +979,19 @@ class TutorialActionSelect(ShopSelect["TutorialManagementView"]):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        panel = self.view.panel
+        view = self.view
+        if view is None:
+            await interaction.response.send_message(
+                "知识库界面已失效，请重新打开。", ephemeral=True
+            )
+            return
+
+        panel = view.panel
         assert panel is not None
         panel.selected_tutorial_id = int(self.values[0])
         # 视图的 update_components 将处理按钮状态
-        self.view.update_components()
-        await interaction.response.edit_message(view=self.view)
+        view.update_components()
+        await interaction.response.edit_message(view=view)
 
 
 class EditTutorialButton(ShopButton["TutorialManagementView"]):
@@ -980,7 +1005,14 @@ class EditTutorialButton(ShopButton["TutorialManagementView"]):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        panel = self.view.panel
+        view = self.view
+        if view is None:
+            await interaction.response.send_message(
+                "知识库界面已失效，请重新打开。", ephemeral=True
+            )
+            return
+
+        panel = view.panel
         assert panel is not None
         if not panel.selected_tutorial_id:
             await interaction.response.send_message(
@@ -1000,7 +1032,7 @@ class EditTutorialButton(ShopButton["TutorialManagementView"]):
 
         # 打开预填充数据的模态框
         modal = EditTutorialModal(
-            view=self.view,
+            view=view,
             tutorial_id=panel.selected_tutorial_id,
             current_data=tutorial_data,
         )
@@ -1019,7 +1051,14 @@ class DeleteTutorialButton(ShopButton["TutorialManagementView"]):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        panel = self.view.panel
+        view = self.view
+        if view is None:
+            await interaction.response.send_message(
+                "知识库界面已失效，请重新打开。", ephemeral=True
+            )
+            return
+
+        panel = view.panel
         assert panel is not None
         if not panel.selected_tutorial_id:
             await interaction.response.send_message(
@@ -1046,13 +1085,13 @@ class DeleteTutorialButton(ShopButton["TutorialManagementView"]):
                     "✅ 教程已成功删除。", ephemeral=True
                 )
                 # 刷新视图
-                await self.view.initialize(force_refresh=True)
+                await view.initialize(force_refresh=True)
                 panel.enter_listing_mode()
-                self.view.update_components()
-                embed = await self.view.create_embed()
-                if self.view.interaction:
-                    await self.view.interaction.edit_original_response(
-                        embeds=[embed], view=self.view
+                view.update_components()
+                embed = await view.create_embed()
+                if view.interaction:
+                    await view.interaction.edit_original_response(
+                        embeds=[embed], view=view
                     )
             else:
                 await modal_interaction.followup.send(
@@ -1071,12 +1110,19 @@ class BackToTutorialListButton(ShopButton["TutorialManagementView"]):
         super().__init__(label="返回列表", style=discord.ButtonStyle.secondary)
 
     async def callback(self, interaction: discord.Interaction):
-        panel = self.view.panel
+        view = self.view
+        if view is None:
+            await interaction.response.send_message(
+                "知识库界面已失效，请重新打开。", ephemeral=True
+            )
+            return
+
+        panel = view.panel
         assert panel is not None
         panel.enter_listing_mode()
-        self.view.update_components()
-        embed = await self.view.create_embed()
-        await interaction.response.edit_message(embeds=[embed], view=self.view)
+        view.update_components()
+        embed = await view.create_embed()
+        await interaction.response.edit_message(embeds=[embed], view=view)
 
 
 # --- 工具设置UI组件 ---

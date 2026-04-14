@@ -33,7 +33,7 @@ DISABLED_TOOLS = (
 
 # 隐藏的工具列表（用户在UI中看不到，也无法禁用的工具）
 # 这些工具是系统必须保留的，不应该让用户控制
-HIDDEN_TOOLS = ["issue_user_warning"]
+HIDDEN_TOOLS = [""]
 
 # --- Gemini AI 配置 ---
 # 定义要使用的 Gemini 模型名称
@@ -116,7 +116,6 @@ QUERY_REWRITING_MODEL = "gemini-2.5-flash-lite"
 
 # RAG 搜索返回的结果数量
 RAG_N_RESULTS_DEFAULT = 5  # 普通聊天的默认值
-RAG_N_RESULTS_THREAD_COMMENTOR = 10  # 暖贴功能的特定值
 FORUM_SEARCH_DEFAULT_LIMIT = 5  # 论坛搜索工具返回结果的默认数量
 
 # RAG 搜索结果的距离阈值。分数越低越相似。
@@ -235,15 +234,6 @@ GEMINI_GIFT_GEN_CONFIG = {
     "max_output_tokens": 3000,
 }
 
-# 用于生成帖子夸奖的配置
-GEMINI_THREAD_PRAISE_CONFIG = {
-    "temperature": 1.21,
-    "top_p": 0.97,
-    "top_k": 40,
-    "max_output_tokens": 8192,
-    "thinking_budget": 2000,  # 为暖贴功能设置独立的思考预算
-}
-
 # 用于生成个人记忆摘要的配置
 GEMINI_SUMMARY_GEN_CONFIG = {
     "temperature": 0.1,  # 降低温度，使输出更确定性
@@ -297,11 +287,6 @@ COIN_REWARD_GUILD_IDS = _parse_ids("COIN_REWARD_GUILD_IDS")
 COIN_REWARD_DELAY_SECONDS = 30
 # 新帖子创建后，延迟多久进行RAG索引（秒）
 FORUM_SYNC_DELAY_SECONDS = 30
-# --- 帖子评价功能 ---
-THREAD_COMMENTOR_CONFIG = {
-    "INITIAL_DELAY_SECONDS": 600,  # 暖贴功能的初始延迟（秒）
-}
-
 # --- 好感度系统 ---
 AFFECTION_CONFIG = {
     "INCREASE_CHANCE": 1,  # 每次对话增加好感度的几率
@@ -517,28 +502,6 @@ CONFESSION_PROMPT = """
 
 **请直接开始输出你的回应:**
 """
-
-
-WARMUP_MESSAGES = {
-    "consent_prompts": [
-        "你正在刷群，像一个普通群友一样，偶然看到了 **{user_nickname}** 的新帖子。你的任务是模仿一个真实群友的语气，自然地去捧场。**核心要求：**请对帖子的内容给出一个**整体的、总结性的**夸赞或感想，**绝对不要逐条分析或引用原文**。你的回复应该简短、口语化，就像一条真实的朋友圈评论。最后，别忘了号召大家给帖子点赞。"
-    ],
-    "consent_dm": (
-        "哈喽！{user_mention}！我是狮子娘！\n"
-        "我刚刚在你的新帖子里留了言，给你加油打气啦！暖了暖帖~\n\n"
-        "为了确认你是否喜欢我这样做，想征求一下你的意见：\n"
-        "**你希望我以后继续为你的新帖子暖帖吗？**\n\n"
-        "- 选择“欢迎”，我以后会经常来你的帖子里互动。\n"
-        "- 选择“算了”，我以后就不会再打扰啦。\n\n"
-        "---\n"
-        "*P.S. 如果你希望我能在你的帖子里参与聊天和讨论，可以在商店里找到“通行证”放我进来哦！*"
-    ),
-    "consent_accept_label": "欢迎你来！",
-    "consent_decline_label": "谢谢，但下次算了",
-    "consent_accept_response": "太好啦！以后我还会常来你的帖子玩的！<微笑>\n如果你改变主意了，随时可以在商店的“物品-给自己”分类里找到“枯萎的向日葵”,不让我再来你的帖子下面玩啦",
-    "consent_decline_response": "好的，我明白了。以后我就不来打扰你的帖子啦。\n\n如果你想让我回来，可以在商店的“物品-给自己”分类里找到“魔法向日葵”来重新允许我来你的帖子下玩哦\n呜呜...再见",
-    "consent_error_response": "处理你的请求时好像出错了...",
-}
 
 # --- 频道禁言功能 ---
 CHANNEL_MUTE_CONFIG = {

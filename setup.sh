@@ -123,6 +123,105 @@ ask_question() {
     fi
 }
 
+# 查找环境变量模板
+resolve_env_template() {
+    if [ -f ".env.example" ]; then
+        ENV_TEMPLATE_FILE=".env.example"
+    elif [ -f "env.example" ]; then
+        ENV_TEMPLATE_FILE="env.example"
+    else
+        say_oops "没有找到 .env.example 或 env.example，暂时没法生成配置文件哦～"
+        exit 1
+    fi
+}
+
+# 转义双引号环境变量中的特殊字符
+escape_env_double_quotes() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# 替换单行环境变量
+replace_env_line() {
+    local key="$1"
+    local value="$2"
+    local quote_mode="${3:-double}"
+    local rendered_value="$value"
+    local tmp_file=""
+
+    if [ "$quote_mode" = "double" ]; then
+        rendered_value=$(escape_env_double_quotes "$value")
+    fi
+
+    tmp_file=$(mktemp)
+    awk -v key="$key" -v value="$rendered_value" -v quote_mode="$quote_mode" '
+        BEGIN { replaced = 0 }
+        $0 ~ "^" key "=" {
+            if (quote_mode == "raw") {
+                print key "=" value
+            } else {
+                print key "=\"" value "\""
+            }
+            replaced = 1
+            next
+        }
+        { print }
+        END {
+            if (!replaced) {
+                if (quote_mode == "raw") {
+                    print key "=" value
+                } else {
+                    print key "=\"" value "\""
+                }
+            }
+        }
+    ' .env > "$tmp_file" && mv "$tmp_file" .env
+}
+
+# 替换多行环境变量块，例如 GOOGLE_API_KEYS_LIST="
+# key1
+# key2
+# "
+replace_env_multiline_block() {
+    local key="$1"
+    local value="$2"
+    local rendered_value=""
+    local tmp_file=""
+
+    rendered_value=$(escape_env_double_quotes "$value")
+    tmp_file=$(mktemp)
+    awk -v key="$key" -v value="$rendered_value" '
+        BEGIN { replaced = 0; skipping = 0 }
+        skipping {
+            if ($0 == "\"") {
+                skipping = 0
+            }
+            next
+        }
+        $0 ~ "^" key "=\"" {
+            print key "=\""
+            if (length(value) > 0) {
+                print value
+            }
+            print "\""
+            replaced = 1
+            if ($0 !~ ("^" key "=\"[^\"]*\"$")) {
+                skipping = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (!replaced) {
+                print key "=\""
+                if (length(value) > 0) {
+                    print value
+                }
+                print "\""
+            }
+        }
+    ' .env > "$tmp_file" && mv "$tmp_file" .env
+}
+
 # 配置必需项
 configure_required() {
     say_wait "首先来配置一些必要的信息～"
@@ -137,7 +236,7 @@ configure_required() {
     say_hello "获取地址: https://makersuite.google.com/app/apikey"
     say_warning "如果留空，RAG检索功能将被禁用，但AI对话仍可使用"
 
-    GOOGLE_API_KEYS=""
+    GOOGLE_API_KEYS_LIST=""
     key_count=0
     local key=""
     while true; do
@@ -152,10 +251,11 @@ configure_required() {
             fi
             break
         fi
-        if [ -n "$GOOGLE_API_KEYS" ]; then
-            GOOGLE_API_KEYS="$GOOGLE_API_KEYS,$key"
+        if [ -n "$GOOGLE_API_KEYS_LIST" ]; then
+            GOOGLE_API_KEYS_LIST="${GOOGLE_API_KEYS_LIST}
+$key"
         else
-            GOOGLE_API_KEYS="$key"
+            GOOGLE_API_KEYS_LIST="$key"
         fi
         key_count=$((key_count + 1))
     done
@@ -184,7 +284,7 @@ configure_openai_endpoints() {
     say_hello "Moonshot 也可以先留空哦～"
     MOONSHOT_URL=$(ask_question "Moonshot 端点 URL" "https://api.moonshot.cn/v1" "false")
     say_wait "如果你有多个 Moonshot key，用英文逗号隔开就好啦～"
-    MOONSHOT_API_KEY=$(ask_question "Moonshot API 密钥（可留空）" "" "false")
+    MOONSHOT_API_KEY=$(ask_question "Moonshot API 密钥（若要开启识图工具（deepseek等模型），需要配置这个）" "" "false")
 }
 
 # 配置数据库
@@ -260,66 +360,31 @@ configure_other() {
 # 生成 .env 文件
 generate_env_file() {
     echo ""
-    say_wait "正在生成配置文件..."
+    resolve_env_template
+    say_wait "正在基于 ${ENV_TEMPLATE_FILE} 生成配置文件...请稍等"
 
-    cat > .env << EOF
-# 类脑娘的环境配置文件
-# 由类脑娘亲手为你生成哦～
+    cp "$ENV_TEMPLATE_FILE" .env
 
-# Discord 机器人令牌
-DISCORD_TOKEN="$DISCORD_TOKEN"
-
-# 开发服务器 ID（用于快速同步命令）
-GUILD_ID="$GUILD_ID"
-
-# 权限控制
-DEVELOPER_USER_IDS="$DEVELOPER_USER_IDS"
-ADMIN_ROLE_IDS="$ADMIN_ROLE_IDS"
-
-# Gemini AI 配置
-# 自定义端点（用于AI对话）
-CUSTOM_GEMINI_URL="$CUSTOM_GEMINI_URL"
-CUSTOM_GEMINI_API_KEY="$CUSTOM_GEMINI_API_KEY"
-
-# OpenAI 格式端点（可选）
-DEEPSEEK_URL="$DEEPSEEK_URL"
-DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY"
-MOONSHOT_URL="$MOONSHOT_URL"
-MOONSHOT_API_KEY="$MOONSHOT_API_KEY"
-
-# RAG检索用的API密钥
-GOOGLE_API_KEYS_LIST="$GOOGLE_API_KEYS"
-
-# PostgreSQL 数据库配置
-POSTGRES_DB="$POSTGRES_DB"
-POSTGRES_USER="$POSTGRES_USER"
-POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
-DB_PORT=$DB_PORT
-
-# 功能开关
-CHAT_ENABLED=$CHAT_ENABLED
-LOG_AI_FULL_CONTEXT=$LOG_AI_FULL_CONTEXT
-
-# 工具禁用列表
-DISABLED_TOOLS="$DISABLED_TOOLS"
-
-# 类脑币系统
-COIN_REWARD_GUILD_IDS="$COIN_REWARD_GUILD_IDS"
-
-# 论坛搜索频道
-FORUM_SEARCH_CHANNEL_IDS="$FORUM_SEARCH_CHANNEL_IDS"
-
-# Discord OAuth（可选）
-VITE_DISCORD_CLIENT_ID=""
-DISCORD_CLIENT_SECRET=""
-
-# Gemini 调试
-LOG_DETAILED_GEMINI_PROCESS=True
-
-# ComfyUI 图像生成配置
-COMFYUI_SERVER_ADDRESS=""
-COMFYUI_WORKFLOW_PATH=""
-EOF
+    replace_env_line "DISCORD_TOKEN" "$DISCORD_TOKEN"
+    replace_env_line "GUILD_ID" "$GUILD_ID"
+    replace_env_line "DEVELOPER_USER_IDS" "$DEVELOPER_USER_IDS"
+    replace_env_line "ADMIN_ROLE_IDS" "$ADMIN_ROLE_IDS"
+    replace_env_multiline_block "GOOGLE_API_KEYS_LIST" "$GOOGLE_API_KEYS_LIST"
+    replace_env_line "CHAT_ENABLED" "$CHAT_ENABLED" "raw"
+    replace_env_line "LOG_AI_FULL_CONTEXT" "$LOG_AI_FULL_CONTEXT" "raw"
+    replace_env_line "DISABLED_TOOLS" "$DISABLED_TOOLS"
+    replace_env_line "COIN_REWARD_GUILD_IDS" "$COIN_REWARD_GUILD_IDS"
+    replace_env_line "FORUM_SEARCH_CHANNEL_IDS" "$FORUM_SEARCH_CHANNEL_IDS"
+    replace_env_line "CUSTOM_GEMINI_URL" "$CUSTOM_GEMINI_URL"
+    replace_env_line "CUSTOM_GEMINI_API_KEY" "$CUSTOM_GEMINI_API_KEY"
+    replace_env_line "DEEPSEEK_URL" "$DEEPSEEK_URL"
+    replace_env_line "DEEPSEEK_API_KEY" "$DEEPSEEK_API_KEY"
+    replace_env_line "MOONSHOT_URL" "$MOONSHOT_URL"
+    replace_env_line "MOONSHOT_API_KEY" "$MOONSHOT_API_KEY"
+    replace_env_line "POSTGRES_DB" "$POSTGRES_DB"
+    replace_env_line "POSTGRES_USER" "$POSTGRES_USER"
+    replace_env_line "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
+    replace_env_line "DB_PORT" "$DB_PORT" "raw"
 
     say_success "配置文件生成完成～"
 }

@@ -46,6 +46,10 @@ class ShopService:
             # 1. 获取用户余额和商品列表
             balance = await coin_service.get_balance(user_id)
             items_rows = await coin_service.get_all_items()
+            if not items_rows:
+                seeded_count = await coin_service.seed_default_shop_items_if_empty()
+                if seeded_count:
+                    items_rows = await coin_service.get_all_items()
             items = [dict(item) for item in items_rows]
 
             # 2. 处理特定商品的业务逻辑（例如，个人记忆功能）

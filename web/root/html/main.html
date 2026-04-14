@@ -239,7 +239,7 @@
                     </div>
 
                     <div class="panel-meta" id="bot-log-summary">显示当前缓存中的 Bot 日志</div>
-                    <pre class="log-container" id="bot-log-container">Loading logs...</pre>
+                    <div class="log-container" id="bot-log-container" role="log" aria-live="off" spellcheck="false">Loading logs...</div>
                 </article>
             </section>
 
@@ -350,7 +350,7 @@
                     </div>
 
                     <div class="panel-meta" id="webui-log-summary">等待 WebUI 日志加载</div>
-                    <pre class="log-container" id="webui-log-container">Loading WebUI logs...</pre>
+                    <div class="log-container" id="webui-log-container" role="log" aria-live="off" spellcheck="false">Loading WebUI logs...</div>
                 </article>
             </section>
         </main>
@@ -419,6 +419,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let botAutoScrollEnabled = false;
     let webuiAutoScrollEnabled = false;
     let mobileSidebarOpen = false;
+    const botLogRenderState = { pending: false, content: '', mode: 'text' };
+    const webuiLogRenderState = { pending: false, content: '', mode: 'text' };
 
     const escapeHtml = (text) => text
         .replace(/&/g, '&amp;')
@@ -474,6 +476,49 @@ document.addEventListener('DOMContentLoaded', () => {
     const toggleAutoScroll = (button, enabled) => {
         button.classList.toggle('is-active', enabled);
         button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    };
+
+    const isSelectionInside = (container) => {
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+            return false;
+        }
+
+        return [selection.anchorNode, selection.focusNode].some((node) =>
+            node && (node === container || container.contains(node))
+        );
+    };
+
+    const syncLogContent = (container, state, content, mode = 'html') => {
+        if (isSelectionInside(container)) {
+            state.pending = true;
+            return false;
+        }
+
+        const normalizedMode = mode === 'text' ? 'text' : 'html';
+        state.pending = false;
+        if (state.content === content && state.mode === normalizedMode) {
+            return false;
+        }
+
+        if (normalizedMode === 'text') {
+            container.textContent = content;
+        } else {
+            container.innerHTML = content;
+        }
+
+        state.content = content;
+        state.mode = normalizedMode;
+        return true;
+    };
+
+    const flushPendingLogRender = () => {
+        if (botLogRenderState.pending && !isSelectionInside(botLogContainer)) {
+            renderBotLogs();
+        }
+        if (webuiLogRenderState.pending && !isSelectionInside(webuiLogContainer)) {
+            renderWebUILogs();
+        }
     };
 
     const isMobileLayout = () => window.matchMedia('(max-width: 768px)').matches;
@@ -595,14 +640,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 const regex = new RegExp(regexStr, 'i');
                 lines = lines.filter((line) => regex.test(line));
             } catch (error) {
-                botLogContainer.textContent = 'Invalid Regex...';
+                syncLogContent(botLogContainer, botLogRenderState, 'Invalid Regex...', 'text');
+                if (botLogRenderState.pending) {
+                    return;
+                }
                 botLogSummary.textContent = '正则表达式无效';
                 return;
             }
         }
 
         if (!lines.length) {
-            botLogContainer.textContent = 'No matching logs.';
+            syncLogContent(botLogContainer, botLogRenderState, 'No matching logs.', 'text');
+            if (botLogRenderState.pending) {
+                return;
+            }
             botLogSummary.textContent = '当前筛选条件下没有匹配的 Bot 日志';
             document.getElementById('dashboard-log-count-text').textContent = '0';
             document.getElementById('dashboard-log-lines-text').textContent = '0 行 Bot 日志';
@@ -611,19 +662,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const html = lines.map((line) => {
             const localizedLine = escapeHtml(localizeBotLogTimestamp(line));
-            if (localizedLine.includes('[CRITICAL]')) return `<span class="log-critical">${localizedLine}</span>`;
-            if (localizedLine.includes('[ERROR]')) return `<span class="log-error">${localizedLine}</span>`;
-            if (localizedLine.includes('[WARNING]')) return `<span class="log-warning">${localizedLine}</span>`;
-            if (localizedLine.includes('[INFO]')) return `<span class="log-info">${localizedLine}</span>`;
-            if (localizedLine.includes('[DEBUG]')) return `<span class="log-debug">${localizedLine}</span>`;
-            return `<span>${localizedLine}</span>`;
+            if (localizedLine.includes('[CRITICAL]')) return `<div class="log-line log-critical">${localizedLine}</div>`;
+            if (localizedLine.includes('[ERROR]')) return `<div class="log-line log-error">${localizedLine}</div>`;
+            if (localizedLine.includes('[WARNING]')) return `<div class="log-line log-warning">${localizedLine}</div>`;
+            if (localizedLine.includes('[INFO]')) return `<div class="log-line log-info">${localizedLine}</div>`;
+            if (localizedLine.includes('[DEBUG]')) return `<div class="log-line log-debug">${localizedLine}</div>`;
+            return `<div class="log-line">${localizedLine}</div>`;
         }).join('');
 
-        botLogContainer.innerHTML = html;
+        const rendered = syncLogContent(botLogContainer, botLogRenderState, html, 'html');
+        if (botLogRenderState.pending) {
+            return;
+        }
         botLogSummary.textContent = `${lines.length} 行日志，时区 ${selectedTimezone}`;
         document.getElementById('dashboard-log-count-text').textContent = String(lines.length);
         document.getElementById('dashboard-log-lines-text').textContent = `${lines.length} 行 Bot 日志`;
-        if (botAutoScrollEnabled) {
+        if (botAutoScrollEnabled && rendered) {
             scrollLogToBottom(botLogContainer);
         }
     };
@@ -647,14 +701,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 const regex = new RegExp(regexStr, 'i');
                 lines = lines.filter((line) => regex.test(line));
             } catch (error) {
-                webuiLogContainer.textContent = 'Invalid Regex...';
+                syncLogContent(webuiLogContainer, webuiLogRenderState, 'Invalid Regex...', 'text');
+                if (webuiLogRenderState.pending) {
+                    return;
+                }
                 webuiLogSummary.textContent = '正则表达式无效';
                 return;
             }
         }
 
         if (!lines.length) {
-            webuiLogContainer.textContent = 'No matching logs.';
+            syncLogContent(webuiLogContainer, webuiLogRenderState, 'No matching logs.', 'text');
+            if (webuiLogRenderState.pending) {
+                return;
+            }
             webuiLogSummary.textContent = '当前筛选条件下没有匹配的 WebUI 日志';
             document.getElementById('dashboard-webui-count-text').textContent = '0';
             return;
@@ -663,19 +723,22 @@ document.addEventListener('DOMContentLoaded', () => {
         const html = lines.map((line) => {
             const escapedLine = escapeHtml(line);
             const upper = escapedLine.toUpperCase();
-            if (upper.includes(' CRITICAL ')) return `<span class="log-critical">${escapedLine}</span>`;
-            if (upper.includes(' ERROR ')) return `<span class="log-error">${escapedLine}</span>`;
-            if (upper.includes(' WARNING ')) return `<span class="log-warning">${escapedLine}</span>`;
-            if (upper.includes(' INFO ')) return `<span class="log-info">${escapedLine}</span>`;
-            if (upper.includes(' DEBUG ')) return `<span class="log-debug">${escapedLine}</span>`;
-            return `<span>${escapedLine}</span>`;
+            if (upper.includes(' CRITICAL ')) return `<div class="log-line log-critical">${escapedLine}</div>`;
+            if (upper.includes(' ERROR ')) return `<div class="log-line log-error">${escapedLine}</div>`;
+            if (upper.includes(' WARNING ')) return `<div class="log-line log-warning">${escapedLine}</div>`;
+            if (upper.includes(' INFO ')) return `<div class="log-line log-info">${escapedLine}</div>`;
+            if (upper.includes(' DEBUG ')) return `<div class="log-line log-debug">${escapedLine}</div>`;
+            return `<div class="log-line">${escapedLine}</div>`;
         }).join('');
 
-        webuiLogContainer.innerHTML = html;
+        const rendered = syncLogContent(webuiLogContainer, webuiLogRenderState, html, 'html');
+        if (webuiLogRenderState.pending) {
+            return;
+        }
         webuiLogSummary.textContent = `${lines.length} 行 WebUI 日志`;
         document.getElementById('dashboard-webui-count-text').textContent = String(lines.length);
         document.getElementById('dashboard-webui-state-text').textContent = `最近刷新 ${formatTimestamp()}`;
-        if (webuiAutoScrollEnabled) {
+        if (webuiAutoScrollEnabled && rendered) {
             scrollLogToBottom(webuiLogContainer);
         }
     };
@@ -705,7 +768,7 @@ document.addEventListener('DOMContentLoaded', () => {
             renderBotLogs();
         } catch (error) {
             fullBotLogContent = '';
-            botLogContainer.textContent = 'Error fetching Bot logs.';
+            syncLogContent(botLogContainer, botLogRenderState, 'Error fetching Bot logs.', 'text');
             botLogSummary.textContent = 'Bot 日志加载失败';
         }
     };
@@ -721,7 +784,7 @@ document.addEventListener('DOMContentLoaded', () => {
             renderWebUILogs();
         } catch (error) {
             fullWebUILogContent = '';
-            webuiLogContainer.textContent = 'Error fetching WebUI logs.';
+            syncLogContent(webuiLogContainer, webuiLogRenderState, 'Error fetching WebUI logs.', 'text');
             webuiLogSummary.textContent = 'WebUI 日志加载失败';
         }
     };
@@ -876,6 +939,7 @@ document.addEventListener('DOMContentLoaded', () => {
     restartBtn.addEventListener('click', () => sendControlCommand('restart'));
     restartWebBtn.addEventListener('click', () => sendControlCommand('restart_web'));
     shutdownBtn.addEventListener('click', () => sendControlCommand('shutdown'));
+    document.addEventListener('selectionchange', flushPendingLogRender);
 
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyThemeLabel);
     window.matchMedia('(max-width: 768px)').addEventListener('change', () => {
@@ -896,10 +960,10 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(fetchWebUILogs, 2000);
     setInterval(fetchBotLogs, 1500);
     setInterval(() => {
-        if (botAutoScrollEnabled) {
+        if (botAutoScrollEnabled && !isSelectionInside(botLogContainer)) {
             scrollLogToBottom(botLogContainer);
         }
-        if (webuiAutoScrollEnabled) {
+        if (webuiAutoScrollEnabled && !isSelectionInside(webuiLogContainer)) {
             scrollLogToBottom(webuiLogContainer);
         }
     }, 500);

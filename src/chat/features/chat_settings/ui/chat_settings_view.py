@@ -16,7 +16,6 @@ from src.database.services.token_usage_service import token_usage_service
 from src.database.database import AsyncSessionLocal
 from src.database.models import TokenUsage
 from datetime import datetime
-from src.chat.features.chat_settings.ui.warm_up_settings_view import WarmUpSettingsView
 from src.chat.features.chat_settings.ui.vercel_gateway_settings_view import VercelGatewayProvidersView
 from src.chat.features.chat_settings.ui.components import PaginatedSelect
 from src.chat.services.event_service import event_service
@@ -300,12 +299,8 @@ class ChatSettingsView(View):
             await self.on_global_toggle(interaction)
         elif custom_id == "reaction_toggle":
             await self.on_reaction_toggle(interaction)
-        elif custom_id == "warm_up_toggle":
-            await self.on_warm_up_toggle(interaction)
         elif custom_id == "global_dm_toggle":
             await self.on_global_dm_toggle(interaction)
-        elif custom_id == "warm_up_settings":
-            await self.on_warm_up_settings(interaction)
         elif (
             self.entity_paginator
             and custom_id
@@ -370,37 +365,12 @@ class ChatSettingsView(View):
         )
         await self._update_view(interaction)
 
-    async def on_warm_up_toggle(self, interaction: Interaction):
-        current_state = self.settings.get("global", {}).get("warm_up_enabled", True)
-        new_state = not current_state
-        if not self.guild:
-            return
-        await self.service.db_manager.update_global_chat_config(
-            self.guild.id, warm_up_enabled=new_state
-        )
-        await self._update_view(interaction)
-
     async def on_global_dm_toggle(self, interaction: Interaction):
         new_state = not self.dm_enabled
         await self.service.db_manager.set_global_setting(
             "global_dm_enabled", "true" if new_state else "false"
         )
         await self._update_view(interaction)
-
-    async def on_warm_up_settings(self, interaction: Interaction):
-        """切换到暖贴频道设置视图。"""
-        if not self.message:
-            await interaction.response.send_message(
-                "无法找到原始消息，请重新打开设置面板。", ephemeral=True
-            )
-            return
-
-        await interaction.response.defer()
-        warm_up_view = await WarmUpSettingsView.create(interaction, self.message)
-        await interaction.edit_original_response(
-            content="管理暖贴功能启用的论坛频道：", view=warm_up_view
-        )
-        self.stop()
 
     async def on_faction_select(self, interaction: Interaction):
         """处理派系选择事件。"""
@@ -481,9 +451,6 @@ class ChatSettingsView(View):
                 entity_id=entity_id,
                 entity_type=entity_type,
                 is_chat_enabled=settings.get("is_chat_enabled"),
-                cooldown_seconds=settings.get("cooldown_seconds"),
-                cooldown_duration=settings.get("cooldown_duration"),
-                cooldown_limit=settings.get("cooldown_limit"),
                 active_chat_cache_enabled=settings.get("active_chat_cache_enabled"),
             )
 
@@ -500,17 +467,6 @@ class ChatSettingsView(View):
             if is_chat_enabled is False:
                 enabled_str = "❌ 关闭"
 
-            cooldown_seconds = settings.get("cooldown_seconds")
-            cd_sec_str = (
-                f"{cooldown_seconds} 秒" if cooldown_seconds is not None else "继承"
-            )
-
-            cooldown_duration = settings.get("cooldown_duration")
-            cooldown_limit = settings.get("cooldown_limit")
-            freq_str = "继承"
-            if cooldown_duration is not None and cooldown_limit is not None:
-                freq_str = f"{cooldown_duration} 秒内最多 {cooldown_limit} 次"
-
             active_chat_cache_str = "继承"
             active_chat_cache_enabled = settings.get("active_chat_cache_enabled")
             if active_chat_cache_enabled is True:
@@ -520,9 +476,7 @@ class ChatSettingsView(View):
 
             feedback = (
                 f"✅ 已成功为 **{entity_name}** ({entity_type}) 更新设置。\n"
-                f"🔹 **聊天总开关**: {enabled_str}\n"
-                f"🔹 **固定冷却(秒)**: {cd_sec_str}\n"
-                f"🔹 **频率限制**: {freq_str}"
+                f"🔹 **聊天总开关**: {enabled_str}"
             )
             if entity_type == "channel":
                 feedback += f"\n🔹 **主动聊天缓存**: {active_chat_cache_str}"

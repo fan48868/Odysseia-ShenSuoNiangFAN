@@ -4,6 +4,7 @@ import json
 import os
 
 import asyncio
+from sqlalchemy import select
 
 # 导入新的服务依赖
 from src.chat.services.gemini_service import GeminiService, gemini_service
@@ -12,6 +13,8 @@ from src.chat.config import chat_config
 from src.chat.features.world_book.services.incremental_rag_service import (
     incremental_rag_service,
 )
+from src.database.database import AsyncSessionLocal
+from src.database.models import CommunityMemberProfile
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +35,23 @@ class WorldBookService:
     def is_ready(self) -> bool:
         """检查服务是否已准备好（所有依赖项都可用）。"""
         return self.gemini_service.is_available()
+
+    @staticmethod
+    def _flatten_profile_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+        profile_dict = dict(row)
+        source_metadata = profile_dict.get("source_metadata")
+        if isinstance(source_metadata, str):
+            try:
+                source_metadata = json.loads(source_metadata)
+                profile_dict["source_metadata"] = source_metadata
+            except Exception:
+                source_metadata = None
+
+        if isinstance(source_metadata, dict):
+            for key in ("name", "personality", "background", "preferences"):
+                if key in source_metadata and key not in profile_dict:
+                    profile_dict[key] = source_metadata.get(key)
+        return profile_dict
 
     async def find_entries(
         self,
@@ -244,67 +264,58 @@ class WorldBookService:
             一个包含用户档案数据的字典，如果找不到则返回 None。
         """
         log.info(f"正在从 ParadeDB 查询 discord_id 为 {discord_id} 的用户档案...")
-        conn = incremental_rag_service._get_parade_connection()
-        if not conn:
-            log.error("ParadeDB 连接不可用，无法获取用户档案。")
-            return None
+        timeout_seconds = 3.0
+
+        async def _fetch_profile_once() -> Optional[Dict[str, Any]]:
+            async with AsyncSessionLocal() as session:
+                stmt = select(CommunityMemberProfile).where(
+                    CommunityMemberProfile.discord_id == str(discord_id)
+                )
+                result = await session.execute(stmt)
+                profile = result.scalars().first()
+                if profile is None:
+                    return None
+                return self._flatten_profile_dict(
+                    {
+                        "id": profile.id,
+                        "discord_id": profile.discord_id,
+                        "title": profile.title,
+                        "personal_summary": profile.personal_summary,
+                        "source_metadata": profile.source_metadata,
+                    }
+                )
 
         try:
-            # 使用异步游标
-            from psycopg2.extras import RealDictCursor
-            import psycopg2
-
-            def _flatten_profile(row: Any) -> Dict[str, Any]:
-                profile_dict = dict(row)
-                source_metadata = profile_dict.get("source_metadata")
-                if isinstance(source_metadata, str):
-                    try:
-                        source_metadata = json.loads(source_metadata)
-                        profile_dict["source_metadata"] = source_metadata
-                    except Exception:
-                        source_metadata = None
-
-                if isinstance(source_metadata, dict):
-                    for k in ("name", "personality", "background", "preferences"):
-                        if k in source_metadata and k not in profile_dict:
-                            profile_dict[k] = source_metadata.get(k)
-                return profile_dict
-
-            def _fetch_profile() -> Optional[Dict[str, Any]]:
-                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor.execute(
-                        """
-                        SELECT
-                            discord_id,
-                            title,
-                            personal_summary,
-                            source_metadata
-                        FROM community.member_profiles
-                        WHERE discord_id = %s
-                        """,
-                        (str(discord_id),),
-                    )
-                    row = cursor.fetchone()
-                if not row:
-                    return None
-                return _flatten_profile(row)
-
-            # 创建一个新的游标
-            profile = _fetch_profile()
+            profile = await asyncio.wait_for(_fetch_profile_once(), timeout=timeout_seconds)
             if profile:
                 log.info(f"成功找到 discord_id {discord_id} 的用户档案。")
                 return profile
 
             log.warning(f"在 ParadeDB 中未找到 discord_id {discord_id} 的用户档案。")
-            return None
+            if not auto_create:
+                return None
 
-        except psycopg2.Error as e:
-            log.error(f"从 ParadeDB 查询用户档案时发生数据库错误: {e}", exc_info=True)
+            created = await asyncio.wait_for(
+                self._auto_create_minimal_member_profile(
+                    discord_id=discord_id,
+                    user_name=user_name,
+                ),
+                timeout=timeout_seconds,
+            )
+            if not created:
+                return None
+
+            return await asyncio.wait_for(_fetch_profile_once(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            log.warning(
+                "查询用户档案超时，已降级为空结果 | discord_id=%s | timeout=%.1fs",
+                discord_id,
+                timeout_seconds,
+            )
             return None
         except Exception as e:
             log.error(f"查询用户档案时发生未知错误: {e}", exc_info=True)
             return None
-        # 注意：我们不在这里关闭连接或游标，假设连接池会管理它
 
     async def _auto_create_minimal_member_profile(
         self,
@@ -318,11 +329,6 @@ class WorldBookService:
         - personality: 直接复制 user_name
         - background/preferences 留空
         """
-        conn = incremental_rag_service._get_parade_connection()
-        if not conn:
-            log.error("ParadeDB 连接不可用，无法自动创建用户名片。")
-            return False
-
         safe_name = (user_name or "").strip() or f"用户 {discord_id}"
         personality = safe_name
         background = ""
@@ -348,31 +354,29 @@ class WorldBookService:
         external_id = f"auto_discord_{discord_id}"
 
         try:
-            from psycopg2.extras import RealDictCursor
-            import psycopg2
+            member_id: Optional[str] = None
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    stmt = select(CommunityMemberProfile).where(
+                        CommunityMemberProfile.discord_id == str(discord_id)
+                    )
+                    result = await session.execute(stmt)
+                    existing = result.scalars().first()
+                    if existing is not None:
+                        member_id = str(existing.id)
+                    else:
+                        profile = CommunityMemberProfile(
+                            external_id=external_id,
+                            discord_id=str(discord_id),
+                            title=safe_name,
+                            full_text=full_text,
+                            source_metadata=source_metadata,
+                        )
+                        session.add(profile)
+                        await session.flush()
+                        member_id = str(profile.id)
 
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO community.member_profiles
-                    (external_id, discord_id, title, full_text, source_metadata, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
-                    ON CONFLICT (discord_id) DO NOTHING
-                    RETURNING id
-                    """,
-                    (
-                        external_id,
-                        str(discord_id),
-                        safe_name,
-                        full_text,
-                        json.dumps(source_metadata, ensure_ascii=False),
-                    ),
-                )
-                row = cursor.fetchone()
-                conn.commit()
-
-            if row and row.get("id"):
-                member_id = str(row["id"])
+            if member_id:
                 log.info(
                     f"已自动创建最小名片: discord_id={discord_id}, member_id={member_id}"
                 )
@@ -382,25 +386,11 @@ class WorldBookService:
                 return True
 
             return True
-        except psycopg2.Error as e:
-            log.error(
-                f"自动创建最小名片时发生数据库错误: discord_id={discord_id}, err={e}",
-                exc_info=True,
-            )
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            return False
         except Exception as e:
             log.error(
                 f"自动创建最小名片时发生未知错误: discord_id={discord_id}, err={e}",
                 exc_info=True,
             )
-            try:
-                conn.rollback()
-            except Exception:
-                pass
             return False
 
 

@@ -16,13 +16,17 @@ log = logging.getLogger(__name__)
 PERSONAL_MEMORY_ITEM_EFFECT_ID = "unlock_personal_memory"
 WORLD_BOOK_CONTRIBUTION_ITEM_EFFECT_ID = "contribute_to_world_book"
 COMMUNITY_MEMBER_UPLOAD_EFFECT_ID = "upload_community_member"
-DISABLE_THREAD_COMMENTOR_EFFECT_ID = "disable_thread_commentor"
-BLOCK_THREAD_REPLIES_EFFECT_ID = "block_thread_replies"
-ENABLE_THREAD_COMMENTOR_EFFECT_ID = "enable_thread_commentor"
-ENABLE_THREAD_REPLIES_EFFECT_ID = "enable_thread_replies"
 SELL_BODY_EVENT_SUBMISSION_EFFECT_ID = "submit_sell_body_event"
 CLEAR_PERSONAL_MEMORY_ITEM_EFFECT_ID = "clear_personal_memory"
 VIEW_PERSONAL_MEMORY_ITEM_EFFECT_ID = "view_personal_memory"
+TOILET_FILTER_ITEM_EFFECT_ID = "toggle_toilet_filter"
+
+REMOVED_ITEM_EFFECT_IDS = {
+    "disable_thread_commentor",
+    "block_thread_replies",
+    "enable_thread_commentor",
+    "enable_thread_replies",
+}
 
 
 def _select_random_cg_url(cg_url) -> Optional[str]:
@@ -234,6 +238,53 @@ class CoinService:
             await session.commit()
             log.info(f"已添加或更新商品: {name} ({category})")
 
+    async def seed_default_shop_items_if_empty(self) -> int:
+        """
+        仅在商店商品表为空时写入默认商品。
+
+        这样可以保证首次部署或删库重建后能自动补货，同时避免每次启动都重置
+        已有的 PostgreSQL 商品数据。
+        """
+        async with AsyncSessionLocal() as session:
+            existing_names = (
+                await session.execute(select(ShopItem.name).limit(1))
+            ).scalars().all()
+            if existing_names:
+                log.info("商店商品已存在，跳过默认商品初始化。")
+                return 0
+
+            from src.chat.config import shop_config
+
+            shop_items = shop_config.SHOP_ITEMS
+            brain_girl_eating_images = getattr(
+                shop_config, "BRAIN_GIRL_EATING_IMAGES", {}
+            )
+
+            for (
+                name,
+                description,
+                price,
+                category,
+                target,
+                effect_id,
+            ) in shop_items:
+                session.add(
+                    ShopItem(
+                        name=name,
+                        description=description,
+                        price=price,
+                        category=category,
+                        target=target,
+                        effect_id=effect_id,
+                        cg_url=brain_girl_eating_images.get(name),
+                        is_available=1,
+                    )
+                )
+
+            await session.commit()
+            log.info("商店为空，已初始化 %s 个默认商品。", len(shop_items))
+            return len(shop_items)
+
     async def get_items_by_category(self, category: str) -> list:
         """根据类别获取所有可用的商品（PostgreSQL）"""
         async with AsyncSessionLocal() as session:
@@ -258,6 +309,7 @@ class CoinService:
                     "is_available": item.is_available,
                 }
                 for item in items
+                if item.effect_id not in REMOVED_ITEM_EFFECT_IDS
             ]
 
     async def get_all_items(self) -> list:
@@ -283,6 +335,7 @@ class CoinService:
                     "is_available": item.is_available,
                 }
                 for item in items
+                if item.effect_id not in REMOVED_ITEM_EFFECT_IDS
             ]
 
     async def get_item_by_id(self, item_id: int):
@@ -317,6 +370,8 @@ class CoinService:
         item = await self.get_item_by_id(item_id)
         if not item:
             return False, "找不到该商品。", None, False, None, None
+        if item.get("effect_id") in REMOVED_ITEM_EFFECT_IDS:
+            return False, "该商品对应的旧功能已下线。", None, False, None, None
 
         total_cost = item["price"] * quantity
         current_balance = await self.get_balance(user_id)
@@ -460,74 +515,19 @@ class CoinService:
                     None,
                     _select_random_cg_url(item.get("cg_url")),
                 )
-            elif item_effect == DISABLE_THREAD_COMMENTOR_EFFECT_ID:
-                # 购买"枯萎向日葵"，禁用暖贴功能
-                await self.set_warmup_preference(user_id, wants_warmup=False)
+            elif item_effect == TOILET_FILTER_ITEM_EFFECT_ID:
+                current_state = await chat_db_manager.get_toilet_enabled(user_id)
+                user_profile = await chat_db_manager.get_user_profile(user_id)
+                if not user_profile:
+                    await chat_db_manager.set_toilet_enabled(user_id, current_state)
+
                 return (
                     True,
-                    f"你“购买”了 **{item['name']}**。从此，类脑娘将不再暖你的贴。",
+                    "",
                     new_balance,
                     False,
                     None,
-                    _select_random_cg_url(item.get("cg_url")),
-                )
-            elif item_effect == BLOCK_THREAD_REPLIES_EFFECT_ID:
-                query = """
-                    INSERT INTO user_coins (user_id, blocks_thread_replies) VALUES (?, 1)
-                    ON CONFLICT(user_id) DO UPDATE SET blocks_thread_replies = 1;
-                """
-                await chat_db_manager._execute(
-                    chat_db_manager._db_transaction, query, (user_id,), commit=True
-                )
-                log.info(f"用户 {user_id} 购买了告示牌，已禁用帖子回复功能。")
-                return (
-                    True,
-                    f"你举起了 **{item['name']}**，上面写着“禁止通行”。从此，类脑娘将不再进入你的帖子。",
-                    new_balance,
-                    False,
                     None,
-                    _select_random_cg_url(item.get("cg_url")),
-                )
-            elif item_effect == ENABLE_THREAD_COMMENTOR_EFFECT_ID:
-                # 购买"魔法向日葵"，重新启用暖贴功能
-                await self.set_warmup_preference(user_id, wants_warmup=True)
-                return (
-                    True,
-                    f"你使用了 **{item['name']}**，枯萎的向日葵恢复了生机。类脑娘现在会重新暖你的贴了。",
-                    new_balance,
-                    False,
-                    None,
-                    _select_random_cg_url(item.get("cg_url")),
-                )
-            elif item_effect == ENABLE_THREAD_REPLIES_EFFECT_ID:
-                # 购买"通行许可"，重新启用帖子回复并设置默认CD
-                default_limit = 2
-                default_duration = 60
-                query = """
-                    INSERT INTO user_coins (user_id, blocks_thread_replies, thread_cooldown_limit, thread_cooldown_duration, thread_cooldown_seconds)
-                    VALUES (?, 0, ?, ?, NULL)
-                    ON CONFLICT(user_id) DO UPDATE SET
-                        blocks_thread_replies = 0,
-                        thread_cooldown_limit = excluded.thread_cooldown_limit,
-                        thread_cooldown_duration = excluded.thread_cooldown_duration,
-                        thread_cooldown_seconds = NULL;
-                """
-                await chat_db_manager._execute(
-                    chat_db_manager._db_transaction,
-                    query,
-                    (user_id, default_limit, default_duration),
-                    commit=True,
-                )
-                log.info(
-                    f"用户 {user_id} 购买了通行许可，已重新启用帖子回复功能，并设置默认冷却 (limit={default_limit}, duration={default_duration})。"
-                )
-                return (
-                    True,
-                    f"你使用了 **{item['name']}**，花费了 {total_cost} 类脑币。现在你创建的所有帖子将默认拥有 **60秒2次** 的发言许可，你也可以随时通过弹出的窗口自定义规则。",
-                    new_balance,
-                    True,
-                    None,
-                    _select_random_cg_url(item.get("cg_url")),
                 )
             else:
                 # 其他未知效果，不使用背包系统
@@ -624,60 +624,6 @@ class CoinService:
             (user_id, item_id, quantity),
             commit=True,
         )
-
-    async def has_withered_sunflower(self, user_id: int) -> bool:
-        """检查用户是否拥有枯萎向日葵（即是否禁用了暖贴功能）"""
-        query = "SELECT has_withered_sunflower FROM user_coins WHERE user_id = ?"
-        result = await chat_db_manager._execute(
-            chat_db_manager._db_transaction, query, (user_id,), fetch="one"
-        )
-        return (
-            result["has_withered_sunflower"]
-            if result and result["has_withered_sunflower"]
-            else False
-        )
-
-    async def blocks_thread_replies(self, user_id: int) -> bool:
-        """检查用户是否拥有告示牌（即是否禁用了帖子回复功能）"""
-        query = "SELECT blocks_thread_replies FROM user_coins WHERE user_id = ?"
-        result = await chat_db_manager._execute(
-            chat_db_manager._db_transaction, query, (user_id,), fetch="one"
-        )
-        return (
-            result["blocks_thread_replies"]
-            if result and result["blocks_thread_replies"]
-            else False
-        )
-
-    async def has_made_warmup_choice(self, user_id: int) -> bool:
-        """检查用户是否已经对暖贴功能做出过选择（同意或拒绝）"""
-        query = "SELECT has_withered_sunflower FROM user_coins WHERE user_id = ?"
-        result = await chat_db_manager._execute(
-            chat_db_manager._db_transaction, query, (user_id,), fetch="one"
-        )
-        # 如果记录存在且 has_withered_sunflower 不是 NULL，则用户已做出选择
-        return result is not None and result["has_withered_sunflower"] is not None
-
-    async def set_warmup_preference(self, user_id: int, wants_warmup: bool):
-        """
-        直接设置用户的暖贴偏好。
-        wants_warmup = True  -> 允许暖贴 (has_withered_sunflower = 0)
-        wants_warmup = False -> 禁止暖贴 (has_withered_sunflower = 1)
-        """
-        has_withered_sunflower = 0 if wants_warmup else 1
-        query = """
-            INSERT INTO user_coins (user_id, has_withered_sunflower)
-            VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                has_withered_sunflower = excluded.has_withered_sunflower;
-        """
-        await chat_db_manager._execute(
-            chat_db_manager._db_transaction,
-            query,
-            (user_id, has_withered_sunflower),
-            commit=True,
-        )
-        log.info(f"用户 {user_id} 的暖贴偏好已设置为: {wants_warmup}")
 
     # async def transfer_coins(
     #     self, sender_id: int, receiver_id: int, amount: int

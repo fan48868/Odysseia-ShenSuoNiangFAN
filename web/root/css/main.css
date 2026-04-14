@@ -739,15 +739,22 @@ select:focus {
     font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
     font-size: 0.9rem;
     line-height: 1.65;
-    white-space: pre-wrap;
+    white-space: normal;
     word-break: break-word;
+    user-select: text;
 }
 
-.log-container span {
+.log-line {
     display: block;
     padding: 4px 8px;
     border-radius: 10px;
     margin-bottom: 4px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.log-line:last-child {
+    margin-bottom: 0;
 }
 
 .log-info {

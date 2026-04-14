@@ -1,7 +1,8 @@
 import os
 import logging
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from dotenv import load_dotenv
+
+from src.runtime_env import load_project_dotenv
 
 # Basic logging setup
 logging.basicConfig(
@@ -10,8 +11,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-PROJECT_DOTENV_PATH = os.path.join(PROJECT_ROOT, ".env")
-load_dotenv(dotenv_path=PROJECT_DOTENV_PATH, override=False, encoding="utf-8")
+PROJECT_DOTENV_PATH = load_project_dotenv(__file__, parents=2)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 

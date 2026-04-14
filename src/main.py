@@ -8,16 +8,15 @@ import time
 import threading
 import requests
 from discord.ext import commands
-from dotenv import load_dotenv
 from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.backup.backup_manager import backup_databases
+from src.runtime_env import load_project_dotenv
 
 # 在所有其他导入之前，尽早加载环境变量
 # 这样可以确保所有模块在加载时都能访问到 .env 文件中定义的配置
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROJECT_DOTENV_PATH = os.path.join(PROJECT_ROOT, ".env")
-load_dotenv(dotenv_path=PROJECT_DOTENV_PATH, override=False, encoding="utf-8")
+PROJECT_DOTENV_PATH = load_project_dotenv(__file__, parents=1)
 
 # 从我们自己的模块中导入
 from src import config
@@ -38,6 +37,11 @@ from src.chat.services.gemini_service import gemini_service
 from src.chat.services.review_service import initialize_review_service
 from src.chat.features.work_game.services.work_db_service import WorkDBService
 from src.chat.utils.command_sync import sync_commands
+from src.chat.utils.reliable_message_sender import (
+    initialize_reliable_delivery_state,
+    schedule_pending_text_delivery_flush,
+)
+from src.chat.services.reply_recovery_manager import reply_recovery_manager
 from src.chat.config import chat_config
 
 current_script_path = os.path.abspath(__file__)
@@ -53,6 +57,9 @@ enable_webui = os.getenv("ENABLE_WEBUI", "true").lower() == "true"
 webui_log_batch_size = int(os.getenv("WEBUI_LOG_BATCH_SIZE", "200"))
 webui_log_timeout = float(os.getenv("WEBUI_LOG_TIMEOUT", "5.0"))
 webui_log_backlog_limit = int(os.getenv("WEBUI_LOG_BACKLOG_LIMIT", "5000"))
+webui_log_max_consecutive_failures = int(
+    os.getenv("WEBUI_LOG_MAX_CONSECUTIVE_FAILURES", "5")
+)
 discord_reconnect_base_delay = float(
     os.getenv("DISCORD_RECONNECT_BASE_DELAY", "5")
 )
@@ -77,6 +84,7 @@ class QueueHandler(logging.Handler):
 
 def heartbeat_sender():
     pending_logs = []
+    consecutive_failures = 0
     while 1:
         time.sleep(heartbeat_interval)
         while len(pending_logs) < webui_log_batch_size and not log_queue.empty():
@@ -97,19 +105,34 @@ def heartbeat_sender():
             }
             response = requests.post(log_server_url, json=payload, timeout=webui_log_timeout)
             if response.status_code != 200:
+                consecutive_failures += 1
                 print(
                     f"Heartbeat Error: Received status {response.status_code}",
                     file=sys.stderr,
                 )  # 不适用logging
             else:
+                consecutive_failures = 0
                 if logs_to_send:
                     pending_logs = pending_logs[len(logs_to_send):]
 
         except requests.exceptions.RequestException as e:
+            consecutive_failures += 1
             print(
                 f"Heartbeat Error: Could not connet to {log_server_url}.\nDetail:{e}",
                 file=sys.stderr,
             )
+
+        if (
+            webui_log_max_consecutive_failures > 0
+            and consecutive_failures >= webui_log_max_consecutive_failures
+        ):
+            print(
+                "Heartbeat Disabled: WebUI 日志上报连续失败 "
+                f"{consecutive_failures} 次，已停止继续尝试。"
+                f" target={log_server_url}",
+                file=sys.stderr,
+            )
+            break
 
 
 # --- WebUI_end ---
@@ -188,6 +211,11 @@ class GuidanceBot(commands.Bot):
     """机器人类，继承自 commands.Bot"""
 
     def __init__(self):
+        class BakaHelpCommand(commands.MinimalHelpCommand):
+            async def send_bot_help(self, mapping):
+                destination = self.get_destination()
+                await destination.send("# BAKA")
+
         # 设置机器人需要监听的事件
         intents = discord.Intents.default()
         intents.members = True  # 需要监听成员加入、角色变化
@@ -218,7 +246,10 @@ class GuidanceBot(commands.Bot):
             "command_prefix": "!",
             "intents": intents,
             "debug_guilds": self.debug_guild_ids,
+            "help_command": None,
         }
+        if os.getenv("BAKA", "").strip().lower() == "true":
+            init_kwargs["help_command"] = BakaHelpCommand()
         if config.PROXY_URL:
             init_kwargs["proxy"] = config.PROXY_URL
 
@@ -227,6 +258,7 @@ class GuidanceBot(commands.Bot):
 
         super().__init__(**init_kwargs)
         self.last_ready_monotonic = None
+        initialize_reliable_delivery_state(self)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """
@@ -375,6 +407,8 @@ class GuidanceBot(commands.Bot):
 
         log.info("--------------------")
         log.info("--- 启动成功 ---")
+        await reply_recovery_manager.resume_unfinished_tasks(self, reason="on_ready")
+        schedule_pending_text_delivery_flush(self, reason="on_ready", immediate=True)
 
     async def on_disconnect(self):
         logging.getLogger(__name__).warning(
@@ -383,6 +417,8 @@ class GuidanceBot(commands.Bot):
 
     async def on_resumed(self):
         logging.getLogger(__name__).info("已恢复与 Discord 网关的会话。")
+        await reply_recovery_manager.resume_unfinished_tasks(self, reason="on_resumed")
+        schedule_pending_text_delivery_flush(self, reason="on_resumed", immediate=True)
 
 
 def _get_next_reconnect_delay(current_delay: float) -> float:
@@ -528,13 +564,13 @@ async def main():
     await world_book_db_manager.init_async()
     await chat_db_manager.init_async()
 
-    # 3.5. 初始化商店商品
-    # 商品已迁移到PostgreSQL，不再需要从配置文件初始化
-    # from src.chat.features.odysseia_coin.service.coin_service import (
-    #     _setup_initial_items,
-    # )
-    # await _setup_initial_items()
-    # log.info("已初始化商店商品。")
+    # 3.5. 首次部署时初始化商店商品
+    try:
+        from src.chat.features.odysseia_coin.service.coin_service import coin_service
+
+        await coin_service.seed_default_shop_items_if_empty()
+    except Exception as e:
+        log.error(f"初始化默认商店商品失败: {e}", exc_info=True)
 
     log.info("已加载并注册 AI 工具。")
 

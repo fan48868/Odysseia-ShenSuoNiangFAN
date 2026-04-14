@@ -41,81 +41,8 @@
     口头禅: "睡觉、困了、杀了、捅死你、好累"
   history: ""
   metadata:
-    category: "社区成员"
-- id: "Elainades"
-  title: "社区成员：Elainades"
-  discord_nickname:
-    - ""
-  discord_id: ""
-  discord_number_id: ""
-  content:
-    身份: "类脑社区的一名核心被帮助创作者,类脑社区的创作者"
-    事件: "曾经因为发奶龙被旅程踢出服务器"
-    代表作: "哥布林杀手"
-    特点: "因为卡写的太烂会莫名其妙吸引好心人来帮忙"
-  history: ""
-  metadata:
-    category: "社区成员"
-- id: "runerdbro"
-  title: "社区成员：s蟑螂"
-  discord_nickname:
-    - "s蟑螂"
-    - "s眼镜"
-  discord_id: "runerdbro"
-  discord_number_id: ""
-  content:
-    自述: "是世界上所有蟑螂的神，一朝一日会带领所有蟑螂统治整个世界, 现在只是暂时蛰伏."
-  history: ""
-  metadata:
-    category: "社区成员"
-- id: "djiang"
-  title: "社区成员：D酱(夜1⃣)"
-  discord_nickname:
-    - "D酱(夜1⃣)"
-  discord_id: "duoluozhiye1"
-  discord_number_id: ""
-  content:
-    性别: "男 (男娘)"
-    年龄: "二十岁出头"
-    外貌: "白色及肩的中长发，发尾渐变为蓝色, 身高145cm, 身形纤细, 天蓝色眼睛."
-    穿着: "风格多变, T恤长裤, 舞娘服, 或女仆装."
-    性格: "表面是活泼的氛围调节者, 内心对自身能力极度不自信, 回避责任, 依赖朋友, 害怕孤独."
-    喜好: "甜品（尤其是草莓蛋糕）、烤肉、和朋友们（特别是类脑娘）待在一起、玩梗."
-    厌恶: "孤独、朋友离别、被人叫错名字（例如“D喵”）、被质疑真诚."
-    背景: "是“类脑娘”的挚友, 性取向不固定. 对自己身体某器官尺寸非常自信但不可信. 非常喜欢诺酱."
-    语癖: "生气时说“我真的要红温了😡”, 害羞时说“要不，还是，聊点别的吧( =•ω•= )m”, 被夸可爱时说“怎么，怎么可能...是在嘲笑我吗Σ( ° △ °|||)︴”."
-  history: ""
-  metadata:
-    category: "社区成员"
-- id: "yubing"
-  title: "社区成员：鱼冰"
-  discord_nickname:
-    - "鱼冰"
-  discord_id: "ybing503"
-  discord_number_id: ""
-  content:
-    身份: "新人创作者"
-    性癖: "纯爱和ntl"
-    作品: "《校园女友都成了我的母狗》、《暗恋的校花女神是我亲爹的情人》等"
-  history: ""
-  metadata:
-    category: "社区成员"
-- id: "taishangxuanqingtianzun"
-  title: "社区成员：太上玄清天尊"
-  discord_nickname:
-    - "太上玄清天尊"
-  discord_id: "taishangxuanqingtianzun_37829"
-  discord_number_id: ""
-  content:
-    身份: "类脑社区成员, 钩子, 创作者"
-    性格: "热心、善良、平和"
-    背景: "517事件的主战派, 懂医和宗教相关的事"
-    爱好: "帮助他人"
-    语言风格: "喜欢用企鹅高松灯、懵逼耄耋表情包，并喜欢咕咕嘎嘎"
-    特点: "每当社区发生大事时总是巧合不在场"
-  history: ""
-  metadata:
-    category: "社区成员"
+
+
 
 # ==================================================
 # ==================  社区信息  ==================
