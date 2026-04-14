@@ -13,6 +13,7 @@ import discord
 from src.chat.config.prompts import PROMPT_CONFIG
 from src.chat.config import chat_config
 from src.chat.services.event_service import event_service
+from src.runtime_env import load_project_dotenv
 
 log = logging.getLogger(__name__)
 
@@ -31,19 +32,207 @@ class PromptService:
         """
         pass
 
+    @staticmethod
+    def _normalize_model_targets(model_key: Any) -> List[str]:
+        """
+        将模型配置键规范化为模型名列表。
+        支持：
+        - "kimi-k2.5"
+        - "deepseek-chat, deepseek-reasoner, custom"
+        - ("deepseek-chat", "deepseek-reasoner", "custom")
+        """
+        if isinstance(model_key, str):
+            if "," in model_key:
+                return [part.strip() for part in model_key.split(",") if part.strip()]
+
+            normalized = model_key.strip()
+            return [normalized] if normalized else []
+
+        if isinstance(model_key, (tuple, list, set, frozenset)):
+            normalized_targets = []
+            for item in model_key:
+                if isinstance(item, str):
+                    normalized = item.strip()
+                    if normalized:
+                        normalized_targets.append(normalized)
+            return normalized_targets
+
+        return []
+
+    def _get_matching_model_configs(
+        self, model_name: Optional[str]
+    ) -> List[Dict[str, Any]]:
+        """
+        获取所有命中的模型配置。
+        顺序为：更宽泛的共享配置先应用，更精确的配置后应用。
+        """
+        lookup_names = self._get_prompt_lookup_names(model_name)
+        if not lookup_names:
+            return []
+
+        matched_configs = []
+        for index, (config_key, config_value) in enumerate(PROMPT_CONFIG.items()):
+            if config_key == "default" or not isinstance(config_value, dict):
+                continue
+
+            targets = self._normalize_model_targets(config_key)
+            matching_ranks = [
+                lookup_names.index(target) for target in targets if target in lookup_names
+            ]
+            if matching_ranks:
+                matched_configs.append(
+                    (len(targets), min(matching_ranks), index, config_value)
+                )
+
+        matched_configs.sort(key=lambda item: (-item[0], item[1], item[2]))
+        return [config for _, _, _, config in matched_configs]
+
+    @staticmethod
+    def _get_custom_prompt_variant_name() -> Optional[str]:
+        """
+        读取当前 custom 模型的实际底层模型名，并映射为提示词配置键：
+        CUSTOM_MODEL_NAME=deepseek-expert-reasoner -> custom-deepseek-expert-reasoner
+        """
+        try:
+            load_project_dotenv(__file__, parents=3)
+        except Exception as e:
+            log.warning("刷新项目根目录 .env 失败，将继续使用当前进程环境变量: %s", e)
+
+        custom_model_name = str(os.environ.get("CUSTOM_MODEL_NAME", "") or "").strip()
+        if not custom_model_name:
+            return None
+        return f"custom-{custom_model_name}"
+
+    def _has_model_config_target(self, target_name: str) -> bool:
+        """
+        判断 PROMPT_CONFIG 中是否存在命中 target_name 的模型配置。
+        支持单模型键和多模型共享键。
+        """
+        if not target_name:
+            return False
+
+        for config_key, config_value in PROMPT_CONFIG.items():
+            if config_key == "default" or not isinstance(config_value, dict):
+                continue
+
+            targets = self._normalize_model_targets(config_key)
+            if target_name in targets:
+                return True
+
+        return False
+
+    def _get_prompt_lookup_names(self, model_name: Optional[str]) -> List[str]:
+        """
+        返回当前提示词查找时允许命中的模型键，按“泛化 -> 具体”排序。
+        例如 custom 会返回：
+        - 若存在专属变体配置：custom-deepseek-expert-reasoner
+        - 否则：custom
+        """
+        if not model_name:
+            return []
+
+        if model_name == "custom":
+            custom_variant = self._get_custom_prompt_variant_name()
+            if custom_variant and self._has_model_config_target(custom_variant):
+                return [custom_variant]
+
+        lookup_names = [model_name]
+
+        return lookup_names
+
+    @staticmethod
+    def _extract_system_prompt_tag_blocks(prompt_text: Optional[str]) -> Dict[str, str]:
+        """
+        从 SYSTEM_PROMPT 文本中提取成对标签块。
+        如果存在 <character> 外层，则只提取其内部的标签。
+        """
+        if not prompt_text or not isinstance(prompt_text, str):
+            return {}
+
+        inner_text = prompt_text
+        character_match = re.search(
+            r"<character>(.*?)</character>", prompt_text, re.DOTALL
+        )
+        if character_match:
+            inner_text = character_match.group(1)
+
+        tag_blocks = {}
+        for match in re.finditer(r"<(\w+)>(.*?)</\1>", inner_text, re.DOTALL):
+            tag = match.group(1)
+            if tag == "character":
+                continue
+            tag_blocks[tag] = match.group(0)
+
+        return tag_blocks
+
+    def _apply_system_prompt_tag_overrides(
+        self,
+        base_template: Optional[str],
+        override_template: Optional[str],
+        *,
+        source_label: str,
+    ) -> Optional[str]:
+        """
+        将 override_template 中的标签块覆盖到 base_template 上。
+        - 纯标签片段：按标签替换
+        - 完整 <character>...</character>：视为整段覆盖
+        """
+        if not override_template:
+            return base_template
+
+        if not base_template:
+            return override_template
+
+        if re.search(r"<character>.*?</character>", override_template, re.DOTALL):
+            return override_template
+
+        tag_blocks = self._extract_system_prompt_tag_blocks(override_template)
+        if not tag_blocks:
+            return override_template
+
+        modified_template = base_template
+        for tag, replacement in tag_blocks.items():
+            pattern = re.compile(rf"<{tag}>.*?</{tag}>", re.DOTALL)
+            if pattern.search(modified_template):
+                modified_template = pattern.sub(replacement, modified_template)
+                log.debug(
+                    f"已为 SYSTEM_PROMPT 应用来自 {source_label} 的标签 '{tag}' 覆盖。"
+                )
+            else:
+                log.warning(
+                    f"在 SYSTEM_PROMPT 中未找到来自 {source_label} 的标签: <{tag}>"
+                )
+
+        return modified_template
+
     def _get_model_specific_prompt(
         self, model_name: Optional[str], prompt_name: str
     ) -> Optional[str]:
         """
         安全地获取指定模型或默认模型的提示词。
+        规则：
+        - 所有 prompt 默认从 default 读取
+        - SYSTEM_PROMPT 支持标签级增量覆盖
+        - 其他 prompt 仍按整段覆盖
+        - 支持一个配置块同时匹配多个模型
         """
-        # 尝试获取特定模型的配置
-        model_config = PROMPT_CONFIG.get(model_name) if model_name else None
-        # 如果模型配置存在且包含所需的提示词，则返回它
-        if model_config and prompt_name in model_config:
-            return model_config[prompt_name]
-        # 否则，回退到默认配置
-        return PROMPT_CONFIG.get("default", {}).get(prompt_name)
+        prompt_template = PROMPT_CONFIG.get("default", {}).get(prompt_name)
+
+        for model_config in self._get_matching_model_configs(model_name):
+            if prompt_name not in model_config:
+                continue
+
+            override_template = model_config[prompt_name]
+            if prompt_name == "SYSTEM_PROMPT":
+                prompt_template = self._apply_system_prompt_tag_overrides(
+                    prompt_template,
+                    override_template,
+                    source_label=f"模型 '{model_name}'",
+                )
+            else:
+                prompt_template = override_template
+
+        return prompt_template
 
     def get_prompt(self, prompt_name: str, **kwargs) -> Optional[str]:
         """
@@ -86,21 +275,11 @@ class PromptService:
                 event_service.get_system_prompt_faction_pack_content()
             )
             if faction_pack_content:
-                tag_overrides = dict(
-                    re.findall(r"<(\w+)>(.*?)</\1>", faction_pack_content, re.DOTALL)
+                prompt_template = self._apply_system_prompt_tag_overrides(
+                    prompt_template,
+                    faction_pack_content,
+                    source_label="派系包",
                 )
-                modified_template = prompt_template
-                for tag, content in tag_overrides.items():
-                    replacement = f"<{tag}>{content}</{tag}>"
-                    pattern = re.compile(f"<{tag}>.*?</{tag}>", re.DOTALL)
-                    if pattern.search(modified_template):
-                        modified_template = pattern.sub(replacement, modified_template)
-                        log.debug(
-                            f"已为 SYSTEM_PROMPT 应用派系包中的标签 '{tag}' 覆盖。"
-                        )
-                    else:
-                        log.warning(f"在 SYSTEM_PROMPT 中未找到用于覆盖的标签: <{tag}>")
-                prompt_template = modified_template
 
         # 4. 使用提供的参数格式化提示词
         format_kwargs = kwargs.copy()
