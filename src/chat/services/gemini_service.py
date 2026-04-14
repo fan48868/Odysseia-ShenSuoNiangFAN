@@ -759,9 +759,7 @@ class GeminiService:
                         retrieval_query_embedding=retrieval_query_embedding,
                         rag_timeout_fallback=rag_timeout_fallback,
                     )
-                    return self._apply_blacklist_notice(
-                        result, blacklist_punishment_active
-                    )
+                    return result
                 except Exception as e:
                     last_exception = e
                     log.warning(
@@ -777,10 +775,7 @@ class GeminiService:
                     f"自定义端点 '{model_name}' 的所有 {max_attempts} 次尝试均失败。最终错误: {last_exception}. "
                     f"未配置 GOOGLE_API_KEYS_LIST，无法回退到官方 API。"
                 )
-                return self._apply_blacklist_notice(
-                    "呜哇，有点晕嘞，自定义端点连接失败了，还没有配置备用API密钥呢，等配置好了再来找我玩吧！",
-                    blacklist_punishment_active,
-                )
+                return "呜哇，有点晕嘞，自定义端点连接失败了，还没有配置备用API密钥呢，等配置好了再来找我玩吧！"
 
             log.warning(
                 f"自定义端点 '{model_name}' 的所有 {max_attempts} 次尝试均失败。最终错误: {last_exception}. "
@@ -812,9 +807,7 @@ class GeminiService:
                 retrieval_query_embedding=retrieval_query_embedding,
                 rag_timeout_fallback=rag_timeout_fallback,
             )
-            return self._apply_blacklist_notice(
-                result, blacklist_punishment_active
-            )
+            return result
 
         # 对于非自定义模型或回退失败后的默认路径
         # 检查是否配置了RAG API密钥
@@ -822,11 +815,7 @@ class GeminiService:
             log.error(
                 "未配置 GOOGLE_API_KEYS_LIST，无法使用官方 API。请选择自定义端点模型。"
             )
-            return self._apply_blacklist_notice(
-                "呜哇，现在有点晕嘞，还没有配置好API密钥呢，请选择自定义端点模型或配置 GOOGLE_API_KEYS_LIST 哦～",
-                blacklist_punishment_active,
-            )
-
+            return "呜哇，现在有点晕嘞，还没有配置好API密钥呢，请选择自定义端点模型或配置 GOOGLE_API_KEYS_LIST 哦～"
         log.info(
             f"使用模型 '{model_name or self.default_model_name}'，将使用官方 API 逻辑。"
         )
@@ -852,9 +841,7 @@ class GeminiService:
             retrieval_query_embedding=retrieval_query_embedding,
             rag_timeout_fallback=rag_timeout_fallback,
         )
-        return self._apply_blacklist_notice(
-            result, blacklist_punishment_active
-        )
+        return result
 
     async def _generate_with_custom_endpoint(
         self,
