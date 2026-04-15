@@ -68,9 +68,7 @@ class CustomModelClient:
         return str(raw_value or "").strip().lower() in {"true", "1", "yes"}
 
     @staticmethod
-    def _normalize_positive_float(
-        raw_value: Optional[str], *, default: float
-    ) -> float:
+    def _normalize_positive_float(raw_value: Optional[str], *, default: float) -> float:
         try:
             parsed = float(str(raw_value or "").strip())
             if parsed > 0:
@@ -80,9 +78,7 @@ class CustomModelClient:
         return default
 
     @staticmethod
-    def _normalize_positive_int(
-        raw_value: Optional[str], *, default: int
-    ) -> int:
+    def _normalize_positive_int(raw_value: Optional[str], *, default: int) -> int:
         try:
             parsed = int(str(raw_value or "").strip())
             if parsed > 0:
@@ -188,9 +184,7 @@ class CustomModelClient:
             return False
 
     @staticmethod
-    def _is_payment_required_error(
-        status_code: int, combined_error_text: str
-    ) -> bool:
+    def _is_payment_required_error(status_code: int, combined_error_text: str) -> bool:
         lowered_error_text = str(combined_error_text or "").lower()
         return status_code == 402 or "402 payment required" in lowered_error_text
 
@@ -219,7 +213,11 @@ class CustomModelClient:
             )
             return self._api_keys
 
-        if normalized_source and self.raw_api_key == normalized_source and self._api_keys:
+        if (
+            normalized_source
+            and self.raw_api_key == normalized_source
+            and self._api_keys
+        ):
             reordered_keys = [key for key in self._api_keys if key in keys]
             reordered_keys.extend(key for key in keys if key not in reordered_keys)
             keys = reordered_keys
@@ -281,7 +279,9 @@ class CustomModelClient:
                 reordered_keys = list(self._api_keys)
                 failed_key = reordered_keys.pop(active_index)
                 reordered_keys.append(failed_key)
-                next_index = active_index if active_index < len(reordered_keys) - 1 else 0
+                next_index = (
+                    active_index if active_index < len(reordered_keys) - 1 else 0
+                )
                 serialized_api_keys = self._apply_api_key_state(
                     reordered_keys,
                     active_index=next_index,
@@ -377,7 +377,9 @@ class CustomModelClient:
         gateway_provider_name = str(
             os.environ.get("CUSTOM_MODEL_GATEWAY_PROVIDER_NAME", "") or ""
         ).strip()
-        stream_idle_timeout_ms_raw = os.environ.get("CUSTOM_MODEL_STREAM_IDLE_TIMEOUT_MS")
+        stream_idle_timeout_ms_raw = os.environ.get(
+            "CUSTOM_MODEL_STREAM_IDLE_TIMEOUT_MS"
+        )
         if stream_idle_timeout_ms_raw is not None:
             stream_idle_timeout_seconds = (
                 cls._normalize_positive_float(
@@ -474,9 +476,7 @@ class CustomModelClient:
             return True
         if isinstance(value, list):
             return any(
-                CustomModelClient._has_meaningful_sse_value(
-                    item, ignored_keys=ignored
-                )
+                CustomModelClient._has_meaningful_sse_value(item, ignored_keys=ignored)
                 for item in value
             )
         if isinstance(value, dict):
@@ -492,9 +492,7 @@ class CustomModelClient:
         return True
 
     @classmethod
-    def _has_meaningful_sse_output(
-        cls, payload: Dict[str, Any]
-    ) -> bool:
+    def _has_meaningful_sse_output(cls, payload: Dict[str, Any]) -> bool:
         choices = payload.get("choices")
         if not isinstance(choices, list):
             return False
@@ -597,9 +595,7 @@ class CustomModelClient:
 
             block_type = str(block.get("type") or "").strip().lower()
             block_text = block.get("text")
-            if isinstance(block_text, str) and (
-                not block_type or "text" in block_type
-            ):
+            if isinstance(block_text, str) and (not block_type or "text" in block_type):
                 normalized_text = block_text.strip()
                 if normalized_text:
                     text_chunks.append(normalized_text)
@@ -629,7 +625,9 @@ class CustomModelClient:
 
     @classmethod
     def normalize_tool_call_reasoning_content(cls, reasoning_content: Any) -> str:
-        extracted_from_content = cls._extract_text_from_openai_content(reasoning_content)
+        extracted_from_content = cls._extract_text_from_openai_content(
+            reasoning_content
+        )
         if extracted_from_content:
             return extracted_from_content
 
@@ -668,8 +666,10 @@ class CustomModelClient:
             return block
 
         normalized_block = dict(block)
-        normalized_block["reasoning_content"] = cls.normalize_tool_call_reasoning_content(
-            cls._extract_reasoning_text_from_block(block)
+        normalized_block["reasoning_content"] = (
+            cls.normalize_tool_call_reasoning_content(
+                cls._extract_reasoning_text_from_block(block)
+            )
         )
         return normalized_block
 
@@ -762,9 +762,7 @@ class CustomModelClient:
         }
 
     @classmethod
-    def _extract_reasoning_error_message_index(
-        cls, error_text: str
-    ) -> Optional[int]:
+    def _extract_reasoning_error_message_index(cls, error_text: str) -> Optional[int]:
         match = re.search(
             r"assistant tool call message at index (\d+)",
             str(error_text or ""),
@@ -934,7 +932,9 @@ class CustomModelClient:
             if not isinstance(payload, dict):
                 continue
 
-            if diagnostics["response_id"] is None and isinstance(payload.get("id"), str):
+            if diagnostics["response_id"] is None and isinstance(
+                payload.get("id"), str
+            ):
                 diagnostics["response_id"] = payload["id"]
             if diagnostics["model"] is None and isinstance(payload.get("model"), str):
                 diagnostics["model"] = payload["model"]
@@ -1002,7 +1002,10 @@ class CustomModelClient:
             diagnostics["done_line_count"] > 0
             and diagnostics["choices_payload_count"] == 0
         ):
-            return "stream ended with [DONE] before any assistant payload arrived", diagnostics
+            return (
+                "stream ended with [DONE] before any assistant payload arrived",
+                diagnostics,
+            )
         if (
             diagnostics["error_payload_count"] > 0
             and diagnostics["choices_payload_count"] == 0
@@ -1130,7 +1133,9 @@ class CustomModelClient:
                         user_input_text=user_input_text_for_vision,
                     )
                 except Exception as e:
-                    log.error("[Custom] Moonshot 图片识别流程异常: %s", e, exc_info=True)
+                    log.error(
+                        "[Custom] Moonshot 图片识别流程异常: %s", e, exc_info=True
+                    )
                     vision_text = "（图片识别失败：处理流程异常）"
 
                 vision_chunks.append(str(vision_text))
@@ -1143,7 +1148,9 @@ class CustomModelClient:
                         user_input_text=user_input_text_for_vision,
                     )
                 except Exception as e:
-                    log.error("[Custom] Moonshot 图片字典识别异常: %s", e, exc_info=True)
+                    log.error(
+                        "[Custom] Moonshot 图片字典识别异常: %s", e, exc_info=True
+                    )
                     vision_text = "（图片识别失败：处理流程异常）"
 
                 vision_chunks.append(str(vision_text))
@@ -1419,7 +1426,9 @@ class CustomModelClient:
                     if extracted_delta_content:
                         content_chunks.append(extracted_delta_content)
 
-                extracted_delta_reasoning = cls._extract_reasoning_text_from_block(delta)
+                extracted_delta_reasoning = cls._extract_reasoning_text_from_block(
+                    delta
+                )
                 if extracted_delta_reasoning:
                     reasoning_chunks.append(extracted_delta_reasoning)
 
@@ -1434,7 +1443,11 @@ class CustomModelClient:
             message_block = first_choice.get("message")
             if isinstance(message_block, dict):
                 message_content = message_block.get("content")
-                if isinstance(message_content, str) and message_content and not content_chunks:
+                if (
+                    isinstance(message_content, str)
+                    and message_content
+                    and not content_chunks
+                ):
                     content_chunks.append(message_content)
                 elif isinstance(message_content, list) and not content_chunks:
                     extracted_message_content = cls._extract_text_from_openai_content(
@@ -1542,6 +1555,44 @@ class CustomModelClient:
     def _should_penalize_gateway_provider_response(status_code: int) -> bool:
         return status_code == 408 or status_code == 429 or 500 <= status_code < 600
 
+    @classmethod
+    def _get_content_from_sse_line(cls, line: str) -> str:
+        stripped = str(line or "").strip()
+        if not stripped.startswith("data:"):
+            return ""
+
+        payload_str = stripped[5:].strip()
+        if not payload_str or payload_str == "[DONE]":
+            return ""
+
+        try:
+            payload = json.loads(payload_str)
+        except json.JSONDecodeError:
+            return ""
+
+        if not isinstance(payload, dict):
+            return ""
+
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            return ""
+
+        delta = first_choice.get("delta")
+        if not isinstance(delta, dict):
+            return ""
+
+        content = delta.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return cls._extract_text_from_openai_content(content)
+
+        return ""
+
     async def send(
         self,
         http_client: httpx.AsyncClient,
@@ -1611,11 +1662,19 @@ class CustomModelClient:
         selector = None
         if is_vercel_gateway:
             # 从 VercelGatewayProviderSelectorService.MODEL_PROVIDER_NAMES 中查找
-            from src.chat.services.vercel_gateway_provider_selector import VercelGatewayProviderSelectorService
-            if normalized_request_model in VercelGatewayProviderSelectorService.MODEL_PROVIDER_NAMES:
+            from src.chat.services.vercel_gateway_provider_selector import (
+                VercelGatewayProviderSelectorService,
+            )
+
+            if (
+                normalized_request_model
+                in VercelGatewayProviderSelectorService.MODEL_PROVIDER_NAMES
+            ):
                 # 获取或创建选择器实例
                 if normalized_request_model not in self._gateway_selectors:
-                    self._gateway_selectors[normalized_request_model] = await VercelGatewayProviderSelectorService.get_or_create_instance(
+                    self._gateway_selectors[
+                        normalized_request_model
+                    ] = await VercelGatewayProviderSelectorService.get_or_create_instance(
                         model_name=normalized_request_model
                     )
                 selector = self._gateway_selectors[normalized_request_model]
@@ -1665,7 +1724,9 @@ class CustomModelClient:
                         selected_gateway_provider.provider_name: selected_timeout
                     }
                     provider_timeout_injected = True
-                elif gateway_provider_name and gateway_provider_name not in byok_timeouts:
+                elif (
+                    gateway_provider_name and gateway_provider_name not in byok_timeouts
+                ):
                     byok_timeouts[gateway_provider_name] = gateway_provider_timeout_ms
                     provider_timeout_injected = True
 
@@ -1747,6 +1808,8 @@ class CustomModelClient:
             response_content_encoding = "<pending>"
             response_transfer_encoding = "<pending>"
             provider_failure_reported = False
+            first_token_at: Optional[float] = None
+            output_char_count: int = 0
 
             try:
                 async with http_client.stream(
@@ -1768,9 +1831,7 @@ class CustomModelClient:
                         stream_phase = "error_response_body"
                         await current_response.aread()
                         response_text = current_response.text or ""
-                        combined_error_text = (
-                            f"{current_response.status_code} {current_response.reason_phrase}"
-                        )
+                        combined_error_text = f"{current_response.status_code} {current_response.reason_phrase}"
                         if response_text:
                             combined_error_text = (
                                 f"{combined_error_text} | {response_text}"
@@ -1793,13 +1854,14 @@ class CustomModelClient:
                             ):
                                 continue
 
-                        if selected_gateway_provider is not None and selector is not None:
+                        if (
+                            selected_gateway_provider is not None
+                            and selector is not None
+                        ):
                             if self._should_penalize_gateway_provider_response(
                                 current_response.status_code
                             ):
-                                await selector.report_failure(
-                                    selected_gateway_provider
-                                )
+                                await selector.report_failure(selected_gateway_provider)
                                 provider_failure_reported = True
                             else:
                                 await selector.release_provider(
@@ -1816,8 +1878,8 @@ class CustomModelClient:
                                     ),
                                 )
 
-                        reasoning_error_index = self._extract_reasoning_error_message_index(
-                            response_text
+                        reasoning_error_index = (
+                            self._extract_reasoning_error_message_index(response_text)
                         )
                         if reasoning_error_index is not None:
                             self._log_reasoning_error_message_window(
@@ -1853,8 +1915,7 @@ class CustomModelClient:
                             )
                         else:
                             timeout_seconds = max(
-                                first_token_timeout_seconds
-                                - (now - stream_started_at),
+                                first_token_timeout_seconds - (now - stream_started_at),
                                 0.0,
                             )
 
@@ -1963,6 +2024,10 @@ class CustomModelClient:
                         body_line_count += 1
                         stripped = line.strip()
 
+                        output_char_count += len(
+                            self._get_content_from_sse_line(stripped)
+                        )
+
                         if not stripped or stripped.startswith(":"):
                             continue
 
@@ -1978,9 +2043,35 @@ class CustomModelClient:
                                 sse_line_samples.append(sample)
 
                         if self._is_meaningful_sse_data_line(stripped):
+                            if not received_first_meaningful_token:
+                                first_token_at = loop.time()
                             received_first_meaningful_token = True
                             meaningful_line_count += 1
                             last_meaningful_output_at = loop.time()
+
+                        if first_token_at and (now - first_token_at) > 15.0:
+                            time_per_char = (now - first_token_at) / max(
+                                output_char_count, 1
+                            )
+                            slow_provider_threshold = VercelGatewayProviderSelectorService.SLOW_PROVIDER_UNIT_COST_THRESHOLD
+                            if time_per_char >= slow_provider_threshold:
+                                provider_name_for_log = (
+                                    selected_gateway_provider.provider_name
+                                    if selected_gateway_provider
+                                    else "N/A"
+                                )
+                                log.warning(
+                                    "[Custom] Proactive stream timeout for slow provider | provider=%s | time_per_char=%.3f | threshold=%.3f | chars=%d | elapsed=%.2f",
+                                    provider_name_for_log,
+                                    time_per_char,
+                                    slow_provider_threshold,
+                                    output_char_count,
+                                    now - first_token_at,
+                                )
+                                raise httpx.ReadTimeout(
+                                    f"Proactive timeout: time per char {time_per_char:.3f}s >= {slow_provider_threshold}s",
+                                    request=current_response.request,
+                                )
 
                     if saw_non_sse_payload and not used_streaming:
                         log.info(
@@ -1993,7 +2084,9 @@ class CustomModelClient:
                         current_response,
                         "\n".join(body_lines),
                     )
-                    successful_request_elapsed_seconds = loop.time() - request_started_at
+                    successful_request_elapsed_seconds = (
+                        loop.time() - request_started_at
+                    )
 
                     if selected_gateway_provider is not None and selector is not None:
                         parsed_result = self._parse_chat_completion_response_body(

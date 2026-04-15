@@ -23,6 +23,7 @@ from src.chat.services.openai_models import (
     DeepSeekModelClient,
     KimiModelClient,
 )
+from src.chat.utils.httpx_error_utils import build_request_error_log_fields
 from src.chat.services.prompt_service import prompt_service
 from src.chat.utils.image_utils import sanitize_image_to_size_limit
 from src.database.database import AsyncSessionLocal
@@ -167,18 +168,7 @@ class OpenAIService:
 
     @staticmethod
     def _build_request_error_log_fields(e: httpx.RequestError) -> Dict[str, str]:
-        req = getattr(e, "request", None)
-        cause = getattr(e, "__cause__", None)
-
-        return {
-            "exc_type": type(e).__name__,
-            "exc_repr": repr(e),
-            "exc_str": str(e) or "<empty>",
-            "cause_type": type(cause).__name__ if cause else "<none>",
-            "cause_repr": repr(cause) if cause else "<none>",
-            "request_method": getattr(req, "method", "<none>") if req else "<none>",
-            "request_url": str(getattr(req, "url", "<none>")) if req else "<none>",
-        }
+        return build_request_error_log_fields(e)
 
     def _log_custom_stream_parse_failure(
         self,
