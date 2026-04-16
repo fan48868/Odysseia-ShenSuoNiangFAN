@@ -3,7 +3,6 @@
 import os
 import shutil
 import logging
-import subprocess
 from datetime import datetime
 
 log = logging.getLogger(__name__)
@@ -17,8 +16,6 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 BACKUP_DIR = os.path.join(BASE_DIR, "src", "backup")
 # 数据库文件扩展名
 DB_EXTENSIONS = (".db", ".sqlite3")
-PARADEDB_BACKUP_PREFIX = "odysseia_paradedb_"
-PARADEDB_BACKUP_SUFFIX = ".dump"
 
 
 def _get_backup_output_mount_path() -> str:
@@ -28,12 +25,7 @@ def _get_backup_output_mount_path() -> str:
 
 def _is_managed_backup_file(filename: str) -> bool:
     """判断文件是否属于本模块管理的备份文件。"""
-    is_sqlite_backup = ".bak." in filename
-    is_paradedb_backup = (
-        filename.startswith(PARADEDB_BACKUP_PREFIX)
-        and filename.endswith(PARADEDB_BACKUP_SUFFIX)
-    )
-    return is_sqlite_backup or is_paradedb_backup
+    return ".bak." in filename
 
 
 def _cleanup_old_backups(target_dir: str, backup_date_format: str):
@@ -96,105 +88,10 @@ def _sync_backups_to_output_dir(backup_date_format: str):
     _cleanup_old_backups(target_dir, backup_date_format)
 
 
-def _backup_paradedb(backup_date_format: str):
-    """
-    备份 ParadeDB（PostgreSQL）到 src/backup 目录。
-
-    产物文件名：odysseia_paradedb_YYYYMMDD.dump（pg_dump 自定义格式）。
-    """
-    db_host = os.getenv("DB_HOST", "db")
-    db_port = os.getenv("DB_PORT", "5432")
-    db_name = os.getenv("POSTGRES_DB", "odysseia_db")
-    db_user = os.getenv("POSTGRES_USER", "user")
-    db_password = os.getenv("POSTGRES_PASSWORD", "")
-
-    backup_filename = (
-        f"{PARADEDB_BACKUP_PREFIX}{backup_date_format}{PARADEDB_BACKUP_SUFFIX}"
-    )
-    destination_path = os.path.join(BACKUP_DIR, backup_filename)
-
-    env = os.environ.copy()
-    if db_password:
-        env["PGPASSWORD"] = db_password
-
-    # 方案 1：直接使用 pg_dump（适用于主机或应用容器中已安装 pg_dump）
-    direct_pg_dump_cmd = [
-        "pg_dump",
-        "-h",
-        db_host,
-        "-p",
-        str(db_port),
-        "-U",
-        db_user,
-        "-d",
-        db_name,
-        "-F",
-        "c",
-        "-f",
-        destination_path,
-    ]
-
-    try:
-        subprocess.run(
-            direct_pg_dump_cmd,
-            check=True,
-            env=env,
-            cwd=BASE_DIR,
-            capture_output=True,
-            text=True,
-        )
-        log.info(f"成功备份 ParadeDB 到 '{destination_path}'（通过 pg_dump）")
-        return
-    except FileNotFoundError:
-        log.warning("未找到 pg_dump，尝试使用 docker compose exec 进行备份。")
-    except subprocess.CalledProcessError as e:
-        log.warning(
-            "通过 pg_dump 备份 ParadeDB 失败，尝试 docker compose 方案。"
-            f" stderr={e.stderr.strip() if e.stderr else 'N/A'}"
-        )
-
-    # 方案 2：回退到 docker compose（在 db 容器内执行 pg_dump，输出重定向到本地文件）
-    docker_pg_dump_cmd = [
-        "docker",
-        "compose",
-        "exec",
-        "-T",
-        "db",
-        "pg_dump",
-        "-U",
-        db_user,
-        "-d",
-        db_name,
-        "-F",
-        "c",
-    ]
-
-    try:
-        with open(destination_path, "wb") as dump_file:
-            subprocess.run(
-                docker_pg_dump_cmd,
-                check=True,
-                env=env,
-                cwd=BASE_DIR,
-                stdout=dump_file,
-                stderr=subprocess.PIPE,
-            )
-        log.info(
-            f"成功备份 ParadeDB 到 '{destination_path}'（通过 docker compose exec）"
-        )
-    except FileNotFoundError as e:
-        log.error(f"ParadeDB 备份失败：未找到命令 {e.filename}", exc_info=True)
-    except subprocess.CalledProcessError as e:
-        stderr_text = (
-            e.stderr.decode(errors="ignore").strip() if e.stderr else "N/A"
-        )
-        log.error(f"ParadeDB 备份失败：{stderr_text}", exc_info=True)
-
-
 def backup_databases():
     """
     将所有数据库文件备份到 src/backup 目录，并清理旧备份。
-    只保留昨天的备份。
+    只保留当天的备份。
     """
     # 确保备份目录存在
     os.makedirs(BACKUP_DIR, exist_ok=True)
@@ -205,27 +102,23 @@ def backup_databases():
 
     log.info("开始执行数据库备份任务...")
 
-    if not os.path.isdir(DATA_DIR):
-        log.warning(f"数据目录 {DATA_DIR} 不存在，跳过备份。")
-        return
-
     # --- 步骤 1: 创建今天的备份 ---
-    for filename in os.listdir(DATA_DIR):
-        if not filename.endswith(DB_EXTENSIONS):
-            continue
+    if not os.path.isdir(DATA_DIR):
+        log.warning(f"数据目录 {DATA_DIR} 不存在，跳过本地 SQLite 备份。")
+    else:
+        for filename in os.listdir(DATA_DIR):
+            if not filename.endswith(DB_EXTENSIONS):
+                continue
 
-        source_path = os.path.join(DATA_DIR, filename)
-        backup_filename = f"{filename}.bak.{backup_date_format}"
-        destination_path = os.path.join(BACKUP_DIR, backup_filename)
+            source_path = os.path.join(DATA_DIR, filename)
+            backup_filename = f"{filename}.bak.{backup_date_format}"
+            destination_path = os.path.join(BACKUP_DIR, backup_filename)
 
-        try:
-            shutil.copy2(source_path, destination_path)
-            log.info(f"成功备份 '{filename}' 到 '{destination_path}'")
-        except Exception as e:
-            log.error(f"备份 '{filename}' 失败: {e}", exc_info=True)
-
-    # --- 步骤 1.5: 备份 ParadeDB ---
-    _backup_paradedb(backup_date_format)
+            try:
+                shutil.copy2(source_path, destination_path)
+                log.info(f"成功备份 '{filename}' 到 '{destination_path}'")
+            except Exception as e:
+                log.error(f"备份 '{filename}' 失败: {e}", exc_info=True)
 
     # --- 步骤 2: 清理过期的本地备份 ---
     log.info("开始清理过期备份...")
