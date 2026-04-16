@@ -32,6 +32,9 @@ from src.chat.services.gemini_service import gemini_service
 from src.chat.features.chat_settings.ui.custom_model_config_view import (
     CustomModelConfigView,
 )
+from src.chat.features.chat_settings.ui.ai_reply_regex_settings_view import (
+    AIReplyRegexSettingsView,
+)
 
 _GLOBAL_TTS_MODE_KEY = "global_tts_mode"
 _TTS_MODE_LEGACY = "legacy"  # tts_tool (edge_tts)
@@ -286,6 +289,14 @@ class ChatSettingsView(View):
                 row=4,
             )
         )
+        self.add_item(
+            Button(
+                label="正则设置",
+                style=ButtonStyle.secondary,
+                custom_id="regex_settings",
+                row=4,
+            )
+        )
 
     async def _update_view(self, interaction: Interaction):
         """通过编辑附加的消息来刷新视图。"""
@@ -321,6 +332,8 @@ class ChatSettingsView(View):
             await self.on_tts_settings(interaction)
         elif custom_id == "vercel_gateway_settings":
             await self.on_vercel_gateway_settings(interaction)
+        elif custom_id == "regex_settings":
+            await self.on_regex_settings(interaction)
 
         return True
 
@@ -344,6 +357,15 @@ class ChatSettingsView(View):
             view=view,
             ephemeral=True,
         )
+
+    async def on_regex_settings(self, interaction: Interaction):
+        view = AIReplyRegexSettingsView(opener_user_id=interaction.user.id)
+        await interaction.response.send_message(
+            content=view.build_content(),
+            view=view,
+            ephemeral=True,
+        )
+        view.message = await interaction.original_response()
 
     async def on_global_toggle(self, interaction: Interaction):
         current_state = self.settings.get("global", {}).get("chat_enabled", True)

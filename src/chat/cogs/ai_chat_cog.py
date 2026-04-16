@@ -16,6 +16,9 @@ from src.chat.config.chat_config import CHAT_ENABLED, MESSAGE_SETTINGS
 from src.chat.features.chat_settings.services.chat_settings_service import (
     chat_settings_service,
 )
+from src.chat.features.chat_settings.services.ai_reply_regex_service import (
+    ai_reply_regex_service,
+)
 from src.chat.features.tools.functions.summarize_channel import text_to_summary_image
 from src.chat.services.chat_service import GeneratedReply, chat_service
 from src.chat.services.context_service_test import get_context_service
@@ -318,7 +321,10 @@ class AIChatCog(commands.Cog):
         attempt_token: str,
         last_tools: list[str],
     ) -> None:
-        response_text = generated_reply.response_text
+        response_text = ai_reply_regex_service.apply_rules_to_text(
+            generated_reply.response_text
+        )
+        generated_reply.response_text = response_text
 
         if "summarize_channel" in last_tools:
             log.info("调用了总结工具, 使用图片发送并跳过恢复闭环。")
