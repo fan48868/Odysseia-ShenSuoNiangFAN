@@ -13,7 +13,7 @@ from src import config
 log = logging.getLogger(__name__)
 
 CUSTOM_MODEL_PRESET_DIRNAME = "custom_model_presets"
-MAX_CUSTOM_MODEL_PRESETS = 4
+MAX_CUSTOM_MODEL_PRESETS = 25
 
 
 class CustomModelPresetStoreError(ValueError):
@@ -127,7 +127,7 @@ class CustomModelPresetStore:
         presets = self.list_presets()
         if len(presets) >= MAX_CUSTOM_MODEL_PRESETS:
             raise CustomModelPresetLimitError(
-                f"由于 Discord 按钮数量限制，最多可以保存 {MAX_CUSTOM_MODEL_PRESETS} 个预设。"
+                f"最多可以保存 {MAX_CUSTOM_MODEL_PRESETS} 个预设。"
             )
         self._ensure_name_is_unique(normalized_name)
 
@@ -163,6 +163,28 @@ class CustomModelPresetStore:
             custom_model_name=current.custom_model_name,
             custom_model_enable_vision=current.custom_model_enable_vision,
             custom_model_enable_video_input=current.custom_model_enable_video_input,
+            created_at=current.created_at,
+            updated_at=self._now_iso(),
+        )
+        self._write_preset_file(updated)
+        return updated
+
+    def update_preset_settings(
+        self, preset_id: str, *, settings: Dict[str, str]
+    ) -> CustomModelPreset:
+        current = self.get_preset(preset_id)
+        updated = CustomModelPreset(
+            preset_id=current.preset_id,
+            name=current.name,
+            custom_model_url=str(settings.get("custom_model_url", "")).strip(),
+            custom_model_api_key=str(settings.get("custom_model_api_key", "")).strip(),
+            custom_model_name=str(settings.get("custom_model_name", "")).strip(),
+            custom_model_enable_vision=str(
+                settings.get("custom_model_enable_vision", "")
+            ).strip(),
+            custom_model_enable_video_input=str(
+                settings.get("custom_model_enable_video_input", "")
+            ).strip(),
             created_at=current.created_at,
             updated_at=self._now_iso(),
         )

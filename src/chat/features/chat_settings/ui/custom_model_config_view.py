@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
-from discord import ButtonStyle, Interaction
+from discord import ButtonStyle, Interaction, SelectOption
 from discord.ui import Button, View
 from dotenv import load_dotenv, set_key
 
@@ -22,6 +22,7 @@ from src.chat.features.chat_settings.ui.custom_model_config_modal import (
     CustomModelConfigModal,
     CustomModelPresetNameModal,
 )
+from src.chat.features.chat_settings.ui.components import PaginatedSelect
 from src.chat.services.gemini_service import gemini_service
 from src.chat.services.openai_models import CustomModelClient
 from src.chat.utils.custom_model_api_keys import (
@@ -408,10 +409,36 @@ class CustomModelConfigView(_OwnedView):
         super().__init__(opener_user_id=opener_user_id, timeout=timeout)
         self.settings_service = settings_service
         self.preset_store = preset_store or CustomModelPresetStore()
+        self.preset_paginator: Optional[PaginatedSelect] = None
+        self._create_preset_paginator()
         self._rebuild_items()
+
+    def _create_preset_paginator(self) -> None:
+        presets = self.preset_store.list_presets()
+        options = [
+            SelectOption(
+                label=preset.name,
+                value=preset.preset_id,
+                description=CustomModelConfigRuntime._truncate_text(
+                    preset.custom_model_name or preset.custom_model_url,
+                    limit=100,
+                )
+                or "点击查看该预设详情",
+            )
+            for preset in presets[:25]
+        ]
+
+        self.preset_paginator = PaginatedSelect(
+            placeholder="选择已保存的预设...",
+            custom_id_prefix="custom_model_preset_select",
+            options=options,
+            on_select_callback=self.on_preset_select,
+            label_prefix="预设",
+        )
 
     def _rebuild_items(self) -> None:
         self.clear_items()
+        self._create_preset_paginator()
 
         open_btn = Button(
             label="(可选) 配置 custom 模型参数",
@@ -422,15 +449,61 @@ class CustomModelConfigView(_OwnedView):
         open_btn.callback = self.on_open
         self.add_item(open_btn)
 
-        for preset in self.preset_store.list_presets()[:4]:
-            preset_btn = Button(
-                label=preset.name,
-                style=ButtonStyle.secondary,
-                custom_id=f"custom_model_preset_{preset.preset_id}",
-                row=1,
+        refresh_btn = Button(
+            label="刷新",
+            style=ButtonStyle.primary,
+            custom_id="custom_model_preset_refresh",
+            row=0,
+        )
+        refresh_btn.callback = self.on_refresh
+        self.add_item(refresh_btn)
+
+        if self.preset_paginator and self.preset_paginator.options:
+            preset_select = self.preset_paginator.create_select(row=1)
+            preset_select.max_values = 1
+            preset_select.min_values = 1
+            self.add_item(preset_select)
+
+    async def on_refresh(self, interaction: Interaction) -> None:
+        self._rebuild_items()
+        await interaction.response.edit_message(view=self)
+
+    async def on_preset_select(self, interaction: Interaction) -> None:
+        if not interaction.data or "values" not in interaction.data:
+            await interaction.response.defer()
+            return
+
+        values = interaction.data["values"]
+        if not values or values[0] == "disabled":
+            await interaction.response.defer()
+            return
+
+        preset_id = values[0]
+        try:
+            preset = self.preset_store.get_preset(preset_id)
+        except CustomModelPresetNotFoundError as exc:
+            await interaction.response.send_message(
+                f"❌ {exc}",
+                view=self._build_main_view(),
+                ephemeral=True,
             )
-            preset_btn.callback = self._build_preset_preview_callback(preset.preset_id)
-            self.add_item(preset_btn)
+            return
+
+        settings = CustomModelSettings.from_preset(preset)
+        await interaction.response.send_message(
+            CustomModelConfigRuntime.build_preview_message(
+                settings,
+                heading=f"📦 预设预览：`{preset.name}`",
+            ),
+            view=CustomModelPresetPreviewView(
+                opener_user_id=self.opener_user_id,
+                settings_service=self.settings_service,
+                preset_store=self.preset_store,
+                preset_id=preset.preset_id,
+                timeout=self.timeout or 180,
+            ),
+            ephemeral=True,
+        )
 
     def _build_config_modal(
         self,
@@ -471,36 +544,6 @@ class CustomModelConfigView(_OwnedView):
             saved_settings=settings,
             timeout=self.timeout or 180,
         )
-
-    def _build_preset_preview_callback(self, preset_id: str):
-        async def _callback(interaction: Interaction) -> None:
-            try:
-                preset = self.preset_store.get_preset(preset_id)
-            except CustomModelPresetNotFoundError as exc:
-                await interaction.response.send_message(
-                    f"❌ {exc}",
-                    view=self._build_main_view(),
-                    ephemeral=True,
-                )
-                return
-
-            settings = CustomModelSettings.from_preset(preset)
-            await interaction.response.send_message(
-                CustomModelConfigRuntime.build_preview_message(
-                    settings,
-                    heading=f"📦 预设预览：`{preset.name}`",
-                ),
-                view=CustomModelPresetPreviewView(
-                    opener_user_id=self.opener_user_id,
-                    settings_service=self.settings_service,
-                    preset_store=self.preset_store,
-                    preset_id=preset.preset_id,
-                    timeout=self.timeout or 180,
-                ),
-                ephemeral=True,
-            )
-
-        return _callback
 
     async def on_open(self, interaction: Interaction) -> None:
         current_settings = CustomModelConfigRuntime.read_current_settings()
@@ -610,13 +653,22 @@ class CustomModelPresetPreviewView(_OwnedView):
         self.add_item(apply_btn)
 
         edit_btn = Button(
-            label="修改",
+            label="配置预设",
             style=ButtonStyle.primary,
-            custom_id=f"custom_model_preset_edit_{preset_id}",
+            custom_id=f"custom_model_preset_configure_{preset_id}",
             row=0,
         )
-        edit_btn.callback = self.on_edit
+        edit_btn.callback = self.on_configure
         self.add_item(edit_btn)
+
+        rename_btn = Button(
+            label="改名",
+            style=ButtonStyle.secondary,
+            custom_id=f"custom_model_preset_rename_{preset_id}",
+            row=0,
+        )
+        rename_btn.callback = self.on_rename
+        self.add_item(rename_btn)
 
         delete_btn = Button(
             label="删除此预设",
@@ -664,6 +716,27 @@ class CustomModelPresetPreviewView(_OwnedView):
     def _get_current_preset(self) -> CustomModelPreset:
         return self.preset_store.get_preset(self.preset_id)
 
+    def _build_config_modal(
+        self,
+        *,
+        title: str,
+        initial_settings: CustomModelSettings,
+        on_submit_callback,
+    ) -> CustomModelConfigModal:
+        api_key_default_value, api_key_omitted = (
+            CustomModelConfigRuntime.build_modal_api_key_state(initial_settings)
+        )
+        return CustomModelConfigModal(
+            title=title,
+            current_url=initial_settings.custom_model_url,
+            current_api_key=api_key_default_value,
+            current_api_key_omitted=api_key_omitted,
+            current_model_name=initial_settings.custom_model_name,
+            current_enable_vision=initial_settings.custom_model_enable_vision,
+            current_enable_video_input=initial_settings.custom_model_enable_video_input,
+            on_submit_callback=on_submit_callback,
+        )
+
     async def on_apply(self, interaction: Interaction) -> None:
         try:
             preset = self._get_current_preset()
@@ -682,7 +755,53 @@ class CustomModelPresetPreviewView(_OwnedView):
             view=self._build_save_view(result.settings),
         )
 
-    async def on_edit(self, interaction: Interaction) -> None:
+    async def on_configure(self, interaction: Interaction) -> None:
+        try:
+            preset = self._get_current_preset()
+        except CustomModelPresetNotFoundError as exc:
+            await interaction.response.edit_message(
+                content=f"❌ {exc}",
+                view=self._build_main_view(),
+            )
+            return
+
+        current_settings = CustomModelSettings.from_preset(preset)
+
+        async def _on_submit(modal_interaction: Interaction, settings: Dict[str, Any]):
+            try:
+                normalized_settings, _ = CustomModelConfigRuntime.validate_settings(
+                    settings,
+                    fallback_api_key=current_settings.custom_model_api_key,
+                )
+                updated_preset = self.preset_store.update_preset_settings(
+                    self.preset_id,
+                    settings=normalized_settings.to_dict(),
+                )
+            except ValueError as exc:
+                await modal_interaction.response.send_message(
+                    f"❌ {exc}",
+                    ephemeral=True,
+                )
+                return
+
+            await modal_interaction.response.send_message(
+                self._build_preview_content(
+                    updated_preset,
+                    heading=f"✅ 已更新预设 `{updated_preset.name}`。",
+                ),
+                view=self._build_preview_view(preset_id=updated_preset.preset_id),
+                ephemeral=True,
+            )
+
+        await interaction.response.send_modal(
+            self._build_config_modal(
+                title=f"配置预设：{preset.name}",
+                initial_settings=current_settings,
+                on_submit_callback=_on_submit,
+            )
+        )
+
+    async def on_rename(self, interaction: Interaction) -> None:
         try:
             preset = self._get_current_preset()
         except CustomModelPresetNotFoundError as exc:
