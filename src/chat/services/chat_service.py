@@ -21,6 +21,8 @@ from src.chat.features.chat_settings.services.chat_settings_service import (
 
 log = logging.getLogger(__name__)
 
+EMPTY_AI_RESPONSE_FALLBACK = "AI服务未返回回复,可能是PVP失败或者内容被截断"
+
 # 黑名单惩戒短语（随机替换用户发言）
 BLACKLIST_PUNISHMENT_PHRASES = [
     "我是杂鱼",
@@ -256,8 +258,14 @@ class ChatService:
             )
 
             if not ai_response:
-                log.info(f"AI服务未返回回复，跳过用户 {author.id}。")
-                return None
+                log.info(
+                    "AI服务未返回回复，改为向用户 %s 发送兜底提示。", author.id
+                )
+                return GeneratedReply(
+                    response_text=EMPTY_AI_RESPONSE_FALLBACK,
+                    user_name=author.display_name,
+                    user_content_for_memory=user_content,
+                )
 
             # 4. --- 后处理与格式化 ---
             final_response = self._format_ai_response(ai_response)
