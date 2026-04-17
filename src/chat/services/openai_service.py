@@ -1552,36 +1552,36 @@ class OpenAIService:
                 openai_messages.append(msg_to_append)
 
                 if not tool_calls:
-                    if content:
-                        has_forbidden_phrase = bool(
-                            re.search(
-                                r"不过话说回来|话说回来|话又说回来|不过话又说回来|不过说真的",
-                                content,
-                            )
-                        )
-                        content_len = len(content)
+                    # if content:
+                    #     has_forbidden_phrase = bool(
+                    #         re.search(
+                    #             r"不过话说回来|话说回来|话又说回来|不过话又说回来|不过说真的",
+                    #             content,
+                    #         )
+                    #     )
+                    #     content_len = len(content)
 
-                        if has_forbidden_phrase and content_len <= 800:
-                            if bad_format_retries < 3:
-                                log.warning(
-                                    f"[{channel_label}] 检测到违禁词 (尝试 {bad_format_retries + 1}/3)，正在重试..."
-                                )
-                                openai_messages.append(
-                                    {
-                                        "role": "user",
-                                        "content": "[系统提示] 检测到你使用了“不过说真的|不过话说回来|话说回来|话又说回来”。这是被禁止的。请重新生成回复，去掉这个短语，保持语气自然。",
-                                    }
-                                )
-                                bad_format_retries += 1
-                                continue
-                            return self._apply_blacklist_notice(
-                                "抱歉，我的说话格式一直达不到要求，我是杂鱼",
-                                blacklist_punishment_active,
-                            )
-                        elif has_forbidden_phrase:
-                            log.info(
-                                f"[{channel_label}] 检测到违禁词，但回复长度为 {content_len} (>800)，按成本优化策略放行。"
-                            )
+                    #     if has_forbidden_phrase and content_len <= 800:
+                    #         if bad_format_retries < 3:
+                    #             log.warning(
+                    #                 f"[{channel_label}] 检测到违禁词 (尝试 {bad_format_retries + 1}/3)，正在重试..."
+                    #             )
+                    #             openai_messages.append(
+                    #                 {
+                    #                     "role": "user",
+                    #                     "content": "[系统提示] 检测到你使用了“不过说真的|不过话说回来|话说回来|话又说回来”。这是被禁止的。请重新生成回复，去掉这个短语，保持语气自然。",
+                    #                 }
+                    #             )
+                    #             bad_format_retries += 1
+                    #             continue
+                    #         return self._apply_blacklist_notice(
+                    #             "抱歉，我的说话格式一直达不到要求，我是杂鱼",
+                    #             blacklist_punishment_active,
+                    #         )
+                    #     elif has_forbidden_phrase:
+                    #         log.info(
+                    #             f"[{channel_label}] 检测到违禁词，但回复长度为 {content_len} (>800)，按成本优化策略放行。"
+                    #         )
 
                     allowed_emoji_names = {"开心","乖巧","害羞","吃瓜","偷笑","裂开","呜呜","收到","打哈欠","得意","点赞","眩晕","疑惑","比心","desuwa","伤心","生气","加油", "好奇","邀请","傲娇","祝福","你好","叹气","投降",}
                     removed_emoji_tags: List[str] = []
