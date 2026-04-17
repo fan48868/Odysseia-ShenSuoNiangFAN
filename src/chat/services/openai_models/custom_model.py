@@ -1662,10 +1662,6 @@ class CustomModelClient:
         selector = None
         if is_vercel_gateway:
             # 从 VercelGatewayProviderSelectorService.MODEL_PROVIDER_NAMES 中查找
-            from src.chat.services.vercel_gateway_provider_selector import (
-                VercelGatewayProviderSelectorService,
-            )
-
             if (
                 normalized_request_model
                 in VercelGatewayProviderSelectorService.MODEL_PROVIDER_NAMES
@@ -2049,7 +2045,11 @@ class CustomModelClient:
                             meaningful_line_count += 1
                             last_meaningful_output_at = loop.time()
 
-                        if first_token_at and (now - first_token_at) > 15.0:
+                        if (
+                            is_vercel_gateway
+                            and first_token_at
+                            and (now - first_token_at) > 15.0
+                        ):
                             time_per_char = (now - first_token_at) / max(
                                 output_char_count, 1
                             )
