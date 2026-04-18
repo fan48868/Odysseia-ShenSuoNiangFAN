@@ -117,6 +117,18 @@ def configured_context_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return data_dir
 
 
+def set_active_cache_enabled(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "src.chat.features.chat_settings.services.chat_settings_service",
+        SimpleNamespace(
+            chat_settings_service=SimpleNamespace(
+                is_active_chat_cache_enabled=AsyncMock(return_value=enabled)
+            )
+        ),
+    )
+
+
 def extract_history_text(context: list[dict]) -> str:
     assert context
     assert context[0]["role"] == "user"
@@ -163,6 +175,37 @@ async def test_flush_pending_messages_persists_small_active_cache_batch(
     assert (
         configured_context_module / "active_chat_cache" / f"active_cache_{channel.id}.json"
     ).exists()
+
+
+@pytest.mark.asyncio
+async def test_active_cache_writes_each_message_immediately(
+    configured_context_module: Path,
+):
+    channel = FakeChannel(channel_id=111)
+    bot = FakeBot(channels=[channel])
+    service = context_module.ContextServiceTest(bot)
+    message = build_message(
+        1101,
+        channel,
+        author_name="Alice",
+        content="实时落盘消息",
+        created_at=datetime.now(timezone.utc),
+    )
+
+    await service.record_message_for_active_cache(message)
+    task = service.active_flush_tasks.get(channel.id)
+    if task is not None:
+        await task
+
+    cache_file = (
+        configured_context_module
+        / "active_chat_cache"
+        / f"active_cache_{channel.id}.json"
+    )
+    saved_entries = context_module.json.loads(cache_file.read_text(encoding="utf-8"))
+
+    assert len(saved_entries) == 1
+    assert saved_entries[0]["content"] == "实时落盘消息"
 
 
 @pytest.mark.asyncio
@@ -246,6 +289,142 @@ async def test_missing_reply_cache_only_drops_reply_hint_not_history_body(
     assert "回复消息" in history_text
     assert len(history_lines) == 2
     channel.fetch_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reply_cache_persists_full_history_snapshot_and_reply_author(
+    configured_context_module: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    set_active_cache_enabled(monkeypatch, False)
+    channel = FakeChannel(channel_id=313)
+    now = datetime.now(timezone.utc)
+    first = build_message(
+        3101,
+        channel,
+        author_name="Alice",
+        content="第一条",
+        created_at=now,
+    )
+    second = build_message(
+        3102,
+        channel,
+        author_name="Bob",
+        content="第二条",
+        created_at=now + timedelta(seconds=1),
+        reply_to_message_id=3101,
+        resolved_message=first,
+    )
+    channel._history_messages = [first, second]
+
+    service = context_module.ContextServiceTest(FakeBot(channels=[channel]))
+    await service.get_formatted_channel_history_new(channel.id, user_id=1, guild_id=1)
+
+    cache_file = (
+        configured_context_module
+        / "reply_message_cache"
+        / f"reply_cache_{channel.id}.json"
+    )
+    saved_entries = context_module.json.loads(cache_file.read_text(encoding="utf-8"))
+
+    assert len(saved_entries) == 2
+    assert saved_entries[0]["content"] == "第一条"
+    assert saved_entries[1]["content"] == "第二条"
+    assert saved_entries[1]["reply_to_author_display_name"] == "Alice"
+
+
+@pytest.mark.asyncio
+async def test_reply_cache_can_restore_history_without_active_cache(
+    configured_context_module: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    set_active_cache_enabled(monkeypatch, False)
+    channel = FakeChannel(channel_id=323)
+    now = datetime.now(timezone.utc)
+    first = context_module.CachedReplyMessage(
+        message_id=3201,
+        author_display_name="Alice",
+        content="缓存第一条",
+        created_at_ts=now.timestamp(),
+    )
+    second = context_module.CachedReplyMessage(
+        message_id=3202,
+        author_display_name="Bob",
+        content="缓存第二条",
+        created_at_ts=(now + timedelta(seconds=1)).timestamp(),
+        reply_to_message_id=3201,
+        reply_to_author_display_name="Alice",
+    )
+    reply_cache_dir = configured_context_module / "reply_message_cache"
+    reply_cache_dir.mkdir(exist_ok=True)
+    cache_file = reply_cache_dir / f"reply_cache_{channel.id}.json"
+    cache_file.write_text(
+        context_module.json.dumps(
+            [first.to_dict(), second.to_dict()], ensure_ascii=False
+        ),
+        encoding="utf-8",
+    )
+
+    service = context_module.ContextServiceTest(FakeBot(channels=[channel]))
+    context = await service.get_formatted_channel_history_new(
+        channel.id, user_id=1, guild_id=1
+    )
+    history_text = extract_history_text(context)
+
+    assert "缓存第一条" in history_text
+    assert "缓存第二条" in history_text
+    assert "[Bob][回复 Alice]: 缓存第二条" in history_text
+
+
+@pytest.mark.asyncio
+async def test_legacy_reply_cache_is_ignored_and_rewritten(
+    configured_context_module: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    set_active_cache_enabled(monkeypatch, False)
+    channel = FakeChannel(channel_id=333)
+    now = datetime.now(timezone.utc)
+    first = build_message(
+        3301,
+        channel,
+        author_name="Alice",
+        content="新格式第一条",
+        created_at=now,
+    )
+    second = build_message(
+        3302,
+        channel,
+        author_name="Bob",
+        content="新格式第二条",
+        created_at=now + timedelta(seconds=1),
+    )
+    channel._history_messages = [first, second]
+
+    reply_cache_dir = configured_context_module / "reply_message_cache"
+    reply_cache_dir.mkdir(exist_ok=True)
+    cache_file = reply_cache_dir / f"reply_cache_{channel.id}.json"
+    cache_file.write_text(
+        context_module.json.dumps(
+            [
+                {"message_id": 1, "author_display_name": "旧用户A"},
+                {"message_id": 2, "author_display_name": "旧用户B"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    service = context_module.ContextServiceTest(FakeBot(channels=[channel]))
+    context = await service.get_formatted_channel_history_new(
+        channel.id, user_id=1, guild_id=1
+    )
+    history_text = extract_history_text(context)
+    saved_entries = context_module.json.loads(cache_file.read_text(encoding="utf-8"))
+
+    assert "新格式第一条" in history_text
+    assert "新格式第二条" in history_text
+    assert all("content" in entry for entry in saved_entries)
+    assert {entry["message_id"] for entry in saved_entries} == {3301, 3302}
 
 
 @pytest.mark.asyncio

@@ -24,6 +24,12 @@ log = logging.getLogger(__name__)
 class CachedReplyMessage:
     message_id: int
     author_display_name: str
+    content: str
+    created_at_ts: float
+    is_bot: bool = False
+    reply_to_message_id: Optional[int] = None
+    reply_to_author_display_name: Optional[str] = None
+    has_attachments: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Optional["CachedReplyMessage"]:
@@ -40,12 +46,51 @@ class CachedReplyMessage:
         if not isinstance(author_display_name, str) or not author_display_name:
             author_display_name = "未知用户"
 
-        return cls(message_id=message_id, author_display_name=author_display_name)
+        content = data.get("content")
+        if not isinstance(content, str):
+            content = ""
+
+        created_at_ts_raw = data.get("created_at_ts", 0.0)
+        try:
+            created_at_ts = float(created_at_ts_raw)
+        except (TypeError, ValueError):
+            created_at_ts = 0.0
+
+        reply_to_message_id = data.get("reply_to_message_id")
+        try:
+            reply_to_message_id = (
+                int(reply_to_message_id)
+                if reply_to_message_id is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            reply_to_message_id = None
+
+        reply_to_author_display_name = data.get("reply_to_author_display_name")
+        if not isinstance(reply_to_author_display_name, str):
+            reply_to_author_display_name = None
+
+        return cls(
+            message_id=message_id,
+            author_display_name=author_display_name,
+            content=content,
+            created_at_ts=created_at_ts,
+            is_bot=bool(data.get("is_bot", False)),
+            reply_to_message_id=reply_to_message_id,
+            reply_to_author_display_name=reply_to_author_display_name,
+            has_attachments=bool(data.get("has_attachments", False)),
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "message_id": self.message_id,
             "author_display_name": self.author_display_name,
+            "content": self.content,
+            "created_at_ts": self.created_at_ts,
+            "is_bot": self.is_bot,
+            "reply_to_message_id": self.reply_to_message_id,
+            "reply_to_author_display_name": self.reply_to_author_display_name,
+            "has_attachments": self.has_attachments,
         }
 
 
@@ -166,6 +211,10 @@ class ContextServiceTest:
     def _active_sort_key(entry: ActiveCachedMessage) -> tuple[float, int]:
         return (entry.created_at_ts, entry.message_id)
 
+    @staticmethod
+    def _reply_sort_key(entry: CachedReplyMessage) -> tuple[float, int]:
+        return (entry.created_at_ts, entry.message_id)
+
     @classmethod
     def _merge_active_entries(
         cls,
@@ -189,10 +238,34 @@ class ContextServiceTest:
             has_attachments=incoming.has_attachments or existing.has_attachments,
         )
 
+    @classmethod
+    def _merge_reply_entries(
+        cls,
+        existing: Optional[CachedReplyMessage],
+        incoming: CachedReplyMessage,
+    ) -> CachedReplyMessage:
+        if existing is None:
+            return incoming
+
+        return CachedReplyMessage(
+            message_id=incoming.message_id,
+            author_display_name=incoming.author_display_name
+            or existing.author_display_name,
+            content=incoming.content or existing.content,
+            created_at_ts=incoming.created_at_ts or existing.created_at_ts,
+            is_bot=incoming.is_bot or existing.is_bot,
+            reply_to_message_id=incoming.reply_to_message_id
+            or existing.reply_to_message_id,
+            reply_to_author_display_name=incoming.reply_to_author_display_name
+            or existing.reply_to_author_display_name,
+            has_attachments=incoming.has_attachments or existing.has_attachments,
+        )
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.message_cache: Dict[int, OrderedDict[int, CachedReplyMessage]] = {}
         self.loaded_channel_caches: Set[int] = set()
+        self.legacy_channel_caches: Set[int] = set()
         self.cache_dir = os.path.join(config.DATA_DIR, "reply_message_cache")
         os.makedirs(self.cache_dir, exist_ok=True)
 
@@ -242,6 +315,7 @@ class ContextServiceTest:
     def _load_channel_cache(self, channel_id: int) -> None:
         channel_cache = self._get_channel_cache(channel_id)
         channel_cache.clear()
+        self.legacy_channel_caches.discard(channel_id)
         cache_file_path = self._get_cache_file_path(channel_id)
         if not os.path.isfile(cache_file_path):
             return
@@ -250,10 +324,18 @@ class ContextServiceTest:
             with open(cache_file_path, "r", encoding="utf-8") as file:
                 data = json.load(file)
             if isinstance(data, list):
+                if any(self._is_legacy_reply_cache_entry(entry) for entry in data):
+                    self.legacy_channel_caches.add(channel_id)
+                    log.info(
+                        f"[单条消息缓存] 频道 {channel_id} 检测到旧格式 reply cache，本轮忽略并等待重建。"
+                    )
+                    return
+                entries = []
                 for entry in data:
                     cached = CachedReplyMessage.from_dict(entry)
-                    if not cached or cached.message_id in channel_cache:
-                        continue
+                    if cached:
+                        entries.append(cached)
+                for cached in sorted(entries, key=self._reply_sort_key):
                     channel_cache[cached.message_id] = cached
         except Exception as e:
             log.warning(f"[单条消息缓存] 读取频道 {channel_id} 缓存文件失败: {e}")
@@ -274,6 +356,7 @@ class ContextServiceTest:
         try:
             with open(cache_file_path, "w", encoding="utf-8") as file:
                 json.dump(data, file, ensure_ascii=False)
+            self.legacy_channel_caches.discard(channel_id)
         except Exception as e:
             log.warning(f"[单条消息缓存] 写入频道 {channel_id} 缓存文件失败: {e}")
 
@@ -447,9 +530,6 @@ class ContextServiceTest:
 
                 self._acknowledge_flushed_messages(channel_id, batch_entries)
                 self._replace_active_channel_cache(channel_id, persisted_entries)
-                log.info(
-                    f"[主动聊天缓存] 频道 {channel_id} 已异步落盘 {len(batch_entries)} 条消息。"
-                )
         except Exception as e:
             log.warning(
                 f"[主动聊天缓存] 频道 {channel_id} 后台 flush 失败: {e}",
@@ -472,7 +552,18 @@ class ContextServiceTest:
 
     def clear_channel_high_priority(self, channel_id: int) -> None:
         self.high_priority_channels.discard(channel_id)
-        self._maybe_schedule_active_flush(channel_id)
+        pending_buffer = self._get_pending_active_buffer(channel_id)
+        if not pending_buffer:
+            self._maybe_schedule_active_flush(channel_id)
+            return
+
+        current_task = self.active_flush_tasks.get(channel_id)
+        if current_task and not current_task.done():
+            return
+
+        self.active_flush_tasks[channel_id] = asyncio.create_task(
+            self.flush_pending_active_messages(channel_id)
+        )
 
     async def _cancel_active_flush_task(self, channel_id: int) -> None:
         task = self.active_flush_tasks.get(channel_id)
@@ -498,14 +589,12 @@ class ContextServiceTest:
         )
         self._acknowledge_flushed_messages(channel_id, batch_entries)
         self._replace_active_channel_cache(channel_id, persisted_entries)
-        log.info(
-            f"[主动聊天缓存] 频道 {channel_id} 已同步落盘 {len(batch_entries)} 条消息。"
-        )
         return True
 
     async def flush_pending_active_messages(
         self, channel_id: Optional[int] = None
     ) -> None:
+        current_task = asyncio.current_task()
         if channel_id is not None:
             channel_ids = [channel_id]
         else:
@@ -526,6 +615,10 @@ class ContextServiceTest:
                     f"[主动聊天缓存] 强制落盘频道 {target_channel_id} 失败: {e}",
                     exc_info=True,
                 )
+            finally:
+                stored_task = self.active_flush_tasks.get(target_channel_id)
+                if stored_task is current_task:
+                    self.active_flush_tasks.pop(target_channel_id, None)
 
     def _build_active_cached_message_from_message(
         self, message: discord.Message
@@ -565,6 +658,42 @@ class ContextServiceTest:
             has_attachments=bool(getattr(message, "attachments", [])),
         )
 
+    def _build_cached_reply_message_from_message(
+        self, message: discord.Message
+    ) -> CachedReplyMessage:
+        active_snapshot = self._build_active_cached_message_from_message(message)
+        return self._reply_entry_from_active_entry(active_snapshot)
+
+    @staticmethod
+    def _reply_entry_from_active_entry(
+        entry: ActiveCachedMessage,
+    ) -> CachedReplyMessage:
+        return CachedReplyMessage(
+            message_id=entry.message_id,
+            author_display_name=entry.author_display_name,
+            content=entry.content,
+            created_at_ts=entry.created_at_ts,
+            is_bot=entry.is_bot,
+            reply_to_message_id=entry.reply_to_message_id,
+            reply_to_author_display_name=entry.reply_to_author_display_name,
+            has_attachments=entry.has_attachments,
+        )
+
+    @staticmethod
+    def _active_entry_from_reply_entry(
+        entry: CachedReplyMessage,
+    ) -> ActiveCachedMessage:
+        return ActiveCachedMessage(
+            message_id=entry.message_id,
+            author_display_name=entry.author_display_name,
+            content=entry.content,
+            created_at_ts=entry.created_at_ts,
+            is_bot=entry.is_bot,
+            reply_to_message_id=entry.reply_to_message_id,
+            reply_to_author_display_name=entry.reply_to_author_display_name,
+            has_attachments=entry.has_attachments,
+        )
+
     def _is_cacheable_message(self, message: discord.Message) -> bool:
         if not self._is_history_channel(getattr(message, "channel", None)):
             return False
@@ -576,6 +705,12 @@ class ContextServiceTest:
             discord.MessageType.default,
             discord.MessageType.reply,
         )
+
+    @staticmethod
+    def _is_legacy_reply_cache_entry(entry: Any) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        return "content" not in entry or "created_at_ts" not in entry
 
     async def record_message_for_active_cache(self, message: discord.Message) -> None:
         if not self._is_cacheable_message(message):
@@ -640,9 +775,9 @@ class ContextServiceTest:
         cached_reference_map: Dict[int, CachedReplyMessage] = dict(channel_cache)
 
         for entry in history_entries:
-            cached_reference_map[entry.message_id] = CachedReplyMessage(
-                message_id=entry.message_id,
-                author_display_name=entry.author_display_name,
+            cached_reference_map[entry.message_id] = self._merge_reply_entries(
+                cached_reference_map.get(entry.message_id),
+                self._reply_entry_from_active_entry(entry),
             )
 
         ids_to_fetch = {
@@ -663,14 +798,9 @@ class ContextServiceTest:
                     if not message:
                         continue
 
-                    author_name = (
-                        message.author.display_name
-                        if getattr(message, "author", None)
-                        else "未知用户"
-                    )
-                    cached_reference_map[message.id] = CachedReplyMessage(
-                        message_id=message.id,
-                        author_display_name=author_name,
+                    cached_reference_map[message.id] = self._merge_reply_entries(
+                        cached_reference_map.get(message.id),
+                        self._build_cached_reply_message_from_message(message),
                     )
                     successful_fetches += 1
                 except discord.NotFound:
@@ -692,9 +822,23 @@ class ContextServiceTest:
         for entry in history_entries:
             ref_id = entry.reply_to_message_id
             ref_msg = cached_reference_map.get(ref_id) if ref_id else None
-            if not ref_msg or ref_msg.message_id in refreshed_cache:
+            reply_author = entry.reply_to_author_display_name
+            if not reply_author and ref_msg:
+                reply_author = ref_msg.author_display_name
+
+            refreshed_entry = CachedReplyMessage(
+                message_id=entry.message_id,
+                author_display_name=entry.author_display_name,
+                content=entry.content,
+                created_at_ts=entry.created_at_ts,
+                is_bot=entry.is_bot,
+                reply_to_message_id=entry.reply_to_message_id,
+                reply_to_author_display_name=reply_author,
+                has_attachments=entry.has_attachments,
+            )
+            if refreshed_entry.message_id in refreshed_cache:
                 continue
-            refreshed_cache[ref_msg.message_id] = ref_msg
+            refreshed_cache[refreshed_entry.message_id] = refreshed_entry
 
         channel_cache.clear()
         channel_cache.update(refreshed_cache)
@@ -761,6 +905,10 @@ class ContextServiceTest:
                 log.warning(f"[主动聊天缓存] 读取频道 {channel_id} 开关失败: {e}")
 
             self._ensure_channel_cache_loaded(channel_id)
+            persisted_reply_entries = [
+                self._active_entry_from_reply_entry(entry)
+                for entry in self._get_channel_cache(channel_id).values()
+            ]
 
             live_cached_entries = self._collect_live_cached_snapshots(channel_id)
             persisted_active_entries: List[ActiveCachedMessage] = []
@@ -775,7 +923,10 @@ class ContextServiceTest:
                 )
 
             combined_entries = self._combine_active_entries(
-                persisted_active_entries + pending_active_entries + live_cached_entries
+                persisted_reply_entries
+                + persisted_active_entries
+                + pending_active_entries
+                + live_cached_entries
             )
 
             history_entries = list(combined_entries.values())[-limit:]
