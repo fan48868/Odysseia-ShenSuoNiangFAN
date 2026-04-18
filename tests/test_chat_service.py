@@ -24,7 +24,15 @@ def chat_service_module(monkeypatch: pytest.MonkeyPatch):
     )
     get_context_service = MagicMock(
         return_value=SimpleNamespace(
-            get_formatted_channel_history_new=AsyncMock(return_value="")
+            get_formatted_channel_history_new=AsyncMock(
+                return_value=[
+                    {
+                        "role": "user",
+                        "parts": ["这是本频道最近的对话记录:\n\n[路人甲]: 早上好"],
+                    },
+                    {"role": "model", "parts": ["我已了解频道的历史对话"]},
+                ]
+            )
         )
     )
     world_book_service = SimpleNamespace(
@@ -89,7 +97,71 @@ def chat_service_module(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_reply_for_message_returns_fallback_when_ai_response_is_empty(
+async def test_generate_reply_for_message_retries_with_continue_message(
+    chat_service_module,
+):
+    message = SimpleNamespace(
+        id=456,
+        author=SimpleNamespace(id=123, display_name="测试用户"),
+        guild=SimpleNamespace(id=789),
+        channel=SimpleNamespace(id=321),
+    )
+    processed_data = {
+        "user_content": "你好",
+        "replied_content": "> [Alice]:\n> 前文\n\n",
+        "image_data_list": [{"mime_type": "image/png", "data": b"img"}],
+        "video_data_list": [{"mime_type": "video/mp4", "data": b"vid"}],
+    }
+    chat_service_module.gemini_service.generate_response.side_effect = [
+        "",
+        "继续补上的回复",
+    ]
+
+    result = await chat_service_module.chat_service.generate_reply_for_message(
+        message,
+        processed_data,
+        guild_name="测试服务器",
+        location_name="测试频道",
+    )
+
+    assert result is not None
+    assert result.response_text == "继续补上的回复"
+    assert result.user_name == "测试用户"
+    assert result.user_content_for_memory == "你好"
+    assert chat_service_module.gemini_service.generate_response.await_count == 2
+
+    first_call = chat_service_module.gemini_service.generate_response.await_args_list[0]
+    second_call = chat_service_module.gemini_service.generate_response.await_args_list[1]
+
+    assert first_call.kwargs["message"] == "你好"
+    assert first_call.kwargs["replied_message"] == "> [Alice]:\n> 前文\n\n"
+    assert first_call.kwargs["images"] == processed_data["image_data_list"]
+    assert first_call.kwargs["videos"] == processed_data["video_data_list"]
+    assert second_call.kwargs["message"] == "@神所娘：继续回复"
+    assert second_call.kwargs["replied_message"] is None
+    assert second_call.kwargs["images"] is None
+    assert second_call.kwargs["videos"] is None
+    assert second_call.kwargs["world_book_entries"] == first_call.kwargs["world_book_entries"]
+    assert (
+        second_call.kwargs["retrieval_query_text"]
+        == first_call.kwargs["retrieval_query_text"]
+    )
+    assert (
+        second_call.kwargs["retrieval_query_embedding"]
+        == first_call.kwargs["retrieval_query_embedding"]
+    )
+    assert len(second_call.kwargs["channel_context"]) == len(first_call.kwargs["channel_context"])
+    assert second_call.kwargs["channel_context"][-1]["parts"][0] == "我已了解频道的历史对话"
+    synthetic_history = second_call.kwargs["channel_context"][0]["parts"][0]
+    assert "AI服务未返回回复" in synthetic_history
+    assert "> [Alice]:" in synthetic_history
+    assert "你好" in synthetic_history
+    assert "以下是刚刚发生但未成功送达频道的续写上下文" not in synthetic_history
+    assert "我知道了，我会基于这轮中断前的内容继续回复" not in synthetic_history
+
+
+@pytest.mark.asyncio
+async def test_generate_reply_for_message_returns_fallback_when_retry_is_also_empty(
     chat_service_module,
 ):
     message = SimpleNamespace(
@@ -104,6 +176,10 @@ async def test_generate_reply_for_message_returns_fallback_when_ai_response_is_e
         "image_data_list": [],
         "video_data_list": [],
     }
+    chat_service_module.gemini_service.generate_response.side_effect = [
+        "",
+        "   ",
+    ]
 
     result = await chat_service_module.chat_service.generate_reply_for_message(
         message,
@@ -114,5 +190,40 @@ async def test_generate_reply_for_message_returns_fallback_when_ai_response_is_e
 
     assert result is not None
     assert result.response_text == chat_service_module.EMPTY_AI_RESPONSE_FALLBACK
-    assert result.user_name == "测试用户"
-    assert result.user_content_for_memory == "你好"
+    assert chat_service_module.gemini_service.generate_response.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_reply_for_message_does_not_retry_when_first_response_has_content(
+    chat_service_module,
+):
+    message = SimpleNamespace(
+        id=456,
+        author=SimpleNamespace(id=123, display_name="测试用户"),
+        guild=SimpleNamespace(id=789),
+        channel=SimpleNamespace(id=321),
+    )
+    processed_data = {
+        "user_content": "你好",
+        "replied_content": "> [Alice]:\n> 前文\n\n",
+        "image_data_list": [{"mime_type": "image/png", "data": b"img"}],
+        "video_data_list": [{"mime_type": "video/mp4", "data": b"vid"}],
+    }
+    chat_service_module.gemini_service.generate_response.return_value = "正常回复"
+
+    result = await chat_service_module.chat_service.generate_reply_for_message(
+        message,
+        processed_data,
+        guild_name="测试服务器",
+        location_name="测试频道",
+    )
+
+    assert result is not None
+    assert result.response_text == "正常回复"
+    assert chat_service_module.gemini_service.generate_response.await_count == 1
+
+    call = chat_service_module.gemini_service.generate_response.await_args_list[0]
+    assert call.kwargs["message"] == "你好"
+    assert call.kwargs["replied_message"] == "> [Alice]:\n> 前文\n\n"
+    assert call.kwargs["images"] == processed_data["image_data_list"]
+    assert call.kwargs["videos"] == processed_data["video_data_list"]
