@@ -86,6 +86,8 @@ class OpenAIService:
 
             image_copy = dict(image)
             original_size = len(image_bytes)
+            original_mime_type = str(image.get("mime_type", ""))
+            original_source = str(image.get("source", "unknown"))
 
             try:
                 compressed_bytes, compressed_mime_type = sanitize_image_to_size_limit(
@@ -98,13 +100,6 @@ class OpenAIService:
                 if "bytes" in image_copy:
                     image_copy["bytes"] = compressed_bytes
                 image_copy["mime_type"] = compressed_mime_type
-                log.info(
-                    "[OpenAIService] VPS mode image compression applied | index=%s | original_kb=%.2f | compressed_kb=%.2f | mime_type=%s",
-                    idx,
-                    original_size / 1024,
-                    len(compressed_bytes) / 1024,
-                    compressed_mime_type,
-                )
             except Exception as e:
                 if original_size > target_size_bytes:
                     log.warning(

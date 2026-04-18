@@ -27,11 +27,14 @@ FORMAT_TO_MIME_TYPE = {
     "JPG": "image/jpeg",
     "PNG": "image/png",
     "WEBP": "image/webp",
+    "GIF": "image/gif",
 }
 
 
 def _get_image_mime_type(image_format: Optional[str]) -> str:
-    return FORMAT_TO_MIME_TYPE.get((image_format or "").upper(), "image/png")
+    return FORMAT_TO_MIME_TYPE.get(
+        (image_format or "").upper(), "application/octet-stream"
+    )
 
 
 def _has_alpha_channel(img: Image.Image) -> bool:
