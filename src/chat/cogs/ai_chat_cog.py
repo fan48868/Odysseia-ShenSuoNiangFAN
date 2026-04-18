@@ -40,6 +40,7 @@ from src.chat.utils.reliable_message_sender import (
 log = logging.getLogger(__name__)
 
 TYPING_ENTER_TIMEOUT_SECONDS = 1.5
+DISCORD_SAFE_CHUNK_LENGTH = 1900
 
 
 class AIChatCog(commands.Cog):
@@ -73,23 +74,48 @@ class AIChatCog(commands.Cog):
         return guild_name, "私信中"
 
     def _split_response_chunks(self, response_text: str) -> list[str]:
-        max_len = 1900
+        max_len = DISCORD_SAFE_CHUNK_LENGTH
         chunks: list[str] = []
         remaining = response_text
 
         while remaining:
-            if len(remaining) <= max_len:
+            if self._get_discord_text_length(remaining) <= max_len:
                 chunks.append(remaining)
                 break
 
-            split_pos = remaining.rfind("\n", 0, max_len)
-            if split_pos == -1 or split_pos < max_len // 2:
-                split_pos = max_len
+            split_pos = self._find_split_position(remaining, max_len)
+            if split_pos <= 0:
+                split_pos = 1
 
             chunks.append(remaining[:split_pos].rstrip())
             remaining = remaining[split_pos:].lstrip()
 
         return chunks
+
+    def _get_discord_text_length(self, text: str) -> int:
+        return len(text.encode("utf-16-le")) // 2
+
+    def _find_split_position(self, text: str, max_len: int) -> int:
+        current_len = 0
+        newline_positions: list[int] = []
+
+        for index, char in enumerate(text):
+            char_len = self._get_discord_text_length(char)
+            if current_len + char_len > max_len:
+                break
+            current_len += char_len
+            if char == "\n":
+                newline_positions.append(index)
+        else:
+            return len(text)
+
+        min_preferred_len = max_len // 2
+        for newline_index in reversed(newline_positions):
+            candidate = text[:newline_index]
+            if self._get_discord_text_length(candidate) >= min_preferred_len:
+                return newline_index
+
+        return index
 
     def _prepend_author_mention(self, message: discord.Message, content: str) -> str:
         author_id = getattr(getattr(message, "author", None), "id", None)

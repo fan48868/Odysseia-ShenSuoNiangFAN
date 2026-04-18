@@ -144,6 +144,8 @@ class ChatService:
                     original_channel_context=prepared_context.channel_context,
                     fallback_response_text=EMPTY_AI_RESPONSE_FALLBACK,
                 )
+                log.info("空回复自动续写重试将在 2 秒后开始 | user_id=%s", author.id)
+                await asyncio.sleep(2)
                 log.info("空回复自动续写重试开始 | user_id=%s", author.id)
                 ai_response = await self._generate_single_ai_response(
                     message=message,

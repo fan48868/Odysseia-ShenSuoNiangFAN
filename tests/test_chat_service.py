@@ -99,7 +99,10 @@ def chat_service_module(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.asyncio
 async def test_generate_reply_for_message_retries_with_continue_message(
     chat_service_module,
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr(chat_service_module.asyncio, "sleep", sleep_mock)
     message = SimpleNamespace(
         id=456,
         author=SimpleNamespace(id=123, display_name="测试用户"),
@@ -129,6 +132,7 @@ async def test_generate_reply_for_message_retries_with_continue_message(
     assert result.user_name == "测试用户"
     assert result.user_content_for_memory == "你好"
     assert chat_service_module.gemini_service.generate_response.await_count == 2
+    sleep_mock.assert_awaited_once_with(2)
 
     first_call = chat_service_module.gemini_service.generate_response.await_args_list[0]
     second_call = chat_service_module.gemini_service.generate_response.await_args_list[1]
@@ -163,7 +167,10 @@ async def test_generate_reply_for_message_retries_with_continue_message(
 @pytest.mark.asyncio
 async def test_generate_reply_for_message_returns_fallback_when_retry_is_also_empty(
     chat_service_module,
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr(chat_service_module.asyncio, "sleep", sleep_mock)
     message = SimpleNamespace(
         id=456,
         author=SimpleNamespace(id=123, display_name="测试用户"),
@@ -191,6 +198,7 @@ async def test_generate_reply_for_message_returns_fallback_when_retry_is_also_em
     assert result is not None
     assert result.response_text == chat_service_module.EMPTY_AI_RESPONSE_FALLBACK
     assert chat_service_module.gemini_service.generate_response.await_count == 2
+    sleep_mock.assert_awaited_once_with(2)
 
 
 @pytest.mark.asyncio

@@ -331,6 +331,19 @@ async def test_deliver_generated_reply_applies_regex_before_store(
     assert send_mock.await_args.args[1] == "bar"
 
 
+def test_split_response_chunks_respects_discord_length_for_surrogate_pairs(
+    ai_chat_cog_module,
+):
+    bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog = ai_chat_cog_module.AIChatCog(bot)
+    response_text = "😀" * 1001
+
+    chunks = cog._split_response_chunks(response_text)
+
+    assert len(chunks) == 2
+    assert [cog._get_discord_text_length(chunk) for chunk in chunks] == [1900, 102]
+
+
 @pytest.mark.asyncio
 async def test_deliver_generated_reply_uses_transformed_text_for_summary_image(
     monkeypatch: pytest.MonkeyPatch,
