@@ -1028,14 +1028,9 @@ class CustomModelClient:
     @staticmethod
     def _build_moonshot_image_payload_from_pil(image: Image.Image) -> Dict[str, Any]:
         """将 PIL 图片转换为 Moonshot 识别所需 payload。"""
-        mime_type = "image/webp"
+        mime_type = "image/png"
         buffered = io.BytesIO()
-        try:
-            image.save(buffered, format="WEBP")
-        except Exception:
-            mime_type = "image/png"
-            buffered = io.BytesIO()
-            image.save(buffered, format="PNG")
+        image.save(buffered, format="PNG")
 
         image_bytes = buffered.getvalue()
         return {
