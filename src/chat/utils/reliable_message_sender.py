@@ -26,6 +26,7 @@ class PendingTextDelivery:
     content: str
     reply_to_message_id: Optional[int] = None
     mention_author: bool = False
+    mention_user_id: Optional[int] = None
     task_id: Optional[int] = None
     chunk_index: int = 0
     chunk_total: int = 1
@@ -120,6 +121,55 @@ def _build_delivery_nonce() -> str:
     return uuid.uuid4().hex[:24]
 
 
+def is_reply_target_missing_error(exc: Exception) -> bool:
+    if not isinstance(exc, discord.HTTPException):
+        return False
+
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "status", None)
+    text = (getattr(exc, "text", None) or str(exc) or "").lower()
+
+    if "unknown message" not in text:
+        return False
+
+    if code == 10008:
+        return True
+
+    return status == 400 and code == 50035 and "message_reference" in text
+
+
+async def _resolve_mention_user_id(delivery: PendingTextDelivery) -> Optional[int]:
+    if delivery.mention_user_id is not None:
+        return delivery.mention_user_id
+
+    if delivery.task_id is None:
+        return None
+
+    snapshot = await reply_recovery_manager.get_task_snapshot(delivery.task_id)
+    if snapshot is None:
+        return None
+    return snapshot.author_id
+
+
+async def _build_fallback_content(delivery: PendingTextDelivery) -> str:
+    if not delivery.mention_author:
+        return delivery.content
+
+    mention_user_id = await _resolve_mention_user_id(delivery)
+    if mention_user_id is None:
+        return delivery.content
+
+    mention = f"<@{mention_user_id}>"
+    alt_mention = f"<@!{mention_user_id}>"
+    stripped_content = delivery.content.lstrip()
+    if stripped_content.startswith(mention) or stripped_content.startswith(alt_mention):
+        return delivery.content
+
+    if not delivery.content:
+        return mention
+    return f"{mention}\n{delivery.content}"
+
+
 async def _resolve_channel(
     bot: discord.Client, channel_id: int
 ) -> Optional[discord.abc.Messageable]:
@@ -187,11 +237,24 @@ async def _dispatch_text_delivery(
                 f"频道 {getattr(channel, 'id', '<unknown>')} 不支持 get_partial_message"
             )
         reply_target = channel.get_partial_message(delivery.reply_to_message_id)
-        return await reply_target.reply(
-            delivery.content,
-            mention_author=delivery.mention_author,
-            nonce=nonce,
-        )
+        try:
+            return await reply_target.reply(
+                delivery.content,
+                mention_author=delivery.mention_author,
+                nonce=nonce,
+            )
+        except Exception as exc:
+            if not is_reply_target_missing_error(exc):
+                raise
+
+            fallback_content = await _build_fallback_content(delivery)
+            log.warning(
+                "回复目标消息不存在，已降级为频道普通消息 | channel_id=%s | reply_to=%s | task_id=%s",
+                getattr(channel, "id", "<unknown>"),
+                delivery.reply_to_message_id,
+                delivery.task_id,
+            )
+            return await channel.send(fallback_content, nonce=nonce)
 
     return await channel.send(delivery.content, nonce=nonce)
 
@@ -298,6 +361,7 @@ async def send_text_reply_with_recovery(
         content=content,
         reply_to_message_id=message.id,
         mention_author=mention_author,
+        mention_user_id=getattr(getattr(message, "author", None), "id", None),
         task_id=getattr(message, "id", None),
     )
     return await send_pending_text_delivery_with_recovery(bot, delivery)

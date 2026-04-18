@@ -57,6 +57,7 @@ def ai_chat_cog_module(monkeypatch: pytest.MonkeyPatch):
         content: str
         reply_to_message_id: int | None = None
         mention_author: bool = True
+        mention_user_id: int | None = None
         task_id: int | None = None
         chunk_index: int = 0
         chunk_total: int = 1
@@ -141,6 +142,7 @@ def ai_chat_cog_module(monkeypatch: pytest.MonkeyPatch):
         SimpleNamespace(
             PendingTextDelivery=FakePendingTextDelivery,
             enqueue_pending_text_delivery=AsyncMock(),
+            is_reply_target_missing_error=lambda exc: False,
             send_pending_text_delivery_with_recovery=AsyncMock(return_value=True),
         ),
     )
