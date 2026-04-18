@@ -1627,7 +1627,7 @@ class CustomModelClient:
         request_payload["thinking"] = {"type": "disabled"}
         request_payload.pop("chat_template_kwargs", None)
         network_timeout_seconds = 10.0
-        first_token_timeout_seconds = 12.0
+        first_token_timeout_seconds = 20
         idle_timeout_seconds = float(
             runtime_config.get("stream_idle_timeout_seconds", 5.0) or 5.0
         )
