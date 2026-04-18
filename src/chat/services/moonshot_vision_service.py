@@ -2,12 +2,14 @@
 
 import asyncio
 import base64
+import io
 import logging
 import os
 import re
 from typing import Any, Dict, List, Optional
 
 import httpx
+from PIL import Image
 
 
 log = logging.getLogger(__name__)
@@ -148,6 +150,20 @@ class MoonshotVisionService:
                 declared_size,
                 len(image_bytes),
             )
+
+        if mime_type.lower() == "image/gif":
+            try:
+                log.info("Moonshot 收到 GIF，尝试提取首帧后再识别。")
+                with Image.open(io.BytesIO(image_bytes)) as gif_image:
+                    gif_image.seek(0)
+                    first_frame = gif_image.convert("RGBA")
+                    output_buffer = io.BytesIO()
+                    first_frame.save(output_buffer, format="PNG")
+                    image_bytes = output_buffer.getvalue()
+                    mime_type = "image/png"
+                log.info("Moonshot GIF 首帧提取成功，已转换为 PNG。")
+            except Exception as e:
+                log.warning("Moonshot GIF 首帧提取失败，将继续使用原始 GIF。error=%s", e)
 
         image_base64 = base64.b64encode(image_bytes).decode("utf-8")
         image_data_url = f"data:{mime_type};base64,{image_base64}"
