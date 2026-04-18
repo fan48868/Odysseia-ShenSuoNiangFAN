@@ -197,7 +197,11 @@ async def _dispatch_text_delivery(
 
 
 async def _attempt_delivery(
-    bot: discord.Client, delivery: PendingTextDelivery
+    bot: discord.Client,
+    delivery: PendingTextDelivery,
+    *,
+    verify_on_success: bool = True,
+    apply_side_effects_on_completion: bool = True,
 ) -> DeliveryStatus:
     if not await reply_recovery_manager.is_attempt_current(
         delivery.task_id, delivery.attempt_token
@@ -232,6 +236,17 @@ async def _attempt_delivery(
     delivery.attempt_count += 1
     delivery.last_error = None
 
+    if not verify_on_success:
+        await reply_recovery_manager.mark_chunk_confirmed(
+            delivery.task_id,
+            chunk_index=delivery.chunk_index,
+            message_id=sent_message.id,
+            chunk_total=delivery.chunk_total,
+            attempt_token=delivery.attempt_token,
+            apply_side_effects_on_completion=apply_side_effects_on_completion,
+        )
+        return "confirmed"
+
     status = await verify_sent_message(bot, channel, sent_message.id)
     if status == "confirmed":
         await reply_recovery_manager.mark_chunk_confirmed(
@@ -240,6 +255,7 @@ async def _attempt_delivery(
             message_id=sent_message.id,
             chunk_total=delivery.chunk_total,
             attempt_token=delivery.attempt_token,
+            apply_side_effects_on_completion=apply_side_effects_on_completion,
         )
     return status
 
@@ -300,9 +316,18 @@ async def send_channel_text_with_recovery(
 
 
 async def send_pending_text_delivery_with_recovery(
-    bot: discord.Client, delivery: PendingTextDelivery
+    bot: discord.Client,
+    delivery: PendingTextDelivery,
+    *,
+    verify_on_success: bool = False,
+    apply_side_effects_on_completion: bool = True,
 ) -> bool:
-    status = await _attempt_delivery(bot, delivery)
+    status = await _attempt_delivery(
+        bot,
+        delivery,
+        verify_on_success=verify_on_success,
+        apply_side_effects_on_completion=apply_side_effects_on_completion,
+    )
     if status == "confirmed":
         return True
 
@@ -313,11 +338,21 @@ async def send_pending_text_delivery_with_recovery(
             delivery.reply_to_message_id,
             status,
         )
-        status = await _attempt_delivery(bot, delivery)
+        status = await _attempt_delivery(
+            bot,
+            delivery,
+            verify_on_success=verify_on_success,
+            apply_side_effects_on_completion=apply_side_effects_on_completion,
+        )
         if status == "confirmed":
             return True
 
     await enqueue_pending_text_delivery(bot, delivery)
+    schedule_pending_text_delivery_flush(
+        bot,
+        reason="foreground_delivery_fallback",
+        immediate=True,
+    )
     return False
 
 

@@ -126,7 +126,7 @@ class ActiveCachedMessage:
 class ContextServiceTest:
     """上下文管理服务测试版本，用于对比新的上下文处理逻辑"""
 
-    ACTIVE_CACHE_BATCH_SIZE = 10
+    ACTIVE_CACHE_BATCH_SIZE = 1
 
     @staticmethod
     def _is_publicly_visible_message(message: discord.Message) -> bool:
@@ -473,6 +473,59 @@ class ContextServiceTest:
     def clear_channel_high_priority(self, channel_id: int) -> None:
         self.high_priority_channels.discard(channel_id)
         self._maybe_schedule_active_flush(channel_id)
+
+    async def _cancel_active_flush_task(self, channel_id: int) -> None:
+        task = self.active_flush_tasks.get(channel_id)
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _flush_pending_active_messages_for_channel(self, channel_id: int) -> bool:
+        await self._cancel_active_flush_task(channel_id)
+
+        pending_buffer = self._get_pending_active_buffer(channel_id)
+        batch_entries = list(pending_buffer.values())
+        if not batch_entries:
+            return False
+
+        persisted_entries = await asyncio.to_thread(
+            self._persist_active_batch_sync, channel_id, batch_entries
+        )
+        self._acknowledge_flushed_messages(channel_id, batch_entries)
+        self._replace_active_channel_cache(channel_id, persisted_entries)
+        log.info(
+            f"[主动聊天缓存] 频道 {channel_id} 已同步落盘 {len(batch_entries)} 条消息。"
+        )
+        return True
+
+    async def flush_pending_active_messages(
+        self, channel_id: Optional[int] = None
+    ) -> None:
+        if channel_id is not None:
+            channel_ids = [channel_id]
+        else:
+            channel_ids = sorted(
+                {
+                    *self.pending_active_message_buffer.keys(),
+                    *self.active_flush_tasks.keys(),
+                }
+            )
+
+        for target_channel_id in channel_ids:
+            try:
+                await self._flush_pending_active_messages_for_channel(
+                    target_channel_id
+                )
+            except Exception as e:
+                log.warning(
+                    f"[主动聊天缓存] 强制落盘频道 {target_channel_id} 失败: {e}",
+                    exc_info=True,
+                )
 
     def _build_active_cached_message_from_message(
         self, message: discord.Message

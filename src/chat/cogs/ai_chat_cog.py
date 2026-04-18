@@ -122,6 +122,7 @@ class AIChatCog(commands.Cog):
         chunk_index: int = 0,
         chunk_total: int = 1,
         attempt_token: Optional[str] = None,
+        apply_side_effects_on_completion: bool = True,
     ) -> bool:
         if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
             if not await reply_recovery_manager.is_attempt_current(task_id, attempt_token):
@@ -147,6 +148,7 @@ class AIChatCog(commands.Cog):
                 chunk_index=chunk_index,
                 chunk_total=chunk_total,
                 attempt_token=attempt_token,
+                apply_side_effects_on_completion=apply_side_effects_on_completion,
             ),
         )
 
@@ -159,6 +161,7 @@ class AIChatCog(commands.Cog):
         chunk_index: int = 0,
         chunk_total: int = 1,
         attempt_token: Optional[str] = None,
+        apply_side_effects_on_completion: bool = True,
     ) -> bool:
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             if not await reply_recovery_manager.is_attempt_current(task_id, attempt_token):
@@ -182,6 +185,7 @@ class AIChatCog(commands.Cog):
                 chunk_index=chunk_index,
                 chunk_total=chunk_total,
                 attempt_token=attempt_token,
+                apply_side_effects_on_completion=apply_side_effects_on_completion,
             ),
         )
 
@@ -217,6 +221,7 @@ class AIChatCog(commands.Cog):
         *,
         task_id: int,
         attempt_token: str,
+        apply_side_effects_on_completion: bool = True,
     ) -> bool:
         chunks = self._split_response_chunks(response_text)
         if not chunks:
@@ -248,6 +253,7 @@ class AIChatCog(commands.Cog):
                     chunk_index=chunk_index,
                     chunk_total=len(chunks),
                     attempt_token=attempt_token,
+                    apply_side_effects_on_completion=apply_side_effects_on_completion,
                 )
             else:
                 delivered_now = await self._send_channel_message_with_recovery(
@@ -257,6 +263,7 @@ class AIChatCog(commands.Cog):
                     chunk_index=chunk_index,
                     chunk_total=len(chunks),
                     attempt_token=attempt_token,
+                    apply_side_effects_on_completion=apply_side_effects_on_completion,
                 )
 
             if delivered_now:
@@ -320,6 +327,7 @@ class AIChatCog(commands.Cog):
         task_id: int,
         attempt_token: str,
         last_tools: list[str],
+        apply_side_effects_on_completion: bool = True,
     ) -> None:
         response_text = ai_reply_regex_service.apply_rules_to_text(
             generated_reply.response_text
@@ -360,6 +368,7 @@ class AIChatCog(commands.Cog):
             response_text,
             task_id=task_id,
             attempt_token=attempt_token,
+            apply_side_effects_on_completion=apply_side_effects_on_completion,
         )
 
     async def _generate_and_deliver_reply(
@@ -401,11 +410,13 @@ class AIChatCog(commands.Cog):
                     task_id=task_id,
                     attempt_token=attempt_token,
                     last_tools=last_tools,
+                    apply_side_effects_on_completion=not use_typing,
                 )
 
             if use_typing:
                 async with self._best_effort_typing(message.channel):
                     await _run_generation_and_delivery()
+                await reply_recovery_manager.apply_side_effects_if_needed(task_id)
             else:
                 await _run_generation_and_delivery()
         except Exception as exc:
