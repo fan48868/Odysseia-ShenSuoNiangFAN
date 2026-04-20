@@ -106,10 +106,10 @@ class ChatService:
         "application/x-javascript",
         "application/sql",
     }
-    TEXT_ATTACHMENT_MAX_BYTES = 20 * 1024
-    TEXT_ATTACHMENT_MAX_CHARS = 12000
-    TEXT_ATTACHMENT_TIMEOUT_SECONDS = 10
-    TEXT_ATTACHMENT_MAX_COUNT = 1
+    TEXT_ATTACHMENT_MAX_BYTES = 80 * 1024
+    TEXT_ATTACHMENT_MAX_CHARS = 60000
+    TEXT_ATTACHMENT_TIMEOUT_SECONDS = 15
+    TEXT_ATTACHMENT_MAX_COUNT = 2
     TEXT_ATTACHMENT_FALLBACK_ADMIN_USER_IDS = {1449321391412215908}
     TEXT_ATTACHMENT_TRUNCATION_NOTICE = (
         "\n...[由于长度安全限制，剩余内容已被丢弃]..."
@@ -170,33 +170,13 @@ class ChatService:
     ) -> Optional[str]:
         if not raw_bytes:
             return None
-
-        for encoding in (
-            "utf-8",
-            "utf-8-sig",
-            "utf-16",
-            "gb18030",
-            "cp932",
-            "shift_jis",
-            "big5",
-        ):
+        for encoding in ("utf-8", "utf-8-sig", "gb18030", "big5"):
             try:
-                return raw_bytes.decode(encoding)
-            except UnicodeDecodeError:
-                decoded = raw_bytes.decode(encoding, errors="ignore").strip()
+                decoded = raw_bytes.decode(encoding).strip()
                 if decoded:
                     return decoded
             except Exception:
                 continue
-
-        try:
-            decoded = raw_bytes.decode("latin-1", errors="ignore").strip()
-        except Exception:
-            decoded = ""
-
-        if decoded:
-            return decoded
-
         log.warning("无法解码文本附件: %s", filename)
         return None
 
