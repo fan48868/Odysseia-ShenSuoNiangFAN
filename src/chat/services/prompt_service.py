@@ -9,6 +9,7 @@ import io
 import json
 import re
 import discord
+from src import config
 
 from src.chat.config.prompts import PROMPT_CONFIG
 from src.chat.config import chat_config
@@ -322,15 +323,13 @@ class PromptService:
     def _mask_potential_impersonator_name(
         self, user_name: Optional[str], user_id: Optional[int]
     ) -> str:
-        """方法文档"""
-        TARGET_USER_ID = 1449321391412215908
+        """如果不是管理员，则添加【社区朋友】前缀"""
+        admin_user_ids = getattr(config, "DEVELOPER_USER_IDS", []) or []
         display_name = user_name or "未知用户"
 
-        if user_id != TARGET_USER_ID:
-            marked_name = f"【社区朋友】{display_name}"
-            log.info(f"用户 {display_name} (ID: {user_id}) 被标记为社区朋友") 
-            return marked_name
-            
+        if user_id is None or user_id not in admin_user_ids:
+            log.info(f"用户 {display_name} (ID: {user_id}) 被【软软】标记为社区朋友，以防止冒充。")
+            return f"【社区朋友】{display_name}"
         return display_name
 
     @staticmethod

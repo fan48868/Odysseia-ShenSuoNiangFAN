@@ -110,12 +110,15 @@ class ChatService:
     TEXT_ATTACHMENT_MAX_CHARS = 12000
     TEXT_ATTACHMENT_TIMEOUT_SECONDS = 10
     TEXT_ATTACHMENT_MAX_COUNT = 1
+    TEXT_ATTACHMENT_FALLBACK_ADMIN_USER_IDS = {1449321391412215908}
     TEXT_ATTACHMENT_TRUNCATION_NOTICE = (
         "\n...[由于长度安全限制，剩余内容已被丢弃]..."
     )
 
     def _is_text_attachment_allowed_for_user(self, user_id: int) -> bool:
-        return user_id in config.DEVELOPER_USER_IDS
+        return user_id in (
+            config.DEVELOPER_USER_IDS | self.TEXT_ATTACHMENT_FALLBACK_ADMIN_USER_IDS
+        )
 
     def _is_supported_text_attachment(self, attachment: discord.Attachment) -> bool:
         content_type = (attachment.content_type or "").lower()
@@ -168,7 +171,15 @@ class ChatService:
         if not raw_bytes:
             return None
 
-        for encoding in ("utf-8", "utf-8-sig", "utf-16", "gb18030"):
+        for encoding in (
+            "utf-8",
+            "utf-8-sig",
+            "utf-16",
+            "gb18030",
+            "cp932",
+            "shift_jis",
+            "big5",
+        ):
             try:
                 return raw_bytes.decode(encoding)
             except UnicodeDecodeError:
@@ -209,12 +220,88 @@ class ChatService:
 
         return normalized
 
+    async def _collect_text_context_blocks(
+        self,
+        attachments: List[discord.Attachment],
+        *,
+        label: str,
+        remaining_slots: int,
+    ) -> List[str]:
+        if remaining_slots <= 0 or not attachments:
+            return []
+
+        text_blocks: list[str] = []
+        for attachment in attachments:
+            if len(text_blocks) >= remaining_slots:
+                break
+            if not self._is_supported_text_attachment(attachment):
+                continue
+
+            raw_bytes, was_truncated_by_bytes = await self._read_attachment_prefix(
+                attachment
+            )
+            if raw_bytes is None:
+                continue
+
+            decoded_text = self._decode_text_attachment_bytes(
+                raw_bytes, attachment.filename or "text.txt"
+            )
+            truncated_text = self._truncate_text_context(
+                decoded_text,
+                force_truncated_notice=was_truncated_by_bytes,
+            )
+            if not truncated_text:
+                continue
+
+            text_blocks.append(
+                f"[{label}: {attachment.filename or 'text.txt'}]\n{truncated_text}"
+            )
+
+        return text_blocks
+
     async def _extract_one_time_text_context(
         self, message: discord.Message
     ) -> Optional[str]:
         author_id = getattr(getattr(message, "author", None), "id", None)
         if author_id is None or not self._is_text_attachment_allowed_for_user(author_id):
             return None
+
+        text_blocks = await self._collect_text_context_blocks(
+            list(getattr(message, "attachments", []) or []),
+            label="本次附加文本",
+            remaining_slots=self.TEXT_ATTACHMENT_MAX_COUNT,
+        )
+
+        remaining_slots = self.TEXT_ATTACHMENT_MAX_COUNT - len(text_blocks)
+        if (
+            remaining_slots > 0
+            and getattr(message, "reference", None)
+            and getattr(message.reference, "message_id", None)
+        ):
+            try:
+                referenced_message = await message.channel.fetch_message(
+                    message.reference.message_id
+                )
+            except Exception as exc:
+                log.debug("读取被回复消息失败，跳过引用文本附件注入: %s", exc)
+            else:
+                text_blocks.extend(
+                    await self._collect_text_context_blocks(
+                        list(getattr(referenced_message, "attachments", []) or []),
+                        label="回复中引用的文本",
+                        remaining_slots=remaining_slots,
+                    )
+                )
+
+        if not text_blocks:
+            return None
+
+        log.info(
+            "已为管理员用户 %s 注入 %s 个本次有效的文本附件上下文",
+            author_id,
+            len(text_blocks),
+        )
+        return "\n\n".join(text_blocks)
 
         attachments = list(getattr(message, "attachments", []) or [])
         if not attachments:
