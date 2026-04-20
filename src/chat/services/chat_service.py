@@ -4,9 +4,12 @@ import asyncio
 import discord
 import logging
 import random
+import os
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
+import aiohttp
 import discord.abc
+from src import config
 
 # 导入所需的服务
 from src.chat.services.empty_response_retry import (
@@ -51,12 +54,208 @@ class PreparedGenerationContext:
     retrieval_query_text: Optional[str]
     retrieval_query_embedding: Optional[List[float]]
     rag_timeout_fallback: bool
+    injected_text_context: Optional[str]
 
 
 class ChatService:
     """
     负责编排整个AI聊天响应流程。
     """
+
+    TEXT_ATTACHMENT_ALLOWED_EXTENSIONS = {
+        ".txt",
+        ".md",
+        ".markdown",
+        ".json",
+        ".jsonl",
+        ".csv",
+        ".tsv",
+        ".log",
+        ".yaml",
+        ".yml",
+        ".xml",
+        ".html",
+        ".htm",
+        ".css",
+        ".js",
+        ".ts",
+        ".py",
+        ".java",
+        ".c",
+        ".cpp",
+        ".h",
+        ".hpp",
+        ".rs",
+        ".go",
+        ".sh",
+        ".bat",
+        ".ps1",
+        ".ini",
+        ".toml",
+        ".env",
+        ".sql",
+    }
+    TEXT_ATTACHMENT_ALLOWED_MIME_PREFIXES = ("text/",)
+    TEXT_ATTACHMENT_ALLOWED_MIME_TYPES = {
+        "application/json",
+        "application/ld+json",
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+        "application/javascript",
+        "application/x-javascript",
+        "application/sql",
+    }
+    TEXT_ATTACHMENT_MAX_BYTES = 20 * 1024
+    TEXT_ATTACHMENT_MAX_CHARS = 12000
+    TEXT_ATTACHMENT_TIMEOUT_SECONDS = 10
+    TEXT_ATTACHMENT_MAX_COUNT = 1
+    TEXT_ATTACHMENT_TRUNCATION_NOTICE = (
+        "\n...[由于长度安全限制，剩余内容已被丢弃]..."
+    )
+
+    def _is_text_attachment_allowed_for_user(self, user_id: int) -> bool:
+        return user_id in config.DEVELOPER_USER_IDS
+
+    def _is_supported_text_attachment(self, attachment: discord.Attachment) -> bool:
+        content_type = (attachment.content_type or "").lower()
+        if any(
+            content_type.startswith(prefix)
+            for prefix in self.TEXT_ATTACHMENT_ALLOWED_MIME_PREFIXES
+        ):
+            return True
+        if content_type in self.TEXT_ATTACHMENT_ALLOWED_MIME_TYPES:
+            return True
+
+        extension = os.path.splitext(attachment.filename or "")[1].lower()
+        return extension in self.TEXT_ATTACHMENT_ALLOWED_EXTENSIONS
+
+    async def _read_attachment_prefix(
+        self, attachment: discord.Attachment
+    ) -> tuple[Optional[bytes], bool]:
+        max_bytes = self.TEXT_ATTACHMENT_MAX_BYTES
+        attachment_size = int(getattr(attachment, "size", 0) or 0)
+
+        if attachment_size and attachment_size <= max_bytes:
+            try:
+                raw_bytes = await attachment.read()
+                return raw_bytes, False
+            except Exception as exc:
+                log.warning("读取文本附件失败: %s", exc, exc_info=True)
+                return None, False
+
+        attachment_url = getattr(attachment, "url", None)
+        if not attachment_url:
+            log.warning("文本附件缺少 URL，无法安全读取前缀: %s", attachment.filename)
+            return None, False
+
+        timeout = aiohttp.ClientTimeout(total=self.TEXT_ATTACHMENT_TIMEOUT_SECONDS)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(attachment_url) as response:
+                    response.raise_for_status()
+                    raw_prefix = await response.content.read(max_bytes + 1)
+                    return raw_prefix[:max_bytes], bool(
+                        attachment_size > max_bytes or len(raw_prefix) > max_bytes
+                    )
+        except Exception as exc:
+            log.warning("下载文本附件前缀失败: %s", exc, exc_info=True)
+            return None, False
+
+    def _decode_text_attachment_bytes(
+        self, raw_bytes: bytes, filename: str
+    ) -> Optional[str]:
+        if not raw_bytes:
+            return None
+
+        for encoding in ("utf-8", "utf-8-sig", "utf-16", "gb18030"):
+            try:
+                return raw_bytes.decode(encoding)
+            except UnicodeDecodeError:
+                decoded = raw_bytes.decode(encoding, errors="ignore").strip()
+                if decoded:
+                    return decoded
+            except Exception:
+                continue
+
+        try:
+            decoded = raw_bytes.decode("latin-1", errors="ignore").strip()
+        except Exception:
+            decoded = ""
+
+        if decoded:
+            return decoded
+
+        log.warning("无法解码文本附件: %s", filename)
+        return None
+
+    def _truncate_text_context(
+        self, text: Optional[str], *, force_truncated_notice: bool = False
+    ) -> Optional[str]:
+        if not text:
+            return None
+
+        normalized = str(text).replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not normalized:
+            return None
+
+        was_truncated = force_truncated_notice
+        if len(normalized) > self.TEXT_ATTACHMENT_MAX_CHARS:
+            normalized = normalized[: self.TEXT_ATTACHMENT_MAX_CHARS]
+            was_truncated = True
+
+        if was_truncated:
+            normalized += self.TEXT_ATTACHMENT_TRUNCATION_NOTICE
+
+        return normalized
+
+    async def _extract_one_time_text_context(
+        self, message: discord.Message
+    ) -> Optional[str]:
+        author_id = getattr(getattr(message, "author", None), "id", None)
+        if author_id is None or not self._is_text_attachment_allowed_for_user(author_id):
+            return None
+
+        attachments = list(getattr(message, "attachments", []) or [])
+        if not attachments:
+            return None
+
+        text_blocks: list[str] = []
+        for attachment in attachments:
+            if len(text_blocks) >= self.TEXT_ATTACHMENT_MAX_COUNT:
+                break
+            if not self._is_supported_text_attachment(attachment):
+                continue
+
+            raw_bytes, was_truncated_by_bytes = await self._read_attachment_prefix(
+                attachment
+            )
+            if raw_bytes is None:
+                continue
+
+            decoded_text = self._decode_text_attachment_bytes(
+                raw_bytes, attachment.filename or "text.txt"
+            )
+            truncated_text = self._truncate_text_context(
+                decoded_text,
+                force_truncated_notice=was_truncated_by_bytes,
+            )
+            if not truncated_text:
+                continue
+
+            text_blocks.append(
+                f"[本次附加文本: {attachment.filename or 'text.txt'}]\n{truncated_text}"
+            )
+
+        if not text_blocks:
+            return None
+
+        log.info(
+            "已为管理员用户 %s 注入 %s 个本次有效的文本附件上下文",
+            author_id,
+            len(text_blocks),
+        )
+        return "\n\n".join(text_blocks)
 
     async def should_process_message(self, message: discord.Message) -> bool:
         """
@@ -225,6 +424,7 @@ class ChatService:
         replied_content = processed_data["replied_content"]
         image_data_list = list(processed_data["image_data_list"])
         video_data_list = list(processed_data.get("video_data_list", []))
+        injected_text_context = await self._extract_one_time_text_context(message)
 
         is_blacklisted = False
         if guild_id:
@@ -242,6 +442,7 @@ class ChatService:
             processed_data["replied_content"] = replied_content
             processed_data["image_data_list"] = image_data_list
             processed_data["video_data_list"] = video_data_list
+            injected_text_context = None
 
         raw_channel_context = await get_context_service().get_formatted_channel_history_new(
             message.channel.id,
@@ -290,6 +491,7 @@ class ChatService:
             retrieval_query_text=retrieval_query_text,
             retrieval_query_embedding=retrieval_query_embedding,
             rag_timeout_fallback=rag_timeout_fallback,
+            injected_text_context=injected_text_context,
         )
 
     async def _prepare_rag_context(
@@ -421,6 +623,7 @@ class ChatService:
             retrieval_query_text=prepared_context.retrieval_query_text,
             retrieval_query_embedding=prepared_context.retrieval_query_embedding,
             rag_timeout_fallback=prepared_context.rag_timeout_fallback,
+            text_context=prepared_context.injected_text_context,
         )
 
     def _is_empty_ai_response(self, ai_response: Optional[str]) -> bool:
