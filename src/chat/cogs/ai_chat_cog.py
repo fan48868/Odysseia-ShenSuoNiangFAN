@@ -40,7 +40,7 @@ from src.chat.utils.reliable_message_sender import (
 log = logging.getLogger(__name__)
 
 TYPING_ENTER_TIMEOUT_SECONDS = 1.5
-DISCORD_SAFE_CHUNK_LENGTH = 1900
+DISCORD_SAFE_CHUNK_LENGTH = 1750
 
 
 class AIChatCog(commands.Cog):
