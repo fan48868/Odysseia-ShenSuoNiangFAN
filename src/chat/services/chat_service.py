@@ -14,7 +14,7 @@ from src.chat.services.empty_response_retry import (
     build_empty_response_retry_request,
 )
 from src.chat.services.gemini_service import gemini_service
-from src.chat.services.context_service import get_context_service  # 重要注释context_service_test改了_test
+from src.chat.services.context_service_test import get_context_service  # 导入测试范围，注释
 from src.chat.features.world_book.services.world_book_service import world_book_service
 from src.chat.features.affection.service.affection_service import affection_service
 from src.chat.utils.database import chat_db_manager
