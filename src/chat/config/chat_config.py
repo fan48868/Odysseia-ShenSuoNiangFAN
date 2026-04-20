@@ -154,7 +154,7 @@ MODEL_GENERATION_CONFIG = {
         "temperature": 1.1,
         "top_p": 0.95,
         "top_k": 40,
-        "max_output_tokens": 6000,
+        "max_output_tokens": 8192,
         "thinking_config": {
             "include_thoughts": False,
             "thinking_budget": -1,  # 默认使用动态思考预算
@@ -250,13 +250,13 @@ GEMINI_CONFESSION_GEN_CONFIG = {
 
 COOLDOWN_RATES = {
     "default": 2,  # 每分钟请求次数
-    "coffee": 5,  # 每分钟请求次数
+    "coffee": 3,  # 每分钟请求次数
 }
 # (min, max) 分钟
 BLACKLIST_BAN_DURATION_MINUTES = (3, 5)
 
 # --- API 并发与密钥配置 ---
-MAX_CONCURRENT_REQUESTS = 50  # 同时处理的最大API请求数
+MAX_CONCURRENT_REQUESTS = 3  # 同时处理的最大API请求数
 EMBEDDING_API_TIMEOUT_MS = int(
     os.getenv("EMBEDDING_API_TIMEOUT_MS", "8000")
 )  # embedding API 请求的底层超时（毫秒）
