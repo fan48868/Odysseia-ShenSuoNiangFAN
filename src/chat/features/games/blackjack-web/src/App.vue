@@ -689,7 +689,7 @@ onMounted(() => {
         <!-- Betting View -->
         <div v-if="currentView === 'betting'" id="betting-view" data-debug-size>
             <div id="betting-content-wrapper">
-                <h1>类脑娘的BlackJack</h1>
+                <h1>狮子娘的BlackJack</h1>
                 <div class="messages">{{ messages }}</div>
                 <div id="betting-area" data-debug-size>
                     <div class="balance-text">
@@ -726,7 +726,7 @@ onMounted(() => {
         <div v-if="currentView === 'game'" id="game-view" data-debug-size>
             <div id="game-table" data-debug-size>
                 <div class="game-area" data-debug-size>
-                    <h2>类脑娘 (<span>{{ dealerScore }}</span>)</h2>
+                    <h2>狮子娘 (<span>{{ dealerScore }}</span>)</h2>
                     <TransitionGroup name="card" tag="div" class="hand" data-debug-size>
                         <img v-for="(card, index) in dealerHand" :key="'dealer-' + index + '-' + card" :src="card === 'Hidden' ? '/cards/Background.webp' : `/cards/${card}.webp`" class="card">
                     </TransitionGroup>

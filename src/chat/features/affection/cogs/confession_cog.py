@@ -26,7 +26,7 @@ class ConfessionCog(commands.Cog):
         self.confession_service = ConfessionService()
 
     @app_commands.command(
-        name="忏悔", description="向类脑娘忏悔，或许能让她对你的态度改观一些?"
+        name="忏悔", description="向狮子娘忏悔，或许能让她对你的态度改观一些?"
     )
     @app_commands.guild_only()
     @app_commands.rename(content="忏悔内容")
@@ -127,7 +127,7 @@ class ConfessionCog(commands.Cog):
 
             if not ai_response:
                 await interaction.followup.send(
-                    "类脑娘现在似乎不想听你的忏悔，请稍后再试。", ephemeral=True
+                    "狮子娘现在似乎不想听你的忏悔，请稍后再试。", ephemeral=True
                 )
                 return
 
@@ -152,7 +152,7 @@ class ConfessionCog(commands.Cog):
             await self.confession_service.record_confession(user_id)
 
             embed = discord.Embed(
-                title="来自类脑娘的低语",
+                title="来自狮子娘的低语",
                 description=replace_emojis(ai_response),
                 color=discord.Color.purple(),
             )
@@ -182,7 +182,7 @@ class ConfessionCog(commands.Cog):
             if image_url:
                 embed.set_thumbnail(url=image_url)
 
-            embed.set_footer(text="类脑娘对你的忏悔做出了一些回应...")
+            embed.set_footer(text="狮子娘对你的忏悔做出了一些回应...")
 
             await interaction.followup.send(embed=embed, ephemeral=not is_unrestricted)
 

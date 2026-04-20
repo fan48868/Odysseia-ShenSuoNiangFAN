@@ -399,7 +399,7 @@ class CoinService:
         item_effect = item["effect_id"]
 
         if item_target == "ai":
-            # --- 送给类脑娘的物品 ---
+            # --- 送给狮子娘的物品 ---
             points_to_add = max(1, item["price"] // 10)
             (
                 gift_success,
@@ -433,7 +433,7 @@ class CoinService:
                 await personal_memory_service.clear_personal_memory(user_id)
                 return (
                     True,
-                    f"一道耀眼的闪光后，类脑娘关于 **{item['name']}** 的记忆...呃，不对，是类脑娘关于你的记忆被清除了。你们可以重新开始了。",
+                    f"一道耀眼的闪光后，狮子娘关于 **{item['name']}** 的记忆...呃，不对，是狮子娘关于你的记忆被清除了。你们可以重新开始了。",
                     new_balance,
                     False,
                     None,
@@ -452,7 +452,7 @@ class CoinService:
                 }
                 return (
                     True,
-                    "你与类脑娘进行了一次成功的“午后闲谈”。",
+                    "你与狮子娘进行了一次成功的“午后闲谈”。",
                     new_balance,
                     False,
                     embed_data,
@@ -479,7 +479,7 @@ class CoinService:
                 else:
                     return (
                         True,
-                        f"你已成功解锁 **{item['name']}**！现在类脑娘将开始为你记录个人记忆。",
+                        f"你已成功解锁 **{item['name']}**！现在狮子娘将开始为你记录个人记忆。",
                         new_balance,
                         True,
                         None,
@@ -541,9 +541,9 @@ class CoinService:
                 )
         else:
             # --- 普通物品，不使用背包系统 ---
-            # 检查是否是"给类脑娘买点好吃的!"类别
-            if item["category"] == "给类脑娘买点好吃的!":
-                # 请类脑娘吃饭，增加好感度
+            # 检查是否是"给狮子娘买点好吃的!"类别
+            if item["category"] == "给狮子娘买点好吃的!":
+                # 请狮子娘吃饭，增加好感度
                 points_to_add = max(1, item["price"] // 10)
                 (
                     meal_success,
@@ -557,7 +557,7 @@ class CoinService:
                     cg_url = _select_random_cg_url(item.get("cg_url"))
                     return (
                         True,
-                        f"你花 {total_cost} 类脑币请类脑娘吃了 **{item['name']}**。",
+                        f"你花 {total_cost} 类脑币请狮子娘吃了 **{item['name']}**。",
                         new_balance,
                         False,
                         None,
@@ -569,7 +569,7 @@ class CoinService:
                         user_id, total_cost, f"请吃饭失败返还: {item['name']}"
                     )
                     log.warning(
-                        f"用户 {user_id} 请类脑娘吃饭失败，已返还 {total_cost} 类脑币。原因: {meal_message}"
+                        f"用户 {user_id} 请狮子娘吃饭失败，已返还 {total_cost} 类脑币。原因: {meal_message}"
                     )
                     return False, meal_message, current_balance, False, None, None
             else:

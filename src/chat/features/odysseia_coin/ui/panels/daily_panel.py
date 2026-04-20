@@ -7,8 +7,8 @@ from .base_panel import BasePanel
 class DailyPanel(BasePanel):
     async def create_embed(self) -> discord.Embed:
         embed = discord.Embed(
-            title="📅 类脑娘日报",
-            description="欢迎查看今日类脑娘日报！",
+            title="📅 狮子娘日报",
+            description="欢迎查看今日狮子娘日报！",
             color=discord.Color.blue(),
         )
 
@@ -18,8 +18,8 @@ class DailyPanel(BasePanel):
 
             if not usage_today:
                 embed.add_field(
-                    name="今天类脑娘回了...",
-                    value="今天类脑娘还什么都没聊!",
+                    name="今天狮子娘回了...",
+                    value="今天狮子娘还什么都没聊!",
                     inline=False,
                 )
             else:
@@ -35,7 +35,7 @@ class DailyPanel(BasePanel):
                     comment = "聊了这么多！我们是把一年的话都说完了吗？"
 
                 stats_text = (
-                    f"类脑娘今天一共回复了 **{total_replies_today}** 句话！\n"
+                    f"狮子娘今天一共回复了 **{total_replies_today}** 句话！\n"
                     f"_{comment}_"
                 )
 
@@ -96,7 +96,7 @@ class DailyPanel(BasePanel):
             
             # 玩家视角的净盈亏 (正数=玩家赢, 负数=玩家输)
             player_net_profit = blackjack_net + ghost_net
-            # 类脑娘视角的净盈亏 (相反数)
+            # 狮子娘视角的净盈亏 (相反数)
             casino_profit = -player_net_profit
 
             if casino_profit > 1000:
@@ -137,7 +137,7 @@ class DailyPanel(BasePanel):
                 warning_comment = "今天社区里一派祥和，真是美好的一天！"
                 warning_stats_text = f"_{warning_comment}_"
 
-            embed.add_field(name="类脑娘出动", value=warning_stats_text, inline=False)
+            embed.add_field(name="狮子娘出动", value=warning_stats_text, inline=False)
 
             # --- 获取并显示今日忏悔次数 ---
             confession_count = await chat_db_manager.get_confession_count_today()

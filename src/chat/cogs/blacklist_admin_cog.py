@@ -110,7 +110,7 @@ class BlacklistAdminCog(commands.Cog):
             if target_user:
                 embed = discord.Embed(
                     title="封禁通知",
-                    description=f"您已被开发者封禁，时长为 {duration_minutes} 分钟。在此期间您将无法与 类脑娘 互动。",
+                    description=f"您已被开发者封禁，时长为 {duration_minutes} 分钟。在此期间您将无法与 狮子娘 互动。",
                     color=discord.Color.red(),
                 )
                 embed.add_field(name="理由", value=reason, inline=False)

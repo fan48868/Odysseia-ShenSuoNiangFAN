@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-管理类脑娘频道配置的脚本（交互式版本）
+管理狮子娘频道配置的脚本（交互式版本）
 
 用法：
     # 列出服务器的所有频道配置
@@ -244,7 +244,7 @@ class ChannelConfigBot(discord.Client):
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="管理类脑娘频道配置",
+        description="管理狮子娘频道配置",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例：

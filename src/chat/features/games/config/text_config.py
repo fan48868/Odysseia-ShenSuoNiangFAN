@@ -199,19 +199,19 @@ class TextConfig:
 
         betting: List[str] = field(
             default_factory=lambda: [
-                "“想和我玩牌吗？先让我看看你的诚意吧。”类脑娘微笑着，指了指桌上的筹码。",
+                "“想和我玩牌吗？先让我看看你的诚意吧。”狮子娘微笑着，指了指桌上的筹码。",
                 "“风险与回报并存哦～”她晃了晃手中的卡牌，“你准备好下注了吗？”",
-                "“这场牌局的入场券，就是你的勇气和类脑币。”类脑娘的眼神闪烁着期待。",
+                "“这场牌局的入场券，就是你的勇气和类脑币。”狮子娘的眼神闪烁着期待。",
                 "“别紧张，只是个小游戏而已。”她轻描淡写地说，“……但输了可是要惩罚的哦。”",
                 "“让我看看你的运气如何。下注吧，挑战者。”",
             ]
         )
         ai_strategy_text: Dict[str, str] = field(
             default_factory=lambda: {
-                "LOW": "*你看到类脑娘眨巴着眼睛，一副还没睡醒的样子。感觉这局应该不难？*",
-                "MEDIUM": "*你注意到类脑娘托着下巴，眼神变得专注起来。看来她开始认真了。*",
-                "HIGH": "*类脑娘目光如炬地盯着你，嘴角带着一抹神秘的微笑。一场挑战即将开始。*",
-                "SUPER": "*你感到一股强烈的压迫感，只见类脑娘眼中闪烁着数据流的光芒，她似乎进入了超级模式！*",
+                "LOW": "*你看到狮子娘眨巴着眼睛，一副还没睡醒的样子。感觉这局应该不难？*",
+                "MEDIUM": "*你注意到狮子娘托着下巴，眼神变得专注起来。看来她开始认真了。*",
+                "HIGH": "*狮子娘目光如炬地盯着你，嘴角带着一抹神秘的微笑。一场挑战即将开始。*",
+                "SUPER": "*你感到一股强烈的压迫感，只见狮子娘眼中闪烁着数据流的光芒，她似乎进入了超级模式！*",
             }
         )
         ai_strategy_thumbnail: Dict[str, str] = field(
@@ -229,10 +229,10 @@ class TextConfig:
 
         game_over_title: str = "🎉 游戏结束啦 🎉"
         player_hand: str = "你的手牌"
-        ai_hand: str = "类脑娘的手牌"
+        ai_hand: str = "狮子娘的手牌"
         cards_count: str = "张牌"
-        waiting_ai: str = "*类脑娘正在思考要抽哪张牌...*"
-        ai_win_title: str = "类脑娘获胜啦！"
+        waiting_ai: str = "*狮子娘正在思考要抽哪张牌...*"
+        ai_win_title: str = "狮子娘获胜啦！"
         ai_win_thumbnail: str = StaticUrls.AI_WIN_THUMBNAIL
 
     @dataclass
@@ -256,16 +256,16 @@ class TextConfig:
         invalid_card_index: str = "好像没有这张牌呢，再选一次吧。"
         general_error: str = "发生了一个小错误，请稍后再试吧。"
         draw_error: str = "抽牌的时候好像出错了。"
-        ai_no_cards: str = "类脑娘手上没牌啦，你不能抽牌哦。"
+        ai_no_cards: str = "狮子娘手上没牌啦，你不能抽牌哦。"
 
     @dataclass
     class AIDraw:
         """AI抽玩家牌时的文本"""
 
-        drawing: str = "*类脑娘正在小心翼翼地抽牌...*"
-        drawn_card: str = "类脑娘抽到了: {}"
-        player_win: str = "太好啦！**你赢了！** 类脑娘抽到了鬼牌呢～"
-        ai_win: str = "啊呀，**类脑娘赢了！** 你抽到了鬼牌..."
+        drawing: str = "*狮子娘正在小心翼翼地抽牌...*"
+        drawn_card: str = "狮子娘抽到了: {}"
+        player_win: str = "太好啦！**你赢了！** 狮子娘抽到了鬼牌呢～"
+        ai_win: str = "啊呀，**狮子娘赢了！** 你抽到了鬼牌..."
         back_to_player_turn: str = "又轮到你了！加油哦～"
 
     @dataclass

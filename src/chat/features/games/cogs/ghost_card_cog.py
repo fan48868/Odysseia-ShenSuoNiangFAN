@@ -355,7 +355,7 @@ class GameControlView(View):
         
         if self.game.turn == "ai":
             # AI 回合禁用所有按钮
-            self.add_item(Button(label="*类脑娘正在小心翼翼地抽牌... *", style=discord.ButtonStyle.success, disabled=True))
+            self.add_item(Button(label="*狮子娘正在小心翼翼地抽牌... *", style=discord.ButtonStyle.success, disabled=True))
             return
 
         # 玩家回合：如果还未选牌
@@ -525,11 +525,11 @@ class GameControlView(View):
             win = int(self.game.bet * 2)
             key = "lose" # AI lose
             await coin_service.add_coins(self.game.user_id, win, "鬼牌 获胜")
-            res = f"太好啦！**你赢了！** 类脑娘抽到了鬼牌呢～ (获得 {win} 类脑币)"
+            res = f"太好啦！**你赢了！** 狮子娘抽到了鬼牌呢～ (获得 {win} 类脑币)"
             shame_msg = None
         else:
             key = "win" # AI win
-            res = f"啊呀，**类脑娘赢了！** 你抽到了鬼牌... (失去了 {self.game.bet} 类脑币)"
+            res = f"啊呀，**狮子娘赢了！** 你抽到了鬼牌... (失去了 {self.game.bet} 类脑币)"
             
             # 发送嘲讽消息
             shame_msg = None
@@ -573,14 +573,14 @@ class GhostCardCog(commands.Cog):
         if not over: hint = " (鬼牌在你手里哦)" if JOKER in game.player_hand else " (鬼牌在我手里哦)"
 
         embed = discord.Embed(color=color)
-        embed.set_author(name="🃏 类脑娘的抽鬼牌对决", icon_url=CASINO_ICON_URL)
+        embed.set_author(name="🃏 狮子娘的抽鬼牌对决", icon_url=CASINO_ICON_URL)
         
         # 设置表情图片 (Thumbnail 在桌面端显示在右上角，移动端显示在上方)
         if emotion and emotion in EMOJI_URLS:
             embed.set_thumbnail(url=EMOJI_URLS[emotion])
 
         # 增加台词的排版
-        embed.description = f"🗣️ **类脑娘**{hint}\n# 「 {dialogue} 」\n━━━━━━━━━━━━━━━━━━━━━━"
+        embed.description = f"🗣️ **狮子娘**{hint}\n# 「 {dialogue} 」\n━━━━━━━━━━━━━━━━━━━━━━"
         
         # 手牌显示优化
         ai_hand_display = " ".join([f"`{c}`" for c in game.ai_hand]) if over else f"{BACK_CARD} " * len(game.ai_hand)
@@ -642,7 +642,7 @@ class GhostCardCog(commands.Cog):
                     shame_msg = await msg.channel.send(txt)
             except: pass
 
-            await self.update_display(msg, game, dialogue=random.choice(DIALOGUES[key_win]), log_msg="啊呀，**类脑娘赢了！** 你抽到了鬼牌...", over=True, emotion=DIALOGUE_EMOTIONS.get(key_win), mode=view.mode, shame_msg=shame_msg)
+            await self.update_display(msg, game, dialogue=random.choice(DIALOGUES[key_win]), log_msg="啊呀，**狮子娘赢了！** 你抽到了鬼牌...", over=True, emotion=DIALOGUE_EMOTIONS.get(key_win), mode=view.mode, shame_msg=shame_msg)
             view.stop()
             if view.mode == "separated" and view.controller_msg:
                 try: await view.controller_msg.edit(content="🏁 对局已结束", view=None)
@@ -670,7 +670,7 @@ class GhostCardCog(commands.Cog):
         view.setup_buttons()
         
         # 更新显示 (如果是合体模式，这里会把 view 挂上去)
-        await self.update_display(msg, game, dialogue=reaction, log_msg=f"类脑娘抽到了: {card}", emotion=emotion, mode=view.mode, controller_view=view)
+        await self.update_display(msg, game, dialogue=reaction, log_msg=f"狮子娘抽到了: {card}", emotion=emotion, mode=view.mode, controller_view=view)
         
         if view.mode == "separated":
             if view.controller_msg:
@@ -681,7 +681,7 @@ class GhostCardCog(commands.Cog):
                 except Exception as e:
                     log.error(f"Controller update failed: {e}")
 
-    @app_commands.command(name="抽鬼牌", description="和类脑娘玩抽鬼牌！")
+    @app_commands.command(name="抽鬼牌", description="和狮子娘玩抽鬼牌！")
     @app_commands.describe(mode="游戏模式 (默认: 合体模式)")
     @app_commands.choices(mode=[
         app_commands.Choice(name="合体模式 (仅自己可见)", value="integrated"),

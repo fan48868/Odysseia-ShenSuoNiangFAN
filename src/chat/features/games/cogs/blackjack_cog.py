@@ -374,7 +374,7 @@ class BlackjackCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="blackjack", description="挑战类脑娘的Blackjack！")
+    @app_commands.command(name="blackjack", description="挑战狮子娘的Blackjack！")
     async def blackjack(self, interaction: discord.Interaction):
         balance = await coin_service.get_balance(interaction.user.id)
         

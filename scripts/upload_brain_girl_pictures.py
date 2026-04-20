@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 """
-类脑娘吃东西图片上传脚本
+狮子娘吃东西图片上传脚本
 
 功能：
 1. 读取指定路径下的所有文件夹
@@ -175,7 +175,7 @@ async def upload_images_to_discord(
 def print_results(results: Dict[str, List[str]]):
     """打印结果，格式化为迁移脚本期望的格式"""
     print("\n" + "=" * 60)
-    print("上传结果 - 类脑娘吃东西图片 CDN 链接")
+    print("上传结果 - 狮子娘吃东西图片 CDN 链接")
     print("=" * 60 + "\n")
 
     # 统计总数
@@ -213,7 +213,7 @@ def save_results_to_file(
 ):
     """保存结果到文件"""
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write("# 类脑娘吃东西图片 CDN 链接\n")
+        f.write("# 狮子娘吃东西图片 CDN 链接\n")
         f.write(f"# 生成时间: {__import__('datetime').datetime.now()}\n")
         f.write(
             f"# 共 {len(results)} 个商品，{sum(len(urls) for urls in results.values())} 张图片\n\n"
@@ -255,7 +255,7 @@ def save_results_to_file(
 async def main():
     """主函数"""
     parser = argparse.ArgumentParser(
-        description="上传类脑娘吃东西的图片到 Discord 频道"
+        description="上传狮子娘吃东西的图片到 Discord 频道"
     )
     parser.add_argument("channel_id", type=int, help="Discord 频道 ID")
     parser.add_argument(
@@ -278,7 +278,7 @@ async def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("类脑娘吃东西图片上传脚本")
+    print("狮子娘吃东西图片上传脚本")
     print("=" * 60)
     print(f"频道 ID: {args.channel_id}")
     print(f"图片路径: {args.path}")

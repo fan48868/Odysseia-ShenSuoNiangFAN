@@ -273,7 +273,7 @@ async def test_grok_reference_images_return_clear_gateway_error():
 
 def test_preset_character_prompt_contains_both_characters():
     assert "狮子娘：" in PRESET_CHARACTER_PROMPT
-    assert "类脑娘：" in PRESET_CHARACTER_PROMPT
+    assert "狮子娘：" in PRESET_CHARACTER_PROMPT
 
 
 @pytest.mark.asyncio

@@ -261,7 +261,7 @@ class LoanView(discord.ui.View):
                 f"你当前有一笔 **{self.active_loan['amount']}** 类脑币的贷款尚未还清。"
             )
         else:
-            desc = f"你可以从类脑娘这里借款，最高可借 **{chat_config.COIN_CONFIG['MAX_LOAN_AMOUNT']}** 类脑币。"
+            desc = f"你可以从狮子娘这里借款，最高可借 **{chat_config.COIN_CONFIG['MAX_LOAN_AMOUNT']}** 类脑币。"
         embed = discord.Embed(
             title="类脑币借贷中心", description=desc, color=discord.Color.blue()
         )
@@ -1181,7 +1181,7 @@ class ToolSettingsView(discord.ui.View):
     async def create_embed(self) -> discord.Embed:
         """创建工具设置的嵌入消息。"""
         description = (
-            "在这里可以全局控制类脑娘能否使用某个工具哦～\n"
+            "在这里可以全局控制狮子娘能否使用某个工具哦～\n"
             "关闭后，该工具不会再转换并发送给 API。\n"
             "默认情况下所有工具都是开启的。"
         )

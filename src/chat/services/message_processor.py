@@ -659,7 +659,7 @@ class MessageProcessor:
                                     if command_name
                                     else "的回应"
                                 )
-                                reply_header = f"> [类脑娘对 {embed_author_name} {command_context}]:"
+                                reply_header = f"> [狮子娘对 {embed_author_name} {command_context}]:"
                             else:
                                 reply_header = f"> [{ref_msg.author.display_name}]:"
 

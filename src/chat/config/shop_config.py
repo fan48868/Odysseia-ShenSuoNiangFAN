@@ -204,7 +204,7 @@ SHOP_ITEMS = [
     ),
 ]
 
-# 类脑娘吃东西图片的 CDN 链接映射
+# 狮子娘吃东西图片的 CDN 链接映射
 # 格式: {"商品名称": ["CDN链接1", "CDN链接2", ...]}
 # 使用 upload_brain_girl_pictures.py 脚本上传图片后会自动更新这个字典
 BRAIN_GIRL_EATING_IMAGES = {

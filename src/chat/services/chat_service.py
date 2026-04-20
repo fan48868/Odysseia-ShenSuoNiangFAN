@@ -433,7 +433,7 @@ class ChatService:
     def _format_ai_response(self, ai_response: str) -> str:
         """清理和格式化AI的原始回复。"""
         # 移除可能包含的自身名字前缀
-        bot_name_prefix = "类脑娘:"
+        bot_name_prefix = "狮子娘:"
         if ai_response.startswith(bot_name_prefix):
             ai_response = ai_response[len(bot_name_prefix) :].lstrip()
         # 将多段回复的双换行符替换为单换行符

@@ -399,7 +399,7 @@ class GhostCardService:
                 message = f"你抽到了 {drawn_card}！你的手牌已全部出完，恭喜获胜！"
             else:  # winner == "ai"
                 game["winnings"] = 0
-                message = f"你抽到了 {drawn_card}！类脑娘的手牌已全部出完，你输了！"
+                message = f"你抽到了 {drawn_card}！狮子娘的手牌已全部出完，你输了！"
             return True, message, reaction_text, reaction_image_url
 
         game["current_turn"] = "ai"
@@ -438,7 +438,7 @@ class GhostCardService:
             reaction_text, reaction_image_url = "", ""
             if winner == "ai":
                 game["winnings"] = 0
-                message = f"类脑娘抽到了 {drawn_card}！她的手牌已全部出完，你输了！"
+                message = f"狮子娘抽到了 {drawn_card}！她的手牌已全部出完，你输了！"
                 reactions = text_config.ai_reactions.reactions_map.get(
                     "player_lost_win"
                 )
@@ -447,7 +447,7 @@ class GhostCardService:
                     reaction_image_url = reactions.image_url
             else:  # winner == "player"
                 game["winnings"] = game["bet_amount"] * game["payout_ratio"]
-                message = f"类脑娘抽到了 {drawn_card}！你的手牌已全部出完，恭喜获胜！"
+                message = f"狮子娘抽到了 {drawn_card}！你的手牌已全部出完，恭喜获胜！"
                 # 玩家胜利时的反应 (AI抽到鬼牌)
                 reactions = text_config.ai_reactions.reactions_map.get("ai_drawn_ghost")
                 if reactions:
@@ -464,7 +464,7 @@ class GhostCardService:
             reaction_image_url = reactions.image_url
 
         game["current_turn"] = "player"
-        message = f"类脑娘抽到了 {drawn_card}"
+        message = f"狮子娘抽到了 {drawn_card}"
         return True, message, reaction_text, reaction_image_url
 
     def _check_game_winner(self, game: Dict) -> Optional[str]:

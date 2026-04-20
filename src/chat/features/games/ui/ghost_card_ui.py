@@ -87,7 +87,7 @@ class GhostCardUI:
 
     @staticmethod
     def create_reaction_embed(game_id: str, reaction_text: str) -> discord.Embed:
-        """创建类脑娘反应嵌入消息"""
+        """创建狮子娘反应嵌入消息"""
         game = ghost_card_service.get_game_state(game_id)
         if not game:
             return discord.Embed(

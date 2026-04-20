@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# 类脑娘邀请脚本
-# 让类脑娘来帮你配置一切吧～
+# 狮子娘邀请脚本
+# 让狮子娘来帮你配置一切吧～
 
 # 移除 set -e，避免 read 命令返回非零状态时脚本意外退出
 # 改用手动错误处理
 
-# 颜色定义 - 类脑娘的配色
+# 颜色定义 - 狮子娘的配色
 PINK='\033[38;5;213m'
 PEACH='\033[38;5;217m'
 SKY='\033[38;5;117m'
@@ -27,7 +27,7 @@ WARM_5='\033[38;5;198m' # Hot Pink
 WARM_6='\033[38;5;163m' # Purple
 NC='\033[0m'
 
-# 打印带颜色的消息 - 类脑娘风格
+# 打印带颜色的消息 - 狮子娘风格
 say_hello() {
     echo -e "${PINK}💕 $1${NC}"
 }
@@ -48,7 +48,7 @@ say_oops() {
     echo -e "${HEART}😅 $1${NC}"
 }
 
-# 打印欢迎信息 - 类脑娘来迎接你啦
+# 打印欢迎信息 - 狮子娘来迎接你啦
 print_welcome() {
     clear
     echo ""
@@ -60,7 +60,7 @@ print_welcome() {
     echo -e "   ${WARM_5}██████╔╝██║  ██║██║  ██║██║██║ ╚████║     ╚██████╔╝██║██║  ██║███████╗${NC}"
     echo -e "   ${WARM_6}╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝      ╚═════╝ ╚═╝╚═╝  ╚═╝╚══════╝${NC}"
     echo ""
-    echo -e "          ${WARM_4}✨ 欢迎来到类脑娘家！让我来帮你配置一切吧～ ✨${NC}"
+    echo -e "          ${WARM_4}✨ 欢迎来到狮子娘家！让我来帮你配置一切吧～ ✨${NC}"
     echo ""
     echo ""
 }
@@ -70,7 +70,7 @@ check_env_file() {
     if [ -f ".env" ]; then
         say_warning "哎呀～检测到 .env 文件已经存在啦！"
         echo ""
-        say_hello "类脑娘可能已经在这里住过了，要重新装修一下吗？"
+        say_hello "狮子娘可能已经在这里住过了，要重新装修一下吗？"
         local reply=""
         printf "是否重新配置？(y/N): "
         read -r reply < /dev/tty
@@ -266,7 +266,7 @@ configure_gemini_endpoint() {
     echo ""
     say_hello "（可选）自定义 Gemini API 端点"
     say_wait "用于AI对话功能"
-    say_warning "如果先不配置也没关系，想晚点再给类脑娘加上也可以哦"
+    say_warning "如果先不配置也没关系，想晚点再给狮子娘加上也可以哦"
 
     CUSTOM_GEMINI_URL=$(ask_question "自定义端点 URL" "" "false")
     CUSTOM_GEMINI_API_KEY=$(ask_question "自定义端点的 API 密钥（如需要）" "" "false")
@@ -275,7 +275,7 @@ configure_gemini_endpoint() {
 # 配置 OpenAI 格式端点
 configure_openai_endpoints() {
     echo ""
-    say_hello "（可选）再给类脑娘准备一点额外的 AI 端点吧～"
+    say_hello "（可选）再给狮子娘准备一点额外的 AI 端点吧～"
     say_wait "这些都是额外选项呀，想配就配，不想配直接回车跳过就好"
 
     DEEPSEEK_URL=$(ask_question "DeepSeek 端点 URL" "https://api.deepseek.com/" "false")
@@ -393,7 +393,7 @@ generate_env_file() {
 ask_start_service() {
     echo ""
     say_hello "配置文件已经准备好啦！"
-    say_wait "要不要现在就让类脑娘住进来呢？"
+    say_wait "要不要现在就让狮子娘住进来呢？"
     local reply=""
     printf "现在启动服务吗？(Y/n): "
     read -r reply < /dev/tty
@@ -440,7 +440,7 @@ wait_for_migration() {
     local status=""
     local exit_code=""
 
-    say_wait "等待类脑娘把数据库的小房间整理好..."
+    say_wait "等待狮子娘把数据库的小房间整理好..."
     echo ""
 
     while [ $attempt -le $max_attempts ]; do
@@ -481,7 +481,7 @@ wait_for_bot_app() {
     local bot_container_id=""
     local status=""
 
-    say_wait "再等类脑娘梳梳毛，马上就上线啦..."
+    say_wait "再等狮子娘梳梳毛，马上就上线啦..."
     echo ""
 
     while [ $attempt -le $max_attempts ]; do
@@ -491,13 +491,13 @@ wait_for_bot_app() {
             status=$(docker inspect -f '{{.State.Status}}' "$bot_container_id" 2>/dev/null | tr -d '\r')
 
             if [ "$status" = "running" ]; then
-                say_success "类脑娘已经乖乖地上线啦～"
+                say_success "狮子娘已经乖乖地上线啦～"
                 echo ""
                 return 0
             fi
 
             if [ "$status" = "exited" ] || [ "$status" = "dead" ]; then
-                say_oops "类脑娘好像没有顺利起床呢..."
+                say_oops "狮子娘好像没有顺利起床呢..."
                 docker compose logs bot_app
                 exit 1
             fi
@@ -509,7 +509,7 @@ wait_for_bot_app() {
     done
 
     echo ""
-    say_oops "等待类脑娘上线超时了..."
+    say_oops "等待狮子娘上线超时了..."
     docker compose ps
     exit 1
 }
@@ -517,7 +517,7 @@ wait_for_bot_app() {
 # 启动服务
 start_service() {
     echo ""
-    say_wait "开始准备类脑娘的新家..."
+    say_wait "开始准备狮子娘的新家..."
     echo ""
 
     # 检查 Docker 是否运行
@@ -531,7 +531,7 @@ start_service() {
     docker compose down 2>/dev/null || true
 
     # 构建镜像
-    say_wait "正在准备类脑娘的房间（构建镜像）..."
+    say_wait "正在准备狮子娘的房间（构建镜像）..."
     say_hello "这可能需要几分钟，耐心等待哦～"
     if docker compose build; then
         say_success "房间准备好了～"
@@ -541,9 +541,9 @@ start_service() {
     fi
 
     # 启动服务
-    say_wait "让类脑娘住进来..."
+    say_wait "让狮子娘住进来..."
     if docker compose up -d; then
-        say_success "类脑娘已经住进来了～"
+        say_success "狮子娘已经住进来了～"
     else
         say_oops "搬家过程出问题了..."
         exit 1
@@ -558,14 +558,14 @@ start_service() {
 
     # 显示状态
     echo ""
-    say_wait "看看类脑娘的状态～"
+    say_wait "看看狮子娘的状态～"
     docker compose ps
     echo ""
 
     echo ""
     echo -e "${PINK}╔══════════════════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${PINK}║${NC}                                                                                      ${PINK}║${NC}"
-    echo -e "${PINK}║${NC}     ${CYAN}🌸 耶！类脑娘已经准备好啦！快去 Discord 里 @类脑娘 打招呼吧～ 🌸${NC}             ${PINK}║${NC}"
+    echo -e "${PINK}║${NC}     ${CYAN}🌸 耶！狮子娘已经准备好啦！快去 Discord 里 @狮子娘 打招呼吧～ 🌸${NC}             ${PINK}║${NC}"
     echo -e "${PINK}║${NC}                                                                                      ${PINK}║${NC}"
     echo -e "${PINK}╚══════════════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
@@ -604,7 +604,7 @@ main() {
     else
         say_success "配置文件已经准备好啦～"
         echo ""
-        say_hello "想找类脑娘的时候，运行这些命令就好："
+        say_hello "想找狮子娘的时候，运行这些命令就好："
         echo ""
         echo -e "${CYAN}  docker compose up -d --build${NC}"
         echo ""
