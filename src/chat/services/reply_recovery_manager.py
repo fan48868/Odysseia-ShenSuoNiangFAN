@@ -220,6 +220,7 @@ class ReplyRecoveryManager:
         message_id: int,
         chunk_total: int,
         attempt_token: Optional[str] = None,
+        apply_side_effects_on_completion: bool = True,
     ) -> None:
         if task_id is None:
             return
@@ -244,7 +245,7 @@ class ReplyRecoveryManager:
 
             if len(confirmed_chunks) >= task.delivery_state["chunk_total"]:
                 task.task_state = "completed"
-                should_apply_side_effects = True
+                should_apply_side_effects = apply_side_effects_on_completion
             else:
                 task.task_state = "delivering"
 
@@ -252,6 +253,12 @@ class ReplyRecoveryManager:
 
         if should_apply_side_effects:
             await self._apply_side_effects(task_id)
+
+    async def apply_side_effects_if_needed(self, task_id: int) -> None:
+        snapshot = await self.get_task_snapshot(task_id)
+        if snapshot is None or snapshot.task_state != "completed":
+            return
+        await self._apply_side_effects(task_id)
 
     async def drop_task(self, task_id: int, reason: str) -> None:
         async with self._lock:

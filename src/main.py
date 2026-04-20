@@ -466,6 +466,18 @@ async def run_bot_forever(token: str):
             )
         finally:
             try:
+                from src.chat.services.context_service_test import get_context_service
+
+                await get_context_service().flush_pending_active_messages()
+            except RuntimeError:
+                pass
+            except Exception as flush_error:
+                log.warning(
+                    f"关闭 Bot 前冲刷主动聊天缓存失败: {flush_error}",
+                    exc_info=True,
+                )
+
+            try:
                 if not bot.is_closed():
                     await bot.close()
             except Exception as close_error:

@@ -142,6 +142,33 @@ def test_system_prompt_applies_group_then_exact_then_faction_pack(
     assert "default-abilities" not in result
 
 
+def test_system_prompt_fragment_appends_missing_tag_to_final_prompt(
+    monkeypatch: pytest.MonkeyPatch, prompt_service: PromptService
+):
+    monkeypatch.setattr(
+        prompt_service_module,
+        "PROMPT_CONFIG",
+        {
+            "default": dict(MINIMAL_DEFAULT_CONFIG),
+            "custom-deepseek-expert-reasoner": {
+                "SYSTEM_PROMPT": """
+<think_guide>
+先思考，再回答。
+</think_guide>
+"""
+            },
+        },
+    )
+
+    result = prompt_service.get_prompt(
+        "SYSTEM_PROMPT", model_name="custom-deepseek-expert-reasoner"
+    )
+
+    assert "default-core" in result
+    assert "<think_guide>" in result
+    assert "先思考，再回答。" in result
+
+
 def test_full_character_system_prompt_still_replaces_entire_prompt(
     monkeypatch: pytest.MonkeyPatch, prompt_service: PromptService
 ):
@@ -290,3 +317,73 @@ def test_custom_variant_reads_latest_value_from_project_dotenv(
     )
 
     assert jailbreak_prompt == "specific-custom-user"
+
+
+@pytest.mark.asyncio
+async def test_build_chat_prompt_appends_think_guide_from_final_system_prompt(
+    monkeypatch: pytest.MonkeyPatch, prompt_service: PromptService
+):
+    monkeypatch.setattr(
+        prompt_service_module,
+        "PROMPT_CONFIG",
+        {
+            "default": dict(MINIMAL_DEFAULT_CONFIG),
+            "custom-deepseek-expert-reasoner": {
+                "SYSTEM_PROMPT": """
+<think_guide>
+先进行完整推理，再给出结论。
+</think_guide>
+""",
+            },
+        },
+    )
+
+    result = await prompt_service.build_chat_prompt(
+        user_name="测试用户",
+        message="你好",
+        replied_message=None,
+        images=None,
+        channel_context=None,
+        world_book_entries=None,
+        affection_status=None,
+        guild_name="测试服务器",
+        location_name="测试地点",
+        model_name="custom-deepseek-expert-reasoner",
+    )
+
+    assert result[-3]["role"] == "user"
+    assert result[-3]["parts"] == ["[测试用户]: 你好"]
+    assert result[-2] == {"role": "model", "parts": ["我已了解用户输入"]}
+    assert result[-1] == {
+        "role": "user",
+        "parts": ["先进行完整推理，再给出结论。"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_chat_prompt_keeps_current_user_input_unchanged_without_think_guide(
+    monkeypatch: pytest.MonkeyPatch, prompt_service: PromptService
+):
+    monkeypatch.setattr(
+        prompt_service_module,
+        "PROMPT_CONFIG",
+        {
+            "default": dict(MINIMAL_DEFAULT_CONFIG),
+        },
+    )
+
+    result = await prompt_service.build_chat_prompt(
+        user_name="测试用户",
+        message="你好",
+        replied_message=None,
+        images=None,
+        channel_context=None,
+        world_book_entries=None,
+        affection_status=None,
+        guild_name="测试服务器",
+        location_name="测试地点",
+        model_name="kimi-k2.5",
+    )
+
+    assert result[-1] == {"role": "user", "parts": ["[测试用户]: 你好"]}
+    assert all(turn.get("parts") != ["我已了解用户输入"] for turn in result)

@@ -2,12 +2,14 @@
 
 import asyncio
 import base64
+import io
 import logging
 import os
 import re
 from typing import Any, Dict, List, Optional
 
 import httpx
+from PIL import Image
 
 
 log = logging.getLogger(__name__)
@@ -106,6 +108,48 @@ class MoonshotVisionService:
 
         return None
 
+    @staticmethod
+    def _guess_mime_type_from_magic_bytes(image_bytes: bytes) -> Optional[str]:
+        if not image_bytes or len(image_bytes) < 4:
+            return None
+
+        if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+            return "image/gif"
+        if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if image_bytes.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+            return "image/webp"
+
+        return None
+
+    @staticmethod
+    def _normalize_image_for_moonshot(
+        image_bytes: bytes, mime_type: str
+    ) -> tuple[bytes, str]:
+        """
+        将 Moonshot 可能不稳定支持的图片格式统一转为 PNG。
+        目前优先放行 JPEG/PNG，其余 Pillow 可解码格式（GIF/WEBP 等）统一转 PNG。
+        """
+        normalized_mime_type = str(mime_type or "").strip().lower()
+        if normalized_mime_type in {"image/png", "image/jpeg", "image/jpg"}:
+            return image_bytes, "image/jpeg" if normalized_mime_type == "image/jpg" else normalized_mime_type
+
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                output_buffer = io.BytesIO()
+                image.convert("RGBA").save(output_buffer, format="PNG")
+                converted_bytes = output_buffer.getvalue()
+            return converted_bytes, "image/png"
+        except Exception as e:
+            log.warning(
+                "Moonshot 图片转 PNG 失败，将继续使用原始格式。mime=%s error=%s",
+                normalized_mime_type or "<empty>",
+                e,
+            )
+            return image_bytes, normalized_mime_type or "application/octet-stream"
+
     async def recognize_image(
         self,
         image_payload: Dict[str, Any],
@@ -138,6 +182,25 @@ class MoonshotVisionService:
         if not image_bytes:
             return "（图片识别失败：缺少图片数据）"
 
+        direct_bytes = image_payload.get("data") or image_payload.get("bytes")
+        payload_source = image_payload.get("source", "unknown")
+        payload_name = image_payload.get("name")
+        payload_has_data_preview = bool(image_payload.get("data_preview"))
+        payload_data_source = (
+            "direct-bytes"
+            if isinstance(direct_bytes, (bytes, bytearray)) and direct_bytes
+            else "encoded-preview"
+        )
+        magic_mime_type = self._guess_mime_type_from_magic_bytes(image_bytes)
+        if magic_mime_type and str(mime_type).strip().lower() != magic_mime_type:
+            log.warning(
+                "Moonshot 图片 MIME 与文件头不一致 | incoming_mime=%s | magic_mime=%s | source=%s | name=%s",
+                mime_type,
+                magic_mime_type,
+                payload_source,
+                payload_name,
+            )
+
         if (
             isinstance(declared_size, int)
             and declared_size > 0
@@ -148,6 +211,11 @@ class MoonshotVisionService:
                 declared_size,
                 len(image_bytes),
             )
+
+        image_bytes, mime_type = self._normalize_image_for_moonshot(
+            image_bytes,
+            mime_type,
+        )
 
         image_base64 = base64.b64encode(image_bytes).decode("utf-8")
         image_data_url = f"data:{mime_type};base64,{image_base64}"

@@ -16,6 +16,9 @@ from src.chat.config.chat_config import CHAT_ENABLED, MESSAGE_SETTINGS
 from src.chat.features.chat_settings.services.chat_settings_service import (
     chat_settings_service,
 )
+from src.chat.features.chat_settings.services.ai_reply_regex_service import (
+    ai_reply_regex_service,
+)
 from src.chat.features.tools.functions.summarize_channel import text_to_summary_image
 from src.chat.services.chat_service import GeneratedReply, chat_service
 from src.chat.services.context_service_test import get_context_service
@@ -30,12 +33,14 @@ from src.chat.utils.database import chat_db_manager
 from src.chat.utils.reliable_message_sender import (
     PendingTextDelivery,
     enqueue_pending_text_delivery,
+    is_reply_target_missing_error,
     send_pending_text_delivery_with_recovery,
 )
 
 log = logging.getLogger(__name__)
 
 TYPING_ENTER_TIMEOUT_SECONDS = 1.5
+DISCORD_SAFE_CHUNK_LENGTH = 1900
 
 
 class AIChatCog(commands.Cog):
@@ -69,23 +74,67 @@ class AIChatCog(commands.Cog):
         return guild_name, "私信中"
 
     def _split_response_chunks(self, response_text: str) -> list[str]:
-        max_len = 1900
+        max_len = DISCORD_SAFE_CHUNK_LENGTH
         chunks: list[str] = []
         remaining = response_text
 
         while remaining:
-            if len(remaining) <= max_len:
+            if self._get_discord_text_length(remaining) <= max_len:
                 chunks.append(remaining)
                 break
 
-            split_pos = remaining.rfind("\n", 0, max_len)
-            if split_pos == -1 or split_pos < max_len // 2:
-                split_pos = max_len
+            split_pos = self._find_split_position(remaining, max_len)
+            if split_pos <= 0:
+                split_pos = 1
 
             chunks.append(remaining[:split_pos].rstrip())
             remaining = remaining[split_pos:].lstrip()
 
         return chunks
+
+    def _get_discord_text_length(self, text: str) -> int:
+        return len(text.encode("utf-16-le")) // 2
+
+    def _find_split_position(self, text: str, max_len: int) -> int:
+        current_len = 0
+        newline_positions: list[int] = []
+
+        for index, char in enumerate(text):
+            char_len = self._get_discord_text_length(char)
+            if current_len + char_len > max_len:
+                break
+            current_len += char_len
+            if char == "\n":
+                newline_positions.append(index)
+        else:
+            return len(text)
+
+        min_preferred_len = max_len // 2
+        for newline_index in reversed(newline_positions):
+            candidate = text[:newline_index]
+            if self._get_discord_text_length(candidate) >= min_preferred_len:
+                return newline_index
+
+        return index
+
+    def _prepend_author_mention(self, message: discord.Message, content: str) -> str:
+        author_id = getattr(getattr(message, "author", None), "id", None)
+        author_mention = getattr(getattr(message, "author", None), "mention", None)
+        if author_mention is None and author_id is not None:
+            author_mention = f"<@{author_id}>"
+        if not author_mention:
+            return content
+
+        alt_mention = f"<@!{author_id}>" if author_id is not None else None
+        stripped_content = content.lstrip()
+        if stripped_content.startswith(author_mention) or (
+            alt_mention and stripped_content.startswith(alt_mention)
+        ):
+            return content
+
+        if not content:
+            return author_mention
+        return f"{author_mention}\n{content}"
 
     @asynccontextmanager
     async def _best_effort_typing(self, channel: discord.abc.Messageable):
@@ -119,17 +168,28 @@ class AIChatCog(commands.Cog):
         chunk_index: int = 0,
         chunk_total: int = 1,
         attempt_token: Optional[str] = None,
+        apply_side_effects_on_completion: bool = True,
     ) -> bool:
         if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
             if not await reply_recovery_manager.is_attempt_current(task_id, attempt_token):
                 return False
-            sent_message = await message.reply(content, mention_author=mention_author)
+            try:
+                sent_message = await message.reply(content, mention_author=mention_author)
+            except Exception as exc:
+                if not is_reply_target_missing_error(exc):
+                    raise
+                sent_message = await message.channel.send(
+                    self._prepend_author_mention(message, content)
+                    if mention_author
+                    else content
+                )
             await reply_recovery_manager.mark_chunk_confirmed(
                 task_id,
                 chunk_index=chunk_index,
                 message_id=sent_message.id,
                 chunk_total=chunk_total,
                 attempt_token=attempt_token,
+                apply_side_effects_on_completion=apply_side_effects_on_completion,
             )
             return True
 
@@ -140,11 +200,13 @@ class AIChatCog(commands.Cog):
                 content=content,
                 reply_to_message_id=message.id,
                 mention_author=mention_author,
+                mention_user_id=getattr(getattr(message, "author", None), "id", None),
                 task_id=task_id,
                 chunk_index=chunk_index,
                 chunk_total=chunk_total,
                 attempt_token=attempt_token,
             ),
+            apply_side_effects_on_completion=apply_side_effects_on_completion,
         )
 
     async def _send_channel_message_with_recovery(
@@ -156,6 +218,7 @@ class AIChatCog(commands.Cog):
         chunk_index: int = 0,
         chunk_total: int = 1,
         attempt_token: Optional[str] = None,
+        apply_side_effects_on_completion: bool = True,
     ) -> bool:
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             if not await reply_recovery_manager.is_attempt_current(task_id, attempt_token):
@@ -167,6 +230,7 @@ class AIChatCog(commands.Cog):
                 message_id=sent_message.id,
                 chunk_total=chunk_total,
                 attempt_token=attempt_token,
+                apply_side_effects_on_completion=apply_side_effects_on_completion,
             )
             return True
 
@@ -180,6 +244,7 @@ class AIChatCog(commands.Cog):
                 chunk_total=chunk_total,
                 attempt_token=attempt_token,
             ),
+            apply_side_effects_on_completion=apply_side_effects_on_completion,
         )
 
     async def _queue_remaining_chunks(
@@ -200,6 +265,11 @@ class AIChatCog(commands.Cog):
                     content=chunks[chunk_index],
                     reply_to_message_id=message.id if chunk_index == 0 else None,
                     mention_author=chunk_index == 0,
+                    mention_user_id=(
+                        getattr(getattr(message, "author", None), "id", None)
+                        if chunk_index == 0
+                        else None
+                    ),
                     task_id=task_id,
                     chunk_index=chunk_index,
                     chunk_total=chunk_total,
@@ -214,6 +284,7 @@ class AIChatCog(commands.Cog):
         *,
         task_id: int,
         attempt_token: str,
+        apply_side_effects_on_completion: bool = True,
     ) -> bool:
         chunks = self._split_response_chunks(response_text)
         if not chunks:
@@ -245,6 +316,7 @@ class AIChatCog(commands.Cog):
                     chunk_index=chunk_index,
                     chunk_total=len(chunks),
                     attempt_token=attempt_token,
+                    apply_side_effects_on_completion=apply_side_effects_on_completion,
                 )
             else:
                 delivered_now = await self._send_channel_message_with_recovery(
@@ -254,6 +326,7 @@ class AIChatCog(commands.Cog):
                     chunk_index=chunk_index,
                     chunk_total=len(chunks),
                     attempt_token=attempt_token,
+                    apply_side_effects_on_completion=apply_side_effects_on_completion,
                 )
 
             if delivered_now:
@@ -287,10 +360,19 @@ class AIChatCog(commands.Cog):
             raise RuntimeError("总结图片生成失败")
 
         with io.BytesIO(image_bytes) as image_file:
-            await message.reply(
-                file=discord.File(image_file, "summary.png"),
-                mention_author=True,
-            )
+            try:
+                await message.reply(
+                    file=discord.File(image_file, "summary.png"),
+                    mention_author=True,
+                )
+            except Exception as exc:
+                if not is_reply_target_missing_error(exc):
+                    raise
+                image_file.seek(0)
+                await message.channel.send(
+                    content=self._prepend_author_mention(message, ""),
+                    file=discord.File(image_file, "summary.png"),
+                )
 
     async def _send_overflow_dm_response(
         self,
@@ -317,8 +399,12 @@ class AIChatCog(commands.Cog):
         task_id: int,
         attempt_token: str,
         last_tools: list[str],
+        apply_side_effects_on_completion: bool = True,
     ) -> None:
-        response_text = generated_reply.response_text
+        response_text = ai_reply_regex_service.apply_rules_to_text(
+            generated_reply.response_text
+        )
+        generated_reply.response_text = response_text
 
         if "summarize_channel" in last_tools:
             log.info("调用了总结工具, 使用图片发送并跳过恢复闭环。")
@@ -354,6 +440,7 @@ class AIChatCog(commands.Cog):
             response_text,
             task_id=task_id,
             attempt_token=attempt_token,
+            apply_side_effects_on_completion=apply_side_effects_on_completion,
         )
 
     async def _generate_and_deliver_reply(
@@ -395,11 +482,13 @@ class AIChatCog(commands.Cog):
                     task_id=task_id,
                     attempt_token=attempt_token,
                     last_tools=last_tools,
+                    apply_side_effects_on_completion=not use_typing,
                 )
 
             if use_typing:
                 async with self._best_effort_typing(message.channel):
                     await _run_generation_and_delivery()
+                await reply_recovery_manager.apply_side_effects_if_needed(task_id)
             else:
                 await _run_generation_and_delivery()
         except Exception as exc:

@@ -30,6 +30,7 @@ services:
     volumes:
       - .:/app
       - ./data:/app/data
+      - ${BACKUP_OUTPUT_DIR:-./src/backup}:/backup-output
       - /var/run/docker.sock:/var/run/docker.sock
     # For container debugging, replace this with: sleep infinity
     command: python3 -u -m src.main

@@ -101,6 +101,28 @@ def test_preset_store_can_rename_without_changing_content(tmp_path: Path):
     assert renamed.custom_model_name == created.custom_model_name
 
 
+def test_preset_store_can_update_settings_without_changing_name(tmp_path: Path):
+    store = CustomModelPresetStore(base_dir=str(tmp_path))
+    created = store.create_preset(name="原预设", settings=_build_settings())
+
+    updated = store.update_preset_settings(
+        created.preset_id,
+        settings=_build_settings(
+            url="https://updated.example.com/v1",
+            api_key="sk-updated",
+            model_name="updated-model",
+            enable_vision="true",
+            enable_video_input="false",
+        ),
+    )
+
+    assert updated.name == created.name
+    assert updated.custom_model_url == "https://updated.example.com/v1"
+    assert updated.custom_model_api_key == "sk-updated"
+    assert updated.custom_model_name == "updated-model"
+    assert updated.custom_model_enable_vision == "true"
+
+
 def test_preset_store_rejects_duplicate_names(tmp_path: Path):
     store = CustomModelPresetStore(base_dir=str(tmp_path))
     store.create_preset(name="重复名", settings=_build_settings())
@@ -138,22 +160,24 @@ async def test_custom_model_view_builds_buttons_from_presets(
         settings_service=MagicMock(),
         preset_store=CustomModelPresetStore(base_dir=str(tmp_path / "empty")),
     )
-    assert [item.label for item in empty_view.children] == ["(可选) 配置 custom 模型参数"]
+    assert [item.label for item in empty_view.children] == [
+        "(可选) 配置 custom 模型参数",
+        "刷新",
+    ]
 
     filled_view = custom_model_view_module.CustomModelConfigView(
         opener_user_id=1,
         settings_service=MagicMock(),
         preset_store=store,
     )
-    assert [item.label for item in filled_view.children] == [
-        "(可选) 配置 custom 模型参数",
-        "预设A",
-        "预设B",
-    ]
+    assert len(filled_view.children) == 3
+    assert filled_view.children[0].label == "(可选) 配置 custom 模型参数"
+    assert filled_view.children[1].label == "刷新"
+    assert [option.label for option in filled_view.children[2].options] == ["预设A", "预设B"]
 
 
 @pytest.mark.asyncio
-async def test_custom_model_view_caps_preset_buttons_at_four(
+async def test_custom_model_view_caps_preset_options_at_twenty_five(
     tmp_path: Path, custom_model_view_module
 ):
     store = CustomModelPresetStore(base_dir=str(tmp_path))
@@ -189,7 +213,8 @@ async def test_custom_model_view_caps_preset_buttons_at_four(
         preset_store=store,
     )
 
-    assert len(view.children) == 5
+    assert len(view.children) == 3
+    assert len(view.children[2].options) == MAX_CUSTOM_MODEL_PRESETS
 
 
 def test_apply_settings_updates_env_and_refreshes_client(
@@ -330,7 +355,7 @@ def test_apply_settings_supports_data_json_file_paths(
 
 
 @pytest.mark.asyncio
-async def test_edit_preset_modal_only_updates_name(
+async def test_configure_preset_modal_updates_preset_settings(
     tmp_path: Path, custom_model_view_module
 ):
     store = CustomModelPresetStore(base_dir=str(tmp_path))
@@ -344,7 +369,47 @@ async def test_edit_preset_modal_only_updates_name(
     )
 
     interaction = SimpleNamespace(response=SimpleNamespace(send_modal=AsyncMock()))
-    await preview_view.on_edit(interaction)
+    await preview_view.on_configure(interaction)
+
+    sent_modal = interaction.response.send_modal.await_args.args[0]
+    assert sent_modal.url_input.default == created.custom_model_url
+    assert sent_modal.model_name_input.default == created.custom_model_name
+
+    submit_interaction = SimpleNamespace(
+        response=SimpleNamespace(send_message=AsyncMock())
+    )
+    sent_modal.url_input = SimpleNamespace(value="https://updated.example.com/v1")
+    sent_modal.api_key_input = SimpleNamespace(value="sk-updated")
+    sent_modal.model_name_input = SimpleNamespace(value="updated-model")
+    sent_modal.enable_vision_input = SimpleNamespace(value="true")
+    sent_modal.enable_video_input = SimpleNamespace(value="false")
+
+    await sent_modal.on_submit(submit_interaction)
+
+    updated = store.get_preset(created.preset_id)
+    assert updated.name == created.name
+    assert updated.custom_model_url == "https://updated.example.com/v1"
+    assert updated.custom_model_api_key == "sk-updated"
+    assert updated.custom_model_name == "updated-model"
+    submit_interaction.response.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_rename_preset_modal_only_updates_name(
+    tmp_path: Path, custom_model_view_module
+):
+    store = CustomModelPresetStore(base_dir=str(tmp_path))
+    created = store.create_preset(name="旧预设", settings=_build_settings())
+
+    preview_view = custom_model_view_module.CustomModelPresetPreviewView(
+        opener_user_id=1,
+        settings_service=MagicMock(),
+        preset_store=store,
+        preset_id=created.preset_id,
+    )
+
+    interaction = SimpleNamespace(response=SimpleNamespace(send_modal=AsyncMock()))
+    await preview_view.on_rename(interaction)
 
     sent_modal = interaction.response.send_modal.await_args.args[0]
     assert sent_modal.name_input.default == "旧预设"

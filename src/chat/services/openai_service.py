@@ -23,6 +23,7 @@ from src.chat.services.openai_models import (
     DeepSeekModelClient,
     KimiModelClient,
 )
+from src.chat.utils.httpx_error_utils import build_request_error_log_fields
 from src.chat.services.prompt_service import prompt_service
 from src.chat.utils.image_utils import sanitize_image_to_size_limit
 from src.database.database import AsyncSessionLocal
@@ -85,6 +86,8 @@ class OpenAIService:
 
             image_copy = dict(image)
             original_size = len(image_bytes)
+            original_mime_type = str(image.get("mime_type", ""))
+            original_source = str(image.get("source", "unknown"))
 
             try:
                 compressed_bytes, compressed_mime_type = sanitize_image_to_size_limit(
@@ -97,13 +100,6 @@ class OpenAIService:
                 if "bytes" in image_copy:
                     image_copy["bytes"] = compressed_bytes
                 image_copy["mime_type"] = compressed_mime_type
-                log.info(
-                    "[OpenAIService] VPS mode image compression applied | index=%s | original_kb=%.2f | compressed_kb=%.2f | mime_type=%s",
-                    idx,
-                    original_size / 1024,
-                    len(compressed_bytes) / 1024,
-                    compressed_mime_type,
-                )
             except Exception as e:
                 if original_size > target_size_bytes:
                     log.warning(
@@ -167,18 +163,7 @@ class OpenAIService:
 
     @staticmethod
     def _build_request_error_log_fields(e: httpx.RequestError) -> Dict[str, str]:
-        req = getattr(e, "request", None)
-        cause = getattr(e, "__cause__", None)
-
-        return {
-            "exc_type": type(e).__name__,
-            "exc_repr": repr(e),
-            "exc_str": str(e) or "<empty>",
-            "cause_type": type(cause).__name__ if cause else "<none>",
-            "cause_repr": repr(cause) if cause else "<none>",
-            "request_method": getattr(req, "method", "<none>") if req else "<none>",
-            "request_url": str(getattr(req, "url", "<none>")) if req else "<none>",
-        }
+        return build_request_error_log_fields(e)
 
     def _log_custom_stream_parse_failure(
         self,
@@ -213,17 +198,6 @@ class OpenAIService:
             log_prefix,
             response_text if response_text else "<empty>",
         )
-
-    # @staticmethod
-    # def _apply_blacklist_notice(
-    #     response: str, blacklist_punishment_active: bool
-    # ) -> str:
-    #     if not blacklist_punishment_active or not response:
-    #         return response
-    #     notice = "(当前在黑名单中，已将消息替换) \n"
-    #     if response.startswith(notice):
-    #         return response
-    #     return f"{notice}{response}"
 
     async def _send_with_network_retry_once(
         self,
@@ -1547,48 +1521,6 @@ class OpenAIService:
                 openai_messages.append(msg_to_append)
 
                 if not tool_calls:
-                    # ========== 以下违禁词检测与表情包限制已注释 ==========
-                    # if content:
-                    #     has_forbidden_phrase = bool(
-                    #         re.search(
-                    #             r"不过话说回来|话说回来|话又说回来|不过话又说回来|不过说真的",
-                    #             content,
-                    #         )
-                    #     )
-                    #     content_len = len(content)
-
-                    #     if has_forbidden_phrase and content_len <= 800:
-                    #         if bad_format_retries < 3:
-                    #             log.warning(
-                    #                 f"[{channel_label}] 检测到违禁词 (尝试 {bad_format_retries + 1}/3)，正在重试..."
-                    #             )
-                    #             openai_messages.append(
-                    #                 {
-                    #                     "role": "user",
-                    #                     "content": "[系统提示] 检测到你使用了“不过说真的|不过话说回来|话说回来|话又说回来”。这是被禁止的。请重新生成回复，去掉这个短语，保持语气自然。",
-                    #                 }
-                    #             )
-                    #             bad_format_retries += 1
-                    #             continue
-                    #         return self._apply_blacklist_notice(
-                    #             "抱歉，我的说话格式一直达不到要求，我是杂鱼",
-                    #             blacklist_punishment_active,
-                    #         )
-                    #     elif has_forbidden_phrase:
-                    #         log.info(
-                    #             f"[{channel_label}] 检测到违禁词，但回复长度为 {content_len} (>800)，按成本优化策略放行。"
-                    #         )
-
-                    # allowed_emoji_names = {"开心","乖巧","害羞","吃瓜","偷笑","裂开","呜呜","收到","打哈欠","得意","点赞","眩晕","疑惑","比心","desuwa","伤心","生气","加油", "好奇","邀请","傲娇","祝福","你好","叹气","投降",}
-                    # removed_emoji_tags: List[str] = []
-
-                    # def _strip_disallowed_emoji_tag(match):
-                    #     emoji_name = match.group(1).strip()
-                    #     if emoji_name in allowed_emoji_names:
-                    #         return match.group(0)
-
-                    #     removed_emoji_tags.append(match.group(0))
-                    #     return ""
 
                     # 保留移除思维链标签的逻辑（不涉及违禁词和表情）
                     if content:
@@ -1620,26 +1552,6 @@ class OpenAIService:
                                 content,
                                 flags=re.DOTALL,
                             )
-
-                        # ========== 表情标签过滤已注释 ==========
-                        # # 进一步增强正则，处理 </tag>、<tag/>、<tag /> 等标签格式
-                        # content = re.sub(
-                        #     r"</?((?!@)[^<>\s/]{1,20})\s*/?>",
-                        #     _strip_disallowed_emoji_tag,
-                        #     content,
-                        # )
-                        # =====================================
-
-                    # ========== 表情标签警告日志已注释 ==========
-                    # if removed_emoji_tags:
-                    #     unique_removed_tags = list(dict.fromkeys(removed_emoji_tags))
-                    #     log.warning(
-                    #         f"[{channel_label}] 检测并剔除非白名单表情标签 | user_id=%s | model=%s | count=%s | removed=%s",
-                    #         user_id,
-                    #         effective_model_name,
-                    #         len(removed_emoji_tags),
-                    #         unique_removed_tags,
-                    #     )
 
                     # 更新 msg_to_append 的 content 为经过思维链清理后的内容
                     msg_to_append["content"] = content

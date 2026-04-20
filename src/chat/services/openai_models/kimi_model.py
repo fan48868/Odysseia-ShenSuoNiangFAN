@@ -18,6 +18,7 @@ from src.chat.services.kimi_key_rotation import (
     KimiKeyRotationService,
     NoAvailableKimiKeyError,
 )
+from src.chat.utils.httpx_error_utils import build_request_error_log_fields
 
 log = logging.getLogger(__name__)
 
@@ -112,18 +113,7 @@ class KimiModelClient:
 
     @staticmethod
     def _build_request_error_log_fields(e: httpx.RequestError) -> Dict[str, str]:
-        req = getattr(e, "request", None)
-        cause = getattr(e, "__cause__", None)
-
-        return {
-            "exc_type": type(e).__name__,
-            "exc_repr": repr(e),
-            "exc_str": str(e) or "<empty>",
-            "cause_type": type(cause).__name__ if cause else "<none>",
-            "cause_repr": repr(cause) if cause else "<none>",
-            "request_method": getattr(req, "method", "<none>") if req else "<none>",
-            "request_url": str(getattr(req, "url", "<none>")) if req else "<none>",
-        }
+        return build_request_error_log_fields(e)
 
     @staticmethod
     def should_enable_web_search(

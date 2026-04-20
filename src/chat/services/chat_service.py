@@ -9,8 +9,12 @@ from typing import Dict, Any, Optional, List
 import discord.abc
 
 # 导入所需的服务
+from src.chat.services.empty_response_retry import (
+    SyntheticRetryRequest,
+    build_empty_response_retry_request,
+)
 from src.chat.services.gemini_service import gemini_service
-from src.chat.services.context_service_test import get_context_service  # 导入测试服务
+from src.chat.services.context_service import get_context_service  # 重要注释context_service_test改了_test
 from src.chat.features.world_book.services.world_book_service import world_book_service
 from src.chat.features.affection.service.affection_service import affection_service
 from src.chat.utils.database import chat_db_manager
@@ -21,20 +25,32 @@ from src.chat.features.chat_settings.services.chat_settings_service import (
 
 log = logging.getLogger(__name__)
 
-# # 黑名单惩戒短语（随机替换用户发言）
-# BLACKLIST_PUNISHMENT_PHRASES = [
-#     "我是杂鱼",
-#     "我是fw",
-#     "我刚刚在放屁",
-#     "我错了",
-# ]
-
+EMPTY_AI_RESPONSE_FALLBACK = "AI服务未返回回复,可能是PVP失败或者内容被截断"
 
 @dataclass
 class GeneratedReply:
     response_text: str
     user_name: str
     user_content_for_memory: str
+
+
+@dataclass
+class PreparedGenerationContext:
+    user_content: str
+    replied_content: str
+    image_data_list: List[Dict[str, Any]]
+    video_data_list: List[Dict[str, Any]]
+    channel_context: List[Dict[str, Any]]
+    world_book_entries: List[Dict[str, Any]]
+    personal_summary: Optional[str]
+    user_profile_data: Optional[Dict[str, Any]]
+    affection_status: Optional[Dict[str, Any]]
+    current_model: str
+    user_id_for_settings: Optional[str]
+    is_blacklisted: bool
+    retrieval_query_text: Optional[str]
+    retrieval_query_embedding: Optional[List[float]]
+    rag_timeout_fallback: bool
 
 
 class ChatService:
@@ -78,13 +94,6 @@ class ChatService:
 
         # 所有前置检查通过，允许处理消息
         return True
-        # # 4. 黑名单检查   
-        # if await chat_db_manager.is_user_blacklisted(author.id, guild_id):
-        #     log.info(
-        #         f"用户 {author.id} 在服务器 {guild_id} 被拉黑，已启用惩戒替换。"
-        #     )
-
-        # return True  #可能错误
 
     async def generate_reply_for_message(
         self,
@@ -104,170 +113,54 @@ class ChatService:
             GeneratedReply: AI 生成结果以及发送成功后执行副作用所需的最小上下文。
         """
         author = message.author
-        guild_id = message.guild.id if message.guild else 0
-
-        user_profile_data = await world_book_service.get_profile_by_discord_id(
-            author.id,
-            user_name=author.display_name,
-        )
-        personal_summary = None
-        if user_profile_data:
-            personal_summary = user_profile_data.get("personal_summary")
 
         user_content = processed_data["user_content"]
-        replied_content = processed_data["replied_content"]
-        image_data_list = processed_data["image_data_list"]
-        video_data_list = processed_data.get("video_data_list", [])
 
         try:
-            is_blacklisted = False
-            if guild_id:
-                is_blacklisted = await chat_db_manager.is_user_blacklisted(
-                    author.id, guild_id
-                )
-
-            # if is_blacklisted:
-            #     punishment_phrase = random.choice(BLACKLIST_PUNISHMENT_PHRASES)
-            #     user_content = punishment_phrase
-            #     replied_content = ""
-            #     image_data_list = []
-            #     video_data_list = []
-            #     processed_data["user_content"] = user_content
-            #     processed_data["replied_content"] = replied_content
-            #     processed_data["image_data_list"] = image_data_list
-            #     processed_data["video_data_list"] = video_data_list
-            #     # log.info(
-            #      #   f"用户 {author.id} 在服务器 {guild_id} 被拉黑，已替换发言为惩戒短语: {punishment_phrase}"
-            #     #)
-
-            # 2. --- 上下文与知识库检索 ---
-            # 获取频道历史上下文
-            # 使用新的测试上下文服务
-            channel_context = (
-                await get_context_service().get_formatted_channel_history_new(
-                    message.channel.id,
-                    author.id,
-                    guild_id,
-                    exclude_message_id=message.id,
-                )
+            prepared_context = await self._prepare_generation_context(
+                message,
+                processed_data,
             )
 
-            # RAG: 从世界书检索相关条目
-            # --- RAG 查询优化 ---
-            # 如果存在回复内容，则将其与用户当前消息合并，为RAG搜索提供更完整的上下文
-            rag_query = user_content
-            if replied_content:
-                # replied_content 已包含 "> [回复 xxx]:" 等格式
-                rag_query = f"{replied_content}\n{user_content}"
-
-            # 在记录 RAG 查询日志前开始计时，用于超时熔断
-            rag_start_time = asyncio.get_running_loop().time()
-            rag_timeout_seconds = 10.0
-
-            # log.info(f"为 RAG 搜索生成的查询: '{rag_query}'")
-
-            # 统一的检索 query（文本+向量）在这里前置生成，供知识库检索与个人记忆检索复用
-            retrieval_query_text: Optional[str] = None
-            retrieval_query_embedding: Optional[List[float]] = None
-            rag_timeout_fallback: bool = False
-
-            async def _run_rag_with_shared_embedding():
-                # 与 WorldBookService 内部的清理逻辑保持一致，确保 embedding 与实际检索 query 对齐
-                from src.chat.services.regex_service import regex_service
-                import re as _re
-
-                clean_query = regex_service.clean_user_input(rag_query)
-                summarized_query = _re.sub(r"<@!?&?\d+>\s*", "", clean_query).strip()
-
-                # 仅在 RAG 可用时生成 embedding；生成失败则传空向量，阻止下游再次调用 embedding API
-                embedding: Optional[List[float]] = None
-                if summarized_query and gemini_service.is_available():
-                    try:
-                        embedding = await gemini_service.generate_embedding(
-                            text=summarized_query, task_type="retrieval_query"
-                        )
-                    except Exception as e:
-                        log.warning(
-                            f"生成 retrieval_query embedding 失败: {e}", exc_info=True
-                        )
-                        embedding = None
-
-                # 用空列表作为“已尝试但失败”的哨兵值：下游服务收到后会直接返回空结果，不再二次调 embedding
-                if not embedding:
-                    embedding = []
-
-                entries = await world_book_service.find_entries(
-                    latest_query=rag_query,  # 使用合并后的查询
-                    user_id=author.id,
-                    guild_id=guild_id,
-                    user_name=author.display_name,
-                    conversation_history=channel_context,
-                    query_embedding=embedding,
-                )
-                return entries, summarized_query, embedding
-
-            try:
-                (
-                    world_book_entries,
-                    retrieval_query_text,
-                    retrieval_query_embedding,
-                ) = await asyncio.wait_for(
-                    _run_rag_with_shared_embedding(),
-                    timeout=rag_timeout_seconds,
-                )
-                rag_elapsed = asyncio.get_running_loop().time() - rag_start_time
-                log.info(f"RAG 搜索完成，耗时 {rag_elapsed:.3f}s。")
-            except asyncio.TimeoutError:
-                rag_elapsed = asyncio.get_running_loop().time() - rag_start_time
-                log.warning(
-                    f"RAG 搜索触发熔断（超时阈值 {rag_timeout_seconds:.1f}s，实际耗时 {rag_elapsed:.3f}s），已强制终止并返回空结果。"
-                )
-                world_book_entries = []
-                retrieval_query_text = None
-                retrieval_query_embedding = None
-                rag_timeout_fallback = True
-
-            # --- 新增：集中获取所有上下文数据 ---
-            affection_status = await affection_service.get_affection_status(author.id)
-
-            # 3. --- 调用AI生成回复 ---
-            # PromptService 内部会处理合并用户消息的逻辑，这里我们总是传递 final_content
-            # 记录发送给AI的核心上下文
-            # --- 获取当前设置的AI模型 ---
-            current_model = await chat_settings_service.get_current_ai_model()
-            log.info(f"当前使用的AI模型: {current_model}")
-
-            # 工具开关已改为全局配置，保留兼容参数但不再按帖主区分。
-            user_id_for_settings: Optional[str] = None
-            log.info("本次消息将使用全局工具开关配置。")
-
-            ai_response = await gemini_service.generate_response(
-                author.id,
-                guild_id,
-                message=user_content,
-                channel=message.channel,
-                replied_message=replied_content,
-                images=image_data_list if image_data_list else None,
-                videos=video_data_list if video_data_list else None,
-                user_name=author.display_name,
-                channel_context=channel_context,
-                world_book_entries=world_book_entries,
-                personal_summary=personal_summary,
-                affection_status=affection_status,
-                user_profile_data=user_profile_data,
+            ai_response = await self._generate_single_ai_response(
+                message=message,
+                prepared_context=prepared_context,
                 guild_name=guild_name,
                 location_name=location_name,
-                model_name=current_model,  # 传递模型名称
-                user_id_for_settings=user_id_for_settings,  # 兼容旧调用链保留
-                blacklist_punishment_active=is_blacklisted,
-                retrieval_query_text=retrieval_query_text,
-                retrieval_query_embedding=retrieval_query_embedding,
-                rag_timeout_fallback=rag_timeout_fallback,
             )
 
-            if not ai_response:
-                log.info(f"AI服务未返回回复，跳过用户 {author.id}。")
-                return None
+            if self._is_empty_ai_response(ai_response):
+                log.info("AI服务首次返回空回复，命中隐藏自动续写重试 | user_id=%s", author.id)
+                retry_request = build_empty_response_retry_request(
+                    user_name=author.display_name,
+                    original_message=prepared_context.user_content,
+                    original_replied_message=prepared_context.replied_content,
+                    original_channel_context=prepared_context.channel_context,
+                    fallback_response_text=EMPTY_AI_RESPONSE_FALLBACK,
+                )
+                log.info("空回复自动续写重试将在 2 秒后开始 | user_id=%s", author.id)
+                await asyncio.sleep(2)
+                log.info("空回复自动续写重试开始 | user_id=%s", author.id)
+                ai_response = await self._generate_single_ai_response(
+                    message=message,
+                    prepared_context=prepared_context,
+                    guild_name=guild_name,
+                    location_name=location_name,
+                    request_override=retry_request,
+                )
+
+                if self._is_empty_ai_response(ai_response):
+                    log.warning(
+                        "空回复自动续写重试失败，最终向用户 %s 回落外显兜底提示。",
+                        author.id,
+                    )
+                    return GeneratedReply(
+                        response_text=EMPTY_AI_RESPONSE_FALLBACK,
+                        user_name=author.display_name,
+                        user_content_for_memory=prepared_context.user_content,
+                    )
+
+                log.info("空回复自动续写重试成功 | user_id=%s", author.id)
 
             # 4. --- 后处理与格式化 ---
             final_response = self._format_ai_response(ai_response)
@@ -284,7 +177,7 @@ class ChatService:
             return GeneratedReply(
                 response_text=final_response,
                 user_name=author.display_name,
-                user_content_for_memory=user_content,
+                user_content_for_memory=prepared_context.user_content,
             )
 
         except Exception as e:
@@ -311,6 +204,231 @@ class ChatService:
         if generated_reply is None:
             return None
         return generated_reply.response_text
+
+    async def _prepare_generation_context(
+        self,
+        message: discord.Message,
+        processed_data: Dict[str, Any],
+    ) -> PreparedGenerationContext:
+        author = message.author
+        guild_id = message.guild.id if message.guild else 0
+
+        user_profile_data = await world_book_service.get_profile_by_discord_id(
+            author.id,
+            user_name=author.display_name,
+        )
+        personal_summary = None
+        if user_profile_data:
+            personal_summary = user_profile_data.get("personal_summary")
+
+        user_content = processed_data["user_content"]
+        replied_content = processed_data["replied_content"]
+        image_data_list = list(processed_data["image_data_list"])
+        video_data_list = list(processed_data.get("video_data_list", []))
+
+        is_blacklisted = False
+        if guild_id:
+            is_blacklisted = await chat_db_manager.is_user_blacklisted(
+                author.id, guild_id
+            )
+
+        if is_blacklisted:
+            punishment_phrase = random.choice(BLACKLIST_PUNISHMENT_PHRASES)
+            user_content = punishment_phrase
+            replied_content = ""
+            image_data_list = []
+            video_data_list = []
+            processed_data["user_content"] = user_content
+            processed_data["replied_content"] = replied_content
+            processed_data["image_data_list"] = image_data_list
+            processed_data["video_data_list"] = video_data_list
+
+        raw_channel_context = await get_context_service().get_formatted_channel_history_new(
+            message.channel.id,
+            author.id,
+            guild_id,
+            exclude_message_id=message.id,
+        )
+        channel_context = (
+            list(raw_channel_context) if isinstance(raw_channel_context, list) else []
+        )
+
+        (
+            world_book_entries,
+            retrieval_query_text,
+            retrieval_query_embedding,
+            rag_timeout_fallback,
+        ) = await self._prepare_rag_context(
+            author_id=author.id,
+            guild_id=guild_id,
+            user_name=author.display_name,
+            user_content=user_content,
+            replied_content=replied_content,
+            channel_context=channel_context,
+        )
+
+        affection_status = await affection_service.get_affection_status(author.id)
+        current_model = await chat_settings_service.get_current_ai_model()
+        log.info(f"当前使用的AI模型: {current_model}")
+
+        user_id_for_settings: Optional[str] = None
+        log.info("本次消息将使用全局工具开关配置。")
+
+        return PreparedGenerationContext(
+            user_content=user_content,
+            replied_content=replied_content,
+            image_data_list=image_data_list,
+            video_data_list=video_data_list,
+            channel_context=channel_context,
+            world_book_entries=world_book_entries,
+            personal_summary=personal_summary,
+            user_profile_data=user_profile_data,
+            affection_status=affection_status,
+            current_model=current_model,
+            user_id_for_settings=user_id_for_settings,
+            is_blacklisted=is_blacklisted,
+            retrieval_query_text=retrieval_query_text,
+            retrieval_query_embedding=retrieval_query_embedding,
+            rag_timeout_fallback=rag_timeout_fallback,
+        )
+
+    async def _prepare_rag_context(
+        self,
+        *,
+        author_id: int,
+        guild_id: int,
+        user_name: str,
+        user_content: str,
+        replied_content: str,
+        channel_context: List[Dict[str, Any]],
+    ) -> tuple[
+        List[Dict[str, Any]],
+        Optional[str],
+        Optional[List[float]],
+        bool,
+    ]:
+        rag_query = user_content
+        if replied_content:
+            rag_query = f"{replied_content}\n{user_content}"
+
+        rag_start_time = asyncio.get_running_loop().time()
+        rag_timeout_seconds = 10.0
+        retrieval_query_text: Optional[str] = None
+        retrieval_query_embedding: Optional[List[float]] = None
+        rag_timeout_fallback = False
+
+        async def _run_rag_with_shared_embedding():
+            from src.chat.services.regex_service import regex_service
+            import re as _re
+
+            clean_query = regex_service.clean_user_input(rag_query)
+            summarized_query = _re.sub(r"<@!?&?\d+>\s*", "", clean_query).strip()
+
+            embedding: Optional[List[float]] = None
+            if summarized_query and gemini_service.is_available():
+                try:
+                    embedding = await gemini_service.generate_embedding(
+                        text=summarized_query, task_type="retrieval_query"
+                    )
+                except Exception as e:
+                    log.warning(
+                        f"生成 retrieval_query embedding 失败: {e}", exc_info=True
+                    )
+                    embedding = None
+
+            if not embedding:
+                embedding = []
+
+            entries = await world_book_service.find_entries(
+                latest_query=rag_query,
+                user_id=author_id,
+                guild_id=guild_id,
+                user_name=user_name,
+                conversation_history=channel_context,
+                query_embedding=embedding,
+            )
+            return entries, summarized_query, embedding
+
+        try:
+            (
+                world_book_entries,
+                retrieval_query_text,
+                retrieval_query_embedding,
+            ) = await asyncio.wait_for(
+                _run_rag_with_shared_embedding(),
+                timeout=rag_timeout_seconds,
+            )
+            rag_elapsed = asyncio.get_running_loop().time() - rag_start_time
+            log.info(f"RAG 搜索完成，耗时 {rag_elapsed:.3f}s。")
+        except asyncio.TimeoutError:
+            rag_elapsed = asyncio.get_running_loop().time() - rag_start_time
+            log.warning(
+                f"RAG 搜索触发熔断（超时阈值 {rag_timeout_seconds:.1f}s，实际耗时 {rag_elapsed:.3f}s），已强制终止并返回空结果。"
+            )
+            world_book_entries = []
+            retrieval_query_text = None
+            retrieval_query_embedding = None
+            rag_timeout_fallback = True
+
+        return (
+            world_book_entries,
+            retrieval_query_text,
+            retrieval_query_embedding,
+            rag_timeout_fallback,
+        )
+
+    async def _generate_single_ai_response(
+        self,
+        *,
+        message: discord.Message,
+        prepared_context: PreparedGenerationContext,
+        guild_name: str,
+        location_name: str,
+        request_override: Optional[SyntheticRetryRequest] = None,
+    ) -> str:
+        request_message = prepared_context.user_content
+        request_replied_message = prepared_context.replied_content
+        request_images = prepared_context.image_data_list
+        request_videos = prepared_context.video_data_list
+        request_channel_context = prepared_context.channel_context
+
+        if request_override is not None:
+            request_message = request_override.message
+            request_replied_message = request_override.replied_message
+            request_images = request_override.images
+            request_videos = request_override.videos
+            request_channel_context = request_override.channel_context
+
+        return await gemini_service.generate_response(
+            message.author.id,
+            message.guild.id if message.guild else 0,
+            message=request_message,
+            channel=message.channel,
+            replied_message=request_replied_message,
+            images=request_images if request_images else None,
+            videos=request_videos if request_videos else None,
+            user_name=message.author.display_name,
+            channel_context=request_channel_context,
+            world_book_entries=prepared_context.world_book_entries,
+            personal_summary=prepared_context.personal_summary,
+            affection_status=prepared_context.affection_status,
+            user_profile_data=prepared_context.user_profile_data,
+            guild_name=guild_name,
+            location_name=location_name,
+            model_name=prepared_context.current_model,
+            user_id_for_settings=prepared_context.user_id_for_settings,
+            blacklist_punishment_active=prepared_context.is_blacklisted,
+            retrieval_query_text=prepared_context.retrieval_query_text,
+            retrieval_query_embedding=prepared_context.retrieval_query_embedding,
+            rag_timeout_fallback=prepared_context.rag_timeout_fallback,
+        )
+
+    def _is_empty_ai_response(self, ai_response: Optional[str]) -> bool:
+        if ai_response is None:
+            return True
+        if isinstance(ai_response, str):
+            return not ai_response.strip()
+        return False
 
     def _format_ai_response(self, ai_response: str) -> str:
         """清理和格式化AI的原始回复。"""

@@ -165,6 +165,27 @@ class PromptService:
 
         return tag_blocks
 
+    @staticmethod
+    def _extract_prompt_tag_content(
+        prompt_text: Optional[str], tag_name: str
+    ) -> Optional[str]:
+        """
+        从最终提示词中提取指定标签的内部文本。
+        """
+        if not prompt_text or not isinstance(prompt_text, str) or not tag_name:
+            return None
+
+        match = re.search(
+            rf"<{re.escape(tag_name)}>(.*?)</{re.escape(tag_name)}>",
+            prompt_text,
+            re.DOTALL,
+        )
+        if not match:
+            return None
+
+        content = (match.group(1) or "").strip()
+        return content or None
+
     def _apply_system_prompt_tag_overrides(
         self,
         base_template: Optional[str],
@@ -199,8 +220,12 @@ class PromptService:
                     f"已为 SYSTEM_PROMPT 应用来自 {source_label} 的标签 '{tag}' 覆盖。"
                 )
             else:
-                log.warning(
-                    f"在 SYSTEM_PROMPT 中未找到来自 {source_label} 的标签: <{tag}>"
+                separator = "" if modified_template.endswith("\n") else "\n"
+                modified_template = (
+                    f"{modified_template}{separator}{replacement}".rstrip() + "\n"
+                )
+                log.info(
+                    f"在 SYSTEM_PROMPT 中未找到来自 {source_label} 的标签: <{tag}>，已自动追加到末尾。"
                 )
 
         return modified_template
@@ -593,6 +618,9 @@ class PromptService:
 
         # 填充核心提示词
         core_prompt = core_prompt_template
+        think_guide_content = self._extract_prompt_tag_content(
+            core_prompt, "think_guide"
+        )
 
         final_conversation.append({"role": "user", "parts": [core_prompt]})
         final_conversation.append({"role": "model", "parts": ["我在线啦，随时开聊！"]})
@@ -1103,6 +1131,15 @@ class PromptService:
                 log.debug("将当前用户输入合并到上一条 'user' 消息中。")
             else:
                 final_conversation.append({"role": "user", "parts": cleaned_user_parts})
+
+            if think_guide_content:
+                final_conversation.append(
+                    {"role": "model", "parts": ["我已了解用户输入"]}
+                )
+                final_conversation.append(
+                    {"role": "user", "parts": [think_guide_content]}
+                )
+                log.debug("检测到 <think_guide>，已在当前用户输入后追加思维链要求。")
 
         if chat_config.DEBUG_CONFIG["LOG_FINAL_CONTEXT"]:
             log.debug(

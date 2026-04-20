@@ -1,8 +1,14 @@
+import os
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import discord
 import pytest
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
+
+from src.chat.services.reply_recovery_manager import reply_recovery_manager
 from src.chat.utils import reliable_message_sender as sender
 
 
@@ -32,6 +38,26 @@ class FakeChannel:
 
     async def send(self, content, nonce=None):
         return SimpleNamespace(id=456)
+
+
+def _build_unknown_message_reply_error() -> discord.HTTPException:
+    return discord.HTTPException(
+        SimpleNamespace(status=400, reason="Bad Request"),
+        {
+            "code": 50035,
+            "message": "Invalid Form Body",
+            "errors": {
+                "message_reference": {
+                    "_errors": [
+                        {
+                            "code": "REFERENCE_UNKNOWN",
+                            "message": "Unknown message",
+                        }
+                    ]
+                }
+            },
+        },
+    )
 
 
 def test_build_delivery_nonce_length():
@@ -118,6 +144,161 @@ async def test_send_text_reply_with_recovery_retries_once_before_enqueue():
     queue = getattr(bot, "_pending_text_deliveries")
     assert len(queue) == 1
     assert queue[0].retry_cycle_count == 0
+
+
+@pytest.mark.asyncio
+async def test_send_text_reply_with_recovery_falls_back_to_channel_send_when_reply_target_missing():
+    bot = FakeBot()
+    channel = FakeChannel()
+    bot._channels[channel.id] = channel
+    message = SimpleNamespace(
+        id=321,
+        channel=channel,
+        author=SimpleNamespace(id=987),
+    )
+
+    async def failing_reply(content, mention_author=True, nonce=None):
+        raise _build_unknown_message_reply_error()
+
+    channel.reply = failing_reply
+    channel.send = AsyncMock(return_value=SimpleNamespace(id=789))
+
+    delivered = await sender.send_text_reply_with_recovery(bot, message, "hello")
+
+    assert delivered is True
+    channel.send.assert_awaited_once()
+    assert channel.send.await_args.args[0] == "<@987>\nhello"
+
+
+@pytest.mark.asyncio
+async def test_send_pending_text_delivery_with_recovery_uses_task_author_for_missing_reply_target():
+    await reply_recovery_manager.clear_for_tests()
+
+    bot = FakeBot()
+    channel = FakeChannel()
+    bot._channels[channel.id] = channel
+    message = SimpleNamespace(
+        id=321,
+        channel=channel,
+        guild=SimpleNamespace(id=654),
+        author=SimpleNamespace(id=987),
+    )
+    task_id = await reply_recovery_manager.register_message_task(message)
+
+    async def failing_reply(content, mention_author=True, nonce=None):
+        raise _build_unknown_message_reply_error()
+
+    channel.reply = failing_reply
+    channel.send = AsyncMock(return_value=SimpleNamespace(id=789))
+
+    delivered = await sender.send_pending_text_delivery_with_recovery(
+        bot,
+        sender.PendingTextDelivery(
+            channel_id=channel.id,
+            content="hello",
+            reply_to_message_id=message.id,
+            mention_author=True,
+            task_id=task_id,
+        ),
+    )
+
+    assert delivered is True
+    channel.send.assert_awaited_once()
+    assert channel.send.await_args.args[0] == "<@987>\nhello"
+
+
+@pytest.mark.asyncio
+async def test_send_pending_text_delivery_with_recovery_confirms_immediately_without_verify(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    await reply_recovery_manager.clear_for_tests()
+
+    bot = FakeBot()
+    channel = FakeChannel()
+    bot._channels[channel.id] = channel
+    message = SimpleNamespace(
+        id=321,
+        channel=channel,
+        guild=SimpleNamespace(id=654),
+        author=SimpleNamespace(id=987),
+    )
+
+    task_id = await reply_recovery_manager.register_message_task(message)
+    attempt_token = await reply_recovery_manager.start_attempt(task_id)
+    assert attempt_token is not None
+    assert (
+        await reply_recovery_manager.begin_delivery(
+            task_id,
+            attempt_token,
+            chunk_total=1,
+        )
+        is True
+    )
+
+    verify_mock = AsyncMock(return_value="confirmed")
+    monkeypatch.setattr(sender, "verify_sent_message", verify_mock)
+
+    delivered = await sender.send_pending_text_delivery_with_recovery(
+        bot,
+        sender.PendingTextDelivery(
+            channel_id=channel.id,
+            content="hello",
+            reply_to_message_id=message.id,
+            mention_author=True,
+            task_id=task_id,
+            chunk_index=0,
+            chunk_total=1,
+            attempt_token=attempt_token,
+        ),
+        apply_side_effects_on_completion=False,
+    )
+
+    assert delivered is True
+    verify_mock.assert_not_awaited()
+
+    snapshot = await reply_recovery_manager.get_task_snapshot(task_id)
+    assert snapshot is not None
+    assert snapshot.task_state == "completed"
+    assert snapshot.confirmed_message_ids == [456]
+
+
+@pytest.mark.asyncio
+async def test_send_pending_text_delivery_with_recovery_requests_immediate_flush_on_enqueue(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    bot = FakeBot()
+    schedule_calls = []
+
+    async def fake_attempt_delivery(*args, **kwargs):
+        return "uncertain"
+
+    async def fake_enqueue(*args, **kwargs):
+        return None
+
+    def fake_schedule_pending_text_delivery_flush(bot_arg, *, reason, immediate=False):
+        schedule_calls.append(
+            {
+                "bot": bot_arg,
+                "reason": reason,
+                "immediate": immediate,
+            }
+        )
+
+    monkeypatch.setattr(sender, "_attempt_delivery", fake_attempt_delivery)
+    monkeypatch.setattr(sender, "enqueue_pending_text_delivery", fake_enqueue)
+    monkeypatch.setattr(
+        sender,
+        "schedule_pending_text_delivery_flush",
+        fake_schedule_pending_text_delivery_flush,
+    )
+
+    delivered = await sender.send_pending_text_delivery_with_recovery(
+        bot,
+        sender.PendingTextDelivery(channel_id=123, content="hello"),
+    )
+
+    assert delivered is False
+    assert any(call["immediate"] is True for call in schedule_calls)
 
 
 @pytest.mark.asyncio

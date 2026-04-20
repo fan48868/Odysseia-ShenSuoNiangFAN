@@ -1440,27 +1440,5 @@ class MemoryCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # @app_commands.command(name="查看并修改记忆", description="查看并编辑你在这个服务器的个人记忆")
-    # async def view_and_edit_memory(self, interaction: discord.Interaction):
-    #     user_id = interaction.user.id
-        
-    #     try:
-    #         current_summary_raw = await _get_personal_summary_raw(user_id)
-    #         current_summary = _prepare_memory_summary_for_view(current_summary_raw)
-                
-    #         view = MemoryView(
-    #             actor_user_id=user_id,
-    #             target_user_id=user_id,
-    #             current_memory=current_summary,
-    #             source_interaction=interaction,
-    #             current_summary_raw=current_summary_raw,
-    #         )
-    #         content = _build_memory_view_content(user_id, current_summary_raw)
-    #         await interaction.response.send_message(content, view=view, ephemeral=True)
-            
-    #     except Exception as e:
-    #         log.error(f"获取用户 {user_id} 记忆失败: {e}", exc_info=True)
-    #         await interaction.response.send_message(f"无法获取记忆: {e}", ephemeral=True)
-
 async def setup(bot):
     await bot.add_cog(MemoryCommands(bot))
