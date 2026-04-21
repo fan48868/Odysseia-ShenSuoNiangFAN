@@ -21,6 +21,7 @@ from src.chat.services.vercel_gateway_provider_selector import (
     ProviderSelection,
 )
 from src.chat.services.moonshot_vision_service import moonshot_vision_service
+from src.chat.utils.database import chat_db_manager
 from src.chat.utils.custom_model_api_keys import (
     get_custom_model_api_key_raw_value,
     persist_custom_model_api_keys_to_file,
@@ -35,6 +36,7 @@ log = logging.getLogger(__name__)
 class CustomModelClient:
     _PRIMARY_API_KEY_ENV_NAME = "CUSTOM_MODEL_API_KEY"
     _LEGACY_API_KEY_ENV_NAME = "CUSTON_MODEL_API_KEY"
+    _TIMEOUT_DETECTION_SETTING_KEY = "custom_model_timeout_detection_enabled"
     _TOOL_CALL_REASONING_PLACEHOLDER = "[tool-call reasoning omitted]"
     """Custom OpenAI 兼容通道客户端：负责配置管理、请求发送与 Custom 专属解析。"""
 
@@ -101,6 +103,30 @@ class CustomModelClient:
             return None
 
         return normalized
+
+    @staticmethod
+    def _normalize_timeout_detection_enabled(raw_value: Optional[str]) -> bool:
+        normalized = str(raw_value or "").strip().lower()
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        return True
+
+    @classmethod
+    def _read_timeout_detection_enabled_setting(cls) -> bool:
+        try:
+            raw_value = chat_db_manager.get_global_setting_sync(
+                cls._TIMEOUT_DETECTION_SETTING_KEY
+            )
+        except Exception as exc:
+            log.warning(
+                "[Custom] 读取网络超时检测开关失败，默认按开启处理: %s",
+                exc,
+                exc_info=True,
+            )
+            return True
+        return cls._normalize_timeout_detection_enabled(raw_value)
 
     @staticmethod
     def _split_api_keys(raw_api_keys: Optional[str]) -> List[str]:
@@ -396,6 +422,7 @@ class CustomModelClient:
         accept_encoding = cls._resolve_accept_encoding(
             os.environ.get("CUSTOM_MODEL_ACCEPT_ENCODING")
         )
+        timeout_detection_enabled = cls._read_timeout_detection_enabled_setting()
         return {
             "base_url": base_url,
             "api_key": api_key,
@@ -411,6 +438,7 @@ class CustomModelClient:
             "gateway_provider_name": gateway_provider_name,
             "stream_idle_timeout_seconds": stream_idle_timeout_seconds,
             "accept_encoding": accept_encoding,
+            "timeout_detection_enabled": timeout_detection_enabled,
         }
 
     def refresh_from_env(self) -> Dict[str, Any]:
@@ -437,6 +465,9 @@ class CustomModelClient:
             runtime_config["stream_idle_timeout_seconds"]
         )
         self.accept_encoding = runtime_config.get("accept_encoding")
+        self.timeout_detection_enabled = bool(
+            runtime_config.get("timeout_detection_enabled", True)
+        )
         return runtime_config
 
     @staticmethod
@@ -1626,17 +1657,25 @@ class CustomModelClient:
         request_payload["stream"] = True
         request_payload["thinking"] = {"type": "disabled"}
         request_payload.pop("chat_template_kwargs", None)
-        network_timeout_seconds = 10.0
-        first_token_timeout_seconds = 20
-        idle_timeout_seconds = float(
-            runtime_config.get("stream_idle_timeout_seconds", 5.0) or 5.0
+        timeout_detection_enabled = bool(
+            runtime_config.get("timeout_detection_enabled", True)
         )
-        request_timeout = httpx.Timeout(
-            connect=network_timeout_seconds,
-            read=network_timeout_seconds,
-            write=max(network_timeout_seconds, 10.0),
-            pool=network_timeout_seconds,
-        )
+        network_timeout_seconds: Optional[float] = None
+        first_token_timeout_seconds: Optional[float] = None
+        idle_timeout_seconds: Optional[float] = None
+        request_timeout: Optional[httpx.Timeout] = None
+        if timeout_detection_enabled:
+            network_timeout_seconds = 10.0
+            first_token_timeout_seconds = 20.0
+            idle_timeout_seconds = float(
+                runtime_config.get("stream_idle_timeout_seconds", 5.0) or 5.0
+            )
+            request_timeout = httpx.Timeout(
+                connect=network_timeout_seconds,
+                read=network_timeout_seconds,
+                write=max(network_timeout_seconds, 10.0),
+                pool=network_timeout_seconds,
+            )
         headers = {
             "Content-Type": "application/json",
         }
@@ -1697,7 +1736,8 @@ class CustomModelClient:
             if not isinstance(gateway_options, dict):
                 gateway_options = {}
 
-            provider_timeouts = gateway_options.get("providerTimeouts")
+            existing_provider_timeouts = gateway_options.get("providerTimeouts")
+            provider_timeouts = existing_provider_timeouts
             if not isinstance(provider_timeouts, dict):
                 provider_timeouts = {}
 
@@ -1705,7 +1745,7 @@ class CustomModelClient:
             if not isinstance(byok_timeouts, dict):
                 byok_timeouts = {}
 
-            if gateway_provider_timeout_ms > 0:
+            if timeout_detection_enabled and gateway_provider_timeout_ms > 0:
                 if selected_gateway_provider is not None:
                     selected_timeout = byok_timeouts.get(
                         selected_gateway_provider.provider_name,
@@ -1734,8 +1774,11 @@ class CustomModelClient:
                     gateway_options["order"] = selected_only
                     provider_order_injected = True
 
-            provider_timeouts["byok"] = byok_timeouts
-            gateway_options["providerTimeouts"] = provider_timeouts
+            if timeout_detection_enabled:
+                provider_timeouts["byok"] = byok_timeouts
+                gateway_options["providerTimeouts"] = provider_timeouts
+            elif not isinstance(existing_provider_timeouts, dict):
+                gateway_options.pop("providerTimeouts", None)
             provider_options["gateway"] = gateway_options
             request_payload["providerOptions"] = provider_options
 
@@ -1897,30 +1940,54 @@ class CustomModelClient:
                     sse_line_samples: List[str] = []
 
                     while True:
-                        now = loop.time()
-                        if received_first_meaningful_token:
-                            timeout_seconds = max(
-                                idle_timeout_seconds
-                                - (now - last_meaningful_output_at),
-                                0.0,
-                            )
-                        else:
-                            timeout_seconds = max(
-                                first_token_timeout_seconds - (now - stream_started_at),
-                                0.0,
-                            )
-
-                        if timeout_seconds <= 0:
-                            elapsed_total_seconds = now - request_started_at
+                        if timeout_detection_enabled:
+                            now = loop.time()
                             if received_first_meaningful_token:
+                                timeout_seconds = max(
+                                    float(idle_timeout_seconds or 0.0)
+                                    - (now - last_meaningful_output_at),
+                                    0.0,
+                                )
+                            else:
+                                timeout_seconds = max(
+                                    float(first_token_timeout_seconds or 0.0)
+                                    - (now - stream_started_at),
+                                    0.0,
+                                )
+
+                            if timeout_seconds <= 0:
+                                elapsed_total_seconds = now - request_started_at
+                                if received_first_meaningful_token:
+                                    log.warning(
+                                        "[Custom] Stream idle timeout | attempt=%s/%s | elapsed=%.2fs | "
+                                        "idle_timeout=%.1fs | body_lines=%s | meaningful_lines=%s | "
+                                        "samples=%s | model=%s | url=%s",
+                                        attempt + 1,
+                                        max_key_attempts,
+                                        elapsed_total_seconds,
+                                        idle_timeout_seconds,
+                                        body_line_count,
+                                        meaningful_line_count,
+                                        sse_line_samples,
+                                        str(request_payload.get("model", "")),
+                                        api_url,
+                                    )
+                                    raise httpx.ReadTimeout(
+                                        (
+                                            "[Custom] Stream idle timeout: no meaningful output "
+                                            f"received within {float(idle_timeout_seconds or 0.0):.1f}s"
+                                        ),
+                                        request=current_response.request,
+                                    )
+
                                 log.warning(
-                                    "[Custom] Stream idle timeout | attempt=%s/%s | elapsed=%.2fs | "
-                                    "idle_timeout=%.1fs | body_lines=%s | meaningful_lines=%s | "
+                                    "[Custom] First token timeout | attempt=%s/%s | elapsed=%.2fs | "
+                                    "first_token_timeout=%.1fs | body_lines=%s | meaningful_lines=%s | "
                                     "samples=%s | model=%s | url=%s",
                                     attempt + 1,
                                     max_key_attempts,
                                     elapsed_total_seconds,
-                                    idle_timeout_seconds,
+                                    first_token_timeout_seconds,
                                     body_line_count,
                                     meaningful_line_count,
                                     sse_line_samples,
@@ -1929,52 +1996,52 @@ class CustomModelClient:
                                 )
                                 raise httpx.ReadTimeout(
                                     (
-                                        "[Custom] Stream idle timeout: no meaningful output "
-                                        f"received within {idle_timeout_seconds:.1f}s"
+                                        "[Custom] First token timeout: no meaningful output "
+                                        f"received within {float(first_token_timeout_seconds or 0.0):.1f}s"
                                     ),
                                     request=current_response.request,
                                 )
 
-                            log.warning(
-                                "[Custom] First token timeout | attempt=%s/%s | elapsed=%.2fs | "
-                                "first_token_timeout=%.1fs | body_lines=%s | meaningful_lines=%s | "
-                                "samples=%s | model=%s | url=%s",
-                                attempt + 1,
-                                max_key_attempts,
-                                elapsed_total_seconds,
-                                first_token_timeout_seconds,
-                                body_line_count,
-                                meaningful_line_count,
-                                sse_line_samples,
-                                str(request_payload.get("model", "")),
-                                api_url,
-                            )
-                            raise httpx.ReadTimeout(
-                                (
-                                    "[Custom] First token timeout: no meaningful output "
-                                    f"received within {first_token_timeout_seconds:.1f}s"
-                                ),
-                                request=current_response.request,
-                            )
+                            try:
+                                line = await asyncio.wait_for(
+                                    line_iterator.__anext__(),
+                                    timeout=timeout_seconds,
+                                )
+                            except StopAsyncIteration:
+                                break
+                            except asyncio.TimeoutError as exc:
+                                elapsed_total_seconds = loop.time() - request_started_at
+                                if received_first_meaningful_token:
+                                    log.warning(
+                                        "[Custom] Stream idle timeout | attempt=%s/%s | elapsed=%.2fs | "
+                                        "idle_timeout=%.1fs | body_lines=%s | meaningful_lines=%s | "
+                                        "samples=%s | model=%s | url=%s",
+                                        attempt + 1,
+                                        max_key_attempts,
+                                        elapsed_total_seconds,
+                                        idle_timeout_seconds,
+                                        body_line_count,
+                                        meaningful_line_count,
+                                        sse_line_samples,
+                                        str(request_payload.get("model", "")),
+                                        api_url,
+                                    )
+                                    raise httpx.ReadTimeout(
+                                        (
+                                            "[Custom] Stream idle timeout: no meaningful output "
+                                            f"received within {float(idle_timeout_seconds or 0.0):.1f}s"
+                                        ),
+                                        request=current_response.request,
+                                    ) from exc
 
-                        try:
-                            line = await asyncio.wait_for(
-                                line_iterator.__anext__(),
-                                timeout=timeout_seconds,
-                            )
-                        except StopAsyncIteration:
-                            break
-                        except asyncio.TimeoutError as exc:
-                            elapsed_total_seconds = loop.time() - request_started_at
-                            if received_first_meaningful_token:
                                 log.warning(
-                                    "[Custom] Stream idle timeout | attempt=%s/%s | elapsed=%.2fs | "
-                                    "idle_timeout=%.1fs | body_lines=%s | meaningful_lines=%s | "
+                                    "[Custom] First token timeout | attempt=%s/%s | elapsed=%.2fs | "
+                                    "first_token_timeout=%.1fs | body_lines=%s | meaningful_lines=%s | "
                                     "samples=%s | model=%s | url=%s",
                                     attempt + 1,
                                     max_key_attempts,
                                     elapsed_total_seconds,
-                                    idle_timeout_seconds,
+                                    first_token_timeout_seconds,
                                     body_line_count,
                                     meaningful_line_count,
                                     sse_line_samples,
@@ -1983,33 +2050,16 @@ class CustomModelClient:
                                 )
                                 raise httpx.ReadTimeout(
                                     (
-                                        "[Custom] Stream idle timeout: no meaningful output "
-                                        f"received within {idle_timeout_seconds:.1f}s"
+                                        "[Custom] First token timeout: no meaningful output "
+                                        f"received within {float(first_token_timeout_seconds or 0.0):.1f}s"
                                     ),
                                     request=current_response.request,
                                 ) from exc
-
-                            log.warning(
-                                "[Custom] First token timeout | attempt=%s/%s | elapsed=%.2fs | "
-                                "first_token_timeout=%.1fs | body_lines=%s | meaningful_lines=%s | "
-                                "samples=%s | model=%s | url=%s",
-                                attempt + 1,
-                                max_key_attempts,
-                                elapsed_total_seconds,
-                                first_token_timeout_seconds,
-                                body_line_count,
-                                meaningful_line_count,
-                                sse_line_samples,
-                                str(request_payload.get("model", "")),
-                                api_url,
-                            )
-                            raise httpx.ReadTimeout(
-                                (
-                                    "[Custom] First token timeout: no meaningful output "
-                                    f"received within {first_token_timeout_seconds:.1f}s"
-                                ),
-                                request=current_response.request,
-                            ) from exc
+                        else:
+                            try:
+                                line = await line_iterator.__anext__()
+                            except StopAsyncIteration:
+                                break
 
                         body_lines.append(line)
                         body_line_count += 1
@@ -2041,7 +2091,9 @@ class CustomModelClient:
                             last_meaningful_output_at = loop.time()
 
                         if (
-                            is_vercel_gateway
+                            timeout_detection_enabled
+                            and idle_timeout_seconds is not None
+                            and is_vercel_gateway
                             and first_token_at
                             and (now - first_token_at) > 15.0
                         ):
@@ -2128,8 +2180,9 @@ class CustomModelClient:
 
                 log.warning(
                     "[Custom] Stream request error | attempt=%s/%s | phase=%s | elapsed=%.2fs | "
-                    "net_timeout(connect/read/write/pool)=%.1f/%.1f/%.1f/%.1f | "
-                    "first_token_timeout=%.1fs | idle_timeout=%.1fs | "
+                    "timeout_detection_enabled=%s | "
+                    "net_timeout(connect/read/write/pool)=%s/%s/%s/%s | "
+                    "first_token_timeout=%s | idle_timeout=%s | "
                     "request_accept_encoding=%s | response_content_encoding=%s | "
                     "response_transfer_encoding=%s | "
                     "received_first_meaningful_token=%s | body_lines=%s | meaningful_lines=%s | "
@@ -2140,10 +2193,27 @@ class CustomModelClient:
                     max_key_attempts,
                     stream_phase,
                     elapsed_total_seconds,
-                    request_timeout.connect,
-                    request_timeout.read,
-                    request_timeout.write,
-                    request_timeout.pool,
+                    timeout_detection_enabled,
+                    (
+                        f"{request_timeout.connect:.1f}s"
+                        if request_timeout is not None
+                        else "disabled"
+                    ),
+                    (
+                        f"{request_timeout.read:.1f}s"
+                        if request_timeout is not None
+                        else "disabled"
+                    ),
+                    (
+                        f"{request_timeout.write:.1f}s"
+                        if request_timeout is not None
+                        else "disabled"
+                    ),
+                    (
+                        f"{request_timeout.pool:.1f}s"
+                        if request_timeout is not None
+                        else "disabled"
+                    ),
                     first_token_timeout_seconds,
                     idle_timeout_seconds,
                     headers.get("Accept-Encoding", "<httpx-default>"),
@@ -2183,6 +2253,7 @@ class CustomModelClient:
             "used_key_tail": self._mask_key_tail(api_key),
             "used_model_name": str(request_payload.get("model", "")),
             "stream_enabled": used_streaming,
+            "timeout_detection_enabled": timeout_detection_enabled,
             "stream_idle_timeout_seconds": idle_timeout_seconds,
             "selected_gateway_provider": (
                 selected_gateway_provider.provider_name

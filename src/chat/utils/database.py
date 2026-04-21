@@ -1019,6 +1019,12 @@ class ChatDatabaseManager:
         row = await self._execute(self._db_transaction, query, (key,), fetch="one")
         return row["value"] if row else None
 
+    def get_global_setting_sync(self, key: str) -> Optional[str]:
+        """同步获取一个全局设置的值。适用于当前不方便进入异步上下文的运行时逻辑。"""
+        query = "SELECT value FROM global_settings WHERE key = ?"
+        row = self._db_transaction(query, (key,), fetch="one")
+        return row["value"] if row else None
+
     async def set_global_setting(self, key: str, value: str) -> None:
         """设置一个全局设置的值。"""
         query = """

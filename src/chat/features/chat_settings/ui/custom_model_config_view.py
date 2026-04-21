@@ -410,8 +410,45 @@ class CustomModelConfigView(_OwnedView):
         self.settings_service = settings_service
         self.preset_store = preset_store or CustomModelPresetStore()
         self.preset_paginator: Optional[PaginatedSelect] = None
+        self.timeout_detection_enabled = (
+            self._get_timeout_detection_enabled_sync()
+        )
         self._create_preset_paginator()
         self._rebuild_items()
+
+    def _get_timeout_detection_enabled_sync(self) -> bool:
+        getter = getattr(
+            self.settings_service,
+            "get_custom_model_timeout_detection_enabled_sync",
+            None,
+        )
+        if not callable(getter):
+            return True
+
+        try:
+            value = getter()
+        except Exception as exc:
+            log.warning("同步读取 custom 模型网络超时检测开关失败，默认按开启处理: %s", exc)
+            return True
+        return bool(value) if isinstance(value, bool) else True
+
+    async def _refresh_timeout_detection_enabled(self) -> None:
+        getter = getattr(
+            self.settings_service,
+            "get_custom_model_timeout_detection_enabled",
+            None,
+        )
+        if callable(getter):
+            try:
+                self.timeout_detection_enabled = bool(await getter())
+                return
+            except Exception as exc:
+                log.warning(
+                    "异步读取 custom 模型网络超时检测开关失败，回退到同步读取: %s",
+                    exc,
+                    exc_info=True,
+                )
+        self.timeout_detection_enabled = self._get_timeout_detection_enabled_sync()
 
     def _create_preset_paginator(self) -> None:
         presets = self.preset_store.list_presets()
@@ -458,6 +495,19 @@ class CustomModelConfigView(_OwnedView):
         refresh_btn.callback = self.on_refresh
         self.add_item(refresh_btn)
 
+        timeout_toggle_btn = Button(
+            label=f"网络超时检测：{'开' if self.timeout_detection_enabled else '关'}",
+            style=(
+                ButtonStyle.green
+                if self.timeout_detection_enabled
+                else ButtonStyle.red
+            ),
+            custom_id="custom_model_timeout_detection_toggle",
+            row=0,
+        )
+        timeout_toggle_btn.callback = self.on_toggle_timeout_detection
+        self.add_item(timeout_toggle_btn)
+
         if self.preset_paginator and self.preset_paginator.options:
             preset_select = self.preset_paginator.create_select(row=1)
             preset_select.max_values = 1
@@ -465,6 +515,27 @@ class CustomModelConfigView(_OwnedView):
             self.add_item(preset_select)
 
     async def on_refresh(self, interaction: Interaction) -> None:
+        await self._refresh_timeout_detection_enabled()
+        self._rebuild_items()
+        await interaction.response.edit_message(view=self)
+
+    async def on_toggle_timeout_detection(self, interaction: Interaction) -> None:
+        setter = getattr(
+            self.settings_service,
+            "set_custom_model_timeout_detection_enabled",
+            None,
+        )
+        new_state = not self.timeout_detection_enabled
+
+        if callable(setter):
+            await setter(new_state)
+        else:
+            await self.settings_service.db_manager.set_global_setting(
+                "custom_model_timeout_detection_enabled",
+                "true" if new_state else "false",
+            )
+
+        self.timeout_detection_enabled = new_state
         self._rebuild_items()
         await interaction.response.edit_message(view=self)
 
