@@ -578,7 +578,7 @@ class AIChatCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # ================== 软软专属极简防线 ==================
+        # ================== 软软专属极简防线 重要 ==================
         # 如果不是管理员的 ID，就要接受限流的制裁啦！
         if message.author.id not in config.DEVELOPER_USER_IDS:
             global _global_message_timestamps
