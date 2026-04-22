@@ -1,9 +1,11 @@
-from google.genai import types
-import discord
+import asyncio
 import inspect
+import json
+import logging
 from typing import Optional, Dict, Callable, Any, List, Tuple
 
-import logging
+import discord
+from google.genai import types
 
 from src.chat.config.chat_config import HIDDEN_TOOLS
 from src.chat.features.tools.services.user_tool_settings_service import (
@@ -11,6 +13,8 @@ from src.chat.features.tools.services.user_tool_settings_service import (
 )
 
 log = logging.getLogger(__name__)
+
+_DUPLICATE_TOOL_CALL_MESSAGE = "你已调用过这个工具了，请根据结果生成回复"
 
 
 class ToolService:
@@ -39,9 +43,61 @@ class ToolService:
         self.bot = bot
         self.tool_map = tool_map
         self.tool_declarations = tool_declarations
+        self._last_completed_tool_calls: Dict[str, Dict[str, Any]] = {}
+        self._tool_call_state_lock = asyncio.Lock()
         log.info(
             f"ToolService 已使用 {len(tool_map)} 个工具进行初始化: {list(tool_map.keys())}"
         )
+
+    @staticmethod
+    def _serialize_tool_args(tool_args: Dict[str, Any]) -> str:
+        """将模型原始参数稳定序列化，用于比较“是否完全相同”。"""
+        return json.dumps(tool_args, ensure_ascii=False, sort_keys=True, default=str)
+
+    @classmethod
+    def _build_tool_call_signature(cls, tool_name: str, tool_args: Dict[str, Any]) -> str:
+        return f"{tool_name}:{cls._serialize_tool_args(tool_args)}"
+
+    @staticmethod
+    def _build_tool_call_scope_key(
+        channel: Optional[discord.TextChannel], user_id: Optional[int]
+    ) -> str:
+        channel_id = getattr(channel, "id", None)
+        guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        return f"guild:{guild_id}|channel:{channel_id}|user:{user_id}"
+
+    async def _check_duplicate_tool_call(
+        self, scope_key: str, tool_name: str, tool_signature: str
+    ) -> bool:
+        """
+        仅当“上一次已完成调用”成功执行，且工具名与原始参数完全一致时，
+        才拒绝本次调用。
+        """
+        async with self._tool_call_state_lock:
+            last_call = self._last_completed_tool_calls.get(scope_key)
+            is_duplicate = bool(
+                last_call
+                and last_call.get("succeeded") is True
+                and last_call.get("tool_name") == tool_name
+                and last_call.get("signature") == tool_signature
+            )
+            if is_duplicate:
+                self._last_completed_tool_calls[scope_key] = {
+                    "tool_name": tool_name,
+                    "signature": tool_signature,
+                    "succeeded": False,
+                }
+            return is_duplicate
+
+    async def _remember_completed_tool_call(
+        self, scope_key: str, tool_name: str, tool_signature: str, succeeded: bool
+    ) -> None:
+        async with self._tool_call_state_lock:
+            self._last_completed_tool_calls[scope_key] = {
+                "tool_name": tool_name,
+                "signature": tool_signature,
+                "succeeded": succeeded,
+            }
 
     async def get_dynamic_tools_for_context(
         self, user_id_for_settings: Optional[str] = None
@@ -130,6 +186,17 @@ class ToolService:
             一个格式化为 FunctionResponse 的 Part 对象，其中包含工具的输出。
         """
         tool_name = tool_call.name
+        original_tool_args: Dict[str, Any] = (
+            {key: value for key, value in tool_call.args.items()}
+            if getattr(tool_call, "args", None)
+            else {}
+        )
+        tool_signature = (
+            self._build_tool_call_signature(tool_name, original_tool_args)
+            if tool_name
+            else ""
+        )
+        scope_key = self._build_tool_call_scope_key(channel, user_id)
         if log_detailed:
             log.info(f"--- [工具执行流程]: 准备执行 '{tool_name}' ---")
 
@@ -144,6 +211,9 @@ class ToolService:
 
         if not tool_function:
             log.error(f"找不到工具 '{tool_name}' 的实现。")
+            await self._remember_completed_tool_call(
+                scope_key, tool_name, tool_signature, succeeded=False
+            )
             return types.Part.from_function_response(
                 name=tool_name, response={"error": f"Tool '{tool_name}' not found."}
             )
@@ -151,6 +221,9 @@ class ToolService:
         try:
             if not await self.is_tool_globally_enabled(tool_name):
                 log.info("工具 '%s' 当前已全局关闭，拒绝执行。", tool_name)
+                await self._remember_completed_tool_call(
+                    scope_key, tool_name, tool_signature, succeeded=False
+                )
                 return types.Part.from_function_response(
                     name=tool_name,
                     response={"error": f"工具 '{tool_name}' 当前已被全局关闭。"},
@@ -159,12 +232,17 @@ class ToolService:
             log.error("检查全局工具设置时出错: %s", e, exc_info=True)
 
         try:
+            if await self._check_duplicate_tool_call(
+                scope_key, tool_name, tool_signature
+            ):
+                log.info("检测到连续重复工具调用，已拦截 '%s'。", tool_name)
+                return types.Part.from_function_response(
+                    name=tool_name,
+                    response={"result": _DUPLICATE_TOOL_CALL_MESSAGE},
+                )
+
             # 步骤 1: 从模型响应中提取参数
-            tool_args: Dict[str, Any] = (
-                {key: value for key, value in tool_call.args.items()}
-                if tool_call.args
-                else {}
-            )
+            tool_args: Dict[str, Any] = dict(original_tool_args)
             if log_detailed:
                 log.info(f"模型提供的参数: {tool_args}")
 
@@ -247,6 +325,9 @@ class ToolService:
 
             # 步骤 5: 执行工具函数
             result = await tool_function(**tool_args)
+            await self._remember_completed_tool_call(
+                scope_key, tool_name, tool_signature, succeeded=True
+            )
             if log_detailed:
                 log.info(f"工具 '{tool_name}' 执行完毕。")
 
@@ -279,6 +360,9 @@ class ToolService:
 
         except Exception as e:
             log.error(f"执行工具 '{tool_name}' 时发生意外错误。", exc_info=True)
+            await self._remember_completed_tool_call(
+                scope_key, tool_name, tool_signature, succeeded=False
+            )
             return types.Part.from_function_response(
                 name=tool_name,
                 response={

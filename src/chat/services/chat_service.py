@@ -110,15 +110,12 @@ class ChatService:
     TEXT_ATTACHMENT_MAX_CHARS = 60000
     TEXT_ATTACHMENT_TIMEOUT_SECONDS = 15
     TEXT_ATTACHMENT_MAX_COUNT = 2
-    TEXT_ATTACHMENT_FALLBACK_ADMIN_USER_IDS = {1449321391412215908}
     TEXT_ATTACHMENT_TRUNCATION_NOTICE = (
         "\n...[由于长度安全限制，剩余内容已被丢弃]..."
     )
 
     def _is_text_attachment_allowed_for_user(self, user_id: int) -> bool:
-        return user_id in (
-            config.DEVELOPER_USER_IDS | self.TEXT_ATTACHMENT_FALLBACK_ADMIN_USER_IDS
-        )
+        return user_id in config.DEVELOPER_USER_IDS  # 目前仅允许开发者用户使用文本附件功能
 
     def _is_supported_text_attachment(self, attachment: discord.Attachment) -> bool:
         content_type = (attachment.content_type or "").lower()

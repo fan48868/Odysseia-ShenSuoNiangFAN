@@ -10,6 +10,9 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+import time
+_global_message_timestamps = []
+
 from src import config
 from src.chat.config import chat_config
 from src.chat.config.chat_config import CHAT_ENABLED, MESSAGE_SETTINGS
@@ -575,6 +578,23 @@ class AIChatCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        # ================== 软软专属极简防线 ==================
+        # 如果不是管理员的 ID，就要接受限流的制裁啦！
+        if message.author.id not in config.DEVELOPER_USER_IDS:
+            global _global_message_timestamps
+            current_time = time.time()
+            
+            # 清理：把距离现在超过 60 秒的旧记录统统烧掉
+            _global_message_timestamps = [ts for ts in _global_message_timestamps if current_time - ts <= 60]
+            
+            # 判断：如果清理完之后，最近 60 秒内还有 >= 3 条？大门锁死，无情拦截！
+            if len(_global_message_timestamps) >= 3:
+                return  # 直接拦截退出，后面的全都不执行，坚决不浪费一滴 API！
+                
+            # 如果没满 3 条，就把当前的时间戳记在小本本上，然后放行！
+            _global_message_timestamps.append(current_time)
+        # ====================================================
+        # 从这里往下都是你原本的代码，顺着接下去，千万别删哦！        
         priority_marked = False
         if not CHAT_ENABLED:
             return

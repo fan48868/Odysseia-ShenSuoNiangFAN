@@ -10,6 +10,26 @@ from src import config
 
 log = logging.getLogger(__name__)
 
+CUSTOM_MODEL_TIMEOUT_DETECTION_ENABLED_KEY = (
+    "custom_model_timeout_detection_enabled"
+)
+
+
+def _normalize_global_boolean_toggle(
+    raw_value: Optional[str | bool], *, default: bool = True
+) -> bool:
+    if isinstance(raw_value, bool):
+        return raw_value
+    if raw_value is None:
+        return default
+
+    normalized = str(raw_value).strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    return default
+
 
 class ChatSettingsService:
     """封装聊天设置相关的所有业务逻辑。"""
@@ -95,6 +115,33 @@ class ChatSettingsService:
         """设置机器人私信功能的全局开关。"""
         await self.db_manager.set_global_setting(
             "global_dm_enabled", "true" if enabled else "false"
+        )
+
+    async def get_custom_model_timeout_detection_enabled(self) -> bool:
+        """获取 custom 模型网络超时检测总开关。默认开启。"""
+        value = await self.db_manager.get_global_setting(
+            CUSTOM_MODEL_TIMEOUT_DETECTION_ENABLED_KEY
+        )
+        return _normalize_global_boolean_toggle(value, default=True)
+
+    def get_custom_model_timeout_detection_enabled_sync(self) -> bool:
+        """同步获取 custom 模型网络超时检测总开关。默认开启。"""
+        getter = getattr(self.db_manager, "get_global_setting_sync", None)
+        if not callable(getter):
+            return True
+
+        try:
+            value = getter(CUSTOM_MODEL_TIMEOUT_DETECTION_ENABLED_KEY)
+        except Exception as exc:
+            log.warning("同步读取 custom 模型网络超时检测开关失败，默认按开启处理: %s", exc)
+            return True
+        return _normalize_global_boolean_toggle(value, default=True)
+
+    async def set_custom_model_timeout_detection_enabled(self, enabled: bool) -> None:
+        """设置 custom 模型网络超时检测总开关。"""
+        await self.db_manager.set_global_setting(
+            CUSTOM_MODEL_TIMEOUT_DETECTION_ENABLED_KEY,
+            "true" if enabled else "false",
         )
 
     async def get_effective_channel_config(

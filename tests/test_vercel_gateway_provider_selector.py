@@ -11,6 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from src.chat.features.chat_settings.ui.vercel_gateway_settings_view import (
     VercelGatewayProvidersView,
 )
+from src.chat.services.openai_models import custom_model as custom_model_module
 from src.chat.services.openai_models.custom_model import CustomModelClient
 from src.chat.services.vercel_gateway_provider_selector import (
     VercelGatewayProviderSelectorService,
@@ -46,6 +47,7 @@ def _build_runtime_config(
     gateway_provider_name: str = "",
     gateway_provider_timeout_ms: int = 4000,
     accept_encoding: Optional[str] = "identity",
+    timeout_detection_enabled: bool = True,
 ) -> Dict[str, Any]:
     return {
         "base_url": base_url,
@@ -62,6 +64,7 @@ def _build_runtime_config(
         "gateway_provider_name": gateway_provider_name,
         "stream_idle_timeout_seconds": 5.0,
         "accept_encoding": accept_encoding,
+        "timeout_detection_enabled": timeout_detection_enabled,
     }
 
 
@@ -306,6 +309,40 @@ async def test_custom_model_send_manual_test_retry_reuses_same_provider_and_pres
         "bedrock",
         "fireworks",
     ]
+
+
+@pytest.mark.asyncio
+async def test_custom_model_send_skips_timeout_injection_when_detection_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = CustomModelClient()
+    captured_payloads: List[Dict[str, Any]] = []
+
+    async def _forbidden_wait_for(awaitable, timeout):
+        raise AssertionError("timeout detection disabled 时不应调用 asyncio.wait_for")
+
+    monkeypatch.setattr(custom_model_module.asyncio, "wait_for", _forbidden_wait_for)
+
+    def success_handler(request: httpx.Request) -> httpx.Response:
+        _capture_request_payload(request, captured_payloads)
+        return _build_sse_response(request)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(success_handler)
+    ) as success_client:
+        result = await client.send(
+            http_client=success_client,
+            payload={"model": "moonshotai/kimi-k2.5", "messages": []},
+            runtime_config=_build_runtime_config(timeout_detection_enabled=False),
+            logical_request_id="no-timeout-detection",
+            is_final_network_attempt=True,
+        )
+
+    gateway_payload = captured_payloads[0]["providerOptions"]["gateway"]
+    assert "providerTimeouts" not in gateway_payload
+    assert gateway_payload["only"]
+    assert result["timeout_detection_enabled"] is False
+    assert result["stream_idle_timeout_seconds"] is None
 
 
 @pytest.mark.asyncio

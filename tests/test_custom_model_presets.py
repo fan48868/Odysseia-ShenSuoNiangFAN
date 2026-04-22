@@ -154,26 +154,47 @@ async def test_custom_model_view_builds_buttons_from_presets(
     store = CustomModelPresetStore(base_dir=str(tmp_path))
     store.create_preset(name="预设A", settings=_build_settings(model_name="a"))
     store.create_preset(name="预设B", settings=_build_settings(model_name="b"))
+    settings_service = MagicMock()
+    settings_service.get_custom_model_timeout_detection_enabled_sync.return_value = True
 
     empty_view = custom_model_view_module.CustomModelConfigView(
         opener_user_id=1,
-        settings_service=MagicMock(),
+        settings_service=settings_service,
         preset_store=CustomModelPresetStore(base_dir=str(tmp_path / "empty")),
     )
     assert [item.label for item in empty_view.children] == [
         "(可选) 配置 custom 模型参数",
         "刷新",
+        "网络超时检测：开",
     ]
 
     filled_view = custom_model_view_module.CustomModelConfigView(
         opener_user_id=1,
-        settings_service=MagicMock(),
+        settings_service=settings_service,
         preset_store=store,
     )
-    assert len(filled_view.children) == 3
+    assert len(filled_view.children) == 4
     assert filled_view.children[0].label == "(可选) 配置 custom 模型参数"
     assert filled_view.children[1].label == "刷新"
-    assert [option.label for option in filled_view.children[2].options] == ["预设A", "预设B"]
+    assert filled_view.children[2].label == "网络超时检测：开"
+    assert [option.label for option in filled_view.children[3].options] == ["预设A", "预设B"]
+
+
+@pytest.mark.asyncio
+async def test_custom_model_view_renders_timeout_toggle_off_state(
+    tmp_path: Path, custom_model_view_module
+):
+    settings_service = MagicMock()
+    settings_service.get_custom_model_timeout_detection_enabled_sync.return_value = False
+
+    view = custom_model_view_module.CustomModelConfigView(
+        opener_user_id=1,
+        settings_service=settings_service,
+        preset_store=CustomModelPresetStore(base_dir=str(tmp_path)),
+    )
+
+    assert view.children[2].label == "网络超时检测：关"
+    assert view.children[2].style == custom_model_view_module.ButtonStyle.red
 
 
 @pytest.mark.asyncio
@@ -209,12 +230,16 @@ async def test_custom_model_view_caps_preset_options_at_twenty_five(
 
     view = custom_model_view_module.CustomModelConfigView(
         opener_user_id=1,
-        settings_service=MagicMock(),
+        settings_service=MagicMock(
+            get_custom_model_timeout_detection_enabled_sync=MagicMock(
+                return_value=True
+            )
+        ),
         preset_store=store,
     )
 
-    assert len(view.children) == 3
-    assert len(view.children[2].options) == MAX_CUSTOM_MODEL_PRESETS
+    assert len(view.children) == 4
+    assert len(view.children[3].options) == MAX_CUSTOM_MODEL_PRESETS
 
 
 def test_apply_settings_updates_env_and_refreshes_client(
