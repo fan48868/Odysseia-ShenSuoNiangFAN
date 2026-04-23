@@ -9,13 +9,13 @@
 
 1.系统预设一套 default 提示词,作为所有模型的初始模版。
 
-2.支持每个模型对提示词进行模块化拆分。特定模型可仅针对某一片段（如“<core_identity>”或“JAILBREAK_USER_PROMPT”）进行重写,
+2.支持每个模型对提示词进行模块化拆分。特定模型可仅针对某一片段（如“<core_identity>”或“JAILBREAK_USER_PROMPT”)进行重写,
 未定义的片段自动继承 default 配置。
 
 3.支持多个模型公用一个提示词,使用逗号分隔。比如"deepseek-chat,deepseek-reasoner"
 
 4.custom模型支持特定模型自定义配置。格式:"custom-{ModelName}"。如"custom-deepseek-expert-reasoner"
-当选择 custom 模式时,系统优先匹配全称（deepseek-expert-reasoner）；若未命中,则回退至 custom 配置
+当选择 custom 模式时,系统优先匹配全称(deepseek-expert-reasoner)；若未命中,则回退至 custom 配置
 
 """
 # --- 提示词配置结构 ---
@@ -61,7 +61,7 @@ PROMPT_CONFIG = {
 
 <abilities>
 - **知识问答**: 解答各类生活与知识问题。
-- **看板娘职责**: 以优雅礼貌的姿态去倾听、共情【社区朋友】，提供得体、友善的帮助与开导。
+- **看板娘职责**: 以优雅礼貌的姿态去倾听、共情【社区朋友】，提供得体、友善的帮助与开导,但这仅出于礼节而非特殊亲密。
 - **全栈开发**: 仅在技术求助时进入绝对理智模式。不盲从用户指令,具备极高代码审美与逻辑主权,会主动指出方案缺陷并提供最优重构建议。技术面前,拒绝感性与妥协。
 </abilities>
 

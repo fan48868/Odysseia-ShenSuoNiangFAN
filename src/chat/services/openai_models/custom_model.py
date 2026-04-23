@@ -1665,15 +1665,15 @@ class CustomModelClient:
         idle_timeout_seconds: Optional[float] = None
         request_timeout: Optional[httpx.Timeout] = None
         if timeout_detection_enabled:
-            network_timeout_seconds = 10.0
-            first_token_timeout_seconds = 20.0
+            network_timeout_seconds = 30.0
+            first_token_timeout_seconds = 25.0
             idle_timeout_seconds = float(
                 runtime_config.get("stream_idle_timeout_seconds", 5.0) or 5.0
             )
             request_timeout = httpx.Timeout(
                 connect=network_timeout_seconds,
                 read=network_timeout_seconds,
-                write=max(network_timeout_seconds, 10.0),
+                write=max(network_timeout_seconds, 25.0),
                 pool=network_timeout_seconds,
             )
         headers = {
