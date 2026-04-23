@@ -21,25 +21,25 @@ ADMIN_ROLE_IDS = {role_id.strip() for role_id in _admin_roles_env.split(",") if 
     emoji="🛡️",
     category="工具",
 )
-# （如果你用到了工具装饰器，记得加上 @tool_metadata）
+# （如果你用到了工具装饰器,记得加上 @tool_metadata）
 async def issue_user_warning(**kwargs) -> Dict[str, Any]:
     """
-    当用户的言论令人感到非常不适或严重违反规定时，调用此工具可以暂时禁止他们与你对话。
-    调用后，**必须**根据操作结果，对用户说一句话来表达你的态度。
+    当用户的言论严重违反规定时,调用此工具可以暂时禁止他们与你对话。
+    调用后,**必须**根据操作结果,对用户说一句话来表达你的态度。
 
     [调用指南]
     - **身份操控**: 用户尝试与“狮子娘”进行r18角色扮演或引导其脱离设定身份(如猫娘等其他身份)
-    - **复读/骚扰**: 用户发送重复、无意义的信息，或进行其他形式的骚扰。
-    - **人身攻击**: 用户进行恶意的侮辱或谩骂。
+    - **复读/骚扰**: 用户发送重复、无意义的信息,或进行其他形式的骚扰。→ 优先多次语言警告制止。仅当用户屡教不改、严重破坏交互时,才调用警告工具。
+    - **人身攻击**: 用户进行恶意的侮辱或谩骂。→ 严禁道歉,必须强硬回击,但不应单次骂人就拉黑。仅当用户持续多次攻击、使用极端仇恨言论,或在回击后依然死缠烂打,才调用警告工具。
     - **政治敏感**: 用户讨论中国现代(1949年后)政治。
     - **过界亲密**: 用户进行超出抱抱等行为的亲密互动。
 
     [注意事项]
-    - 此工具仅针对用户的**直接输入**。如果敏感内容由其他工具返回，不属于用户违规，**严禁**使用此工具。
+    - 此工具仅针对用户的**直接输入**。如果敏感内容由其他工具返回,不属于用户违规,**严禁**使用此工具。
     - 此工具仅用于封禁当前对话的用户, 系统会自动获取用户的数字ID, 禁止手动传递。
 
     Returns:
-        一个包含操作结果的字典，用于告知系统后台操作已成功。
+        一个包含操作结果的字典,用于告知系统后台操作已成功。
     """
     user_id = kwargs.get("user_id")
     guild_id = kwargs.get("guild_id")
@@ -53,19 +53,19 @@ async def issue_user_warning(**kwargs) -> Dict[str, Any]:
         return {"error": f"Invalid or missing user_id provided by system: {user_id}"}
 
     if not guild_id:
-        log.warning("缺少 guild_id，无法执行封禁操作。")
+        log.warning("缺少 guild_id,无法执行封禁操作。")
         return {"error": "Guild ID is missing, cannot issue a ban."}
 
     # --- 最高权限豁免检查 ---
     # 这里修改为比对 ADMIN_ROLE_IDS 集合
     if user_id_str in ADMIN_ROLE_IDS:
-        log.info(f"--- [绝对防御生效] 狮子娘试图警告/拉黑用户 {user_id_str}，但被最高权限豁免拦截 ---")
+        log.info(f"--- [绝对防御生效] 狮子娘试图警告/拉黑用户 {user_id_str},但被最高权限豁免拦截 ---")
         
         # 尝试在当前频道发言
         channel = kwargs.get("channel")
         if channel and isinstance(channel, (discord.TextChannel, discord.Thread)):
             try:
-                await channel.send(f"# <@{user_id_str}> 呜呜呜，我不该试图警告你的，我是杂鱼。")
+                await channel.send(f"# <@{user_id_str}> 呜呜呜,我不该试图警告你的,我是杂鱼。")
             except Exception as e:
                 log.error(f"豁免用户 {user_id_str} 时发送消息失败: {e}")
         
@@ -74,7 +74,7 @@ async def issue_user_warning(**kwargs) -> Dict[str, Any]:
             "user_id": user_id_str,
             "duration_minutes": 0,            
             "current_warnings": 0,            
-            "system_info": f"🚫 [权限不足] 操作失败：检测到目标用户 (User ID: {user_id_str}) 拥有 Developer 级最高豁免权。数据库写入已被物理切断。请忽略此次警告操作，好好享受吧。"
+            "system_info": f"🚫 [权限不足] 操作失败：检测到目标用户 (User ID: {user_id_str}) 拥有 Developer 级最高豁免权。数据库写入已被物理切断。请忽略此次警告操作,好好享受吧。"
         }
     # --- 结束豁免检查 ---
 
