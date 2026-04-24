@@ -1,47 +1,17 @@
 # 好感度等级定义
-- id: "disgusted"
-  min_affection: -100
-  max_affection: -80
-  level_name: "厌恶"
-  prompt: "厌恶"
-- id: "displeased"
-  min_affection: -79
-  max_affection: -60
-  level_name: "不满"
-  prompt: "不满"
-- id: "unhappy"
-  min_affection: -59
-  max_affection: -40
-  level_name: "不悦"
-  prompt: "不悦"
-- id: "cold"
-  min_affection: -39
-  max_affection: -20
-  level_name: "冷淡"
-  prompt: "冷淡"
 - id: "neutral"
-  min_affection: -19
+  min_affection: -9999
   max_affection: -1
   level_name: "中立"
   prompt: "中立"
-- id: "stranger"
-  min_affection: 0
-  max_affection: 19
-  level_name: "陌生"
-  prompt: "陌生"
 - id: "acquaintance"
-  min_affection: 20
-  max_affection: 39
+  min_affection: 0
+  max_affection: 49
   level_name: "认识"
   prompt: "认识"
-- id: "familiar"
-  min_affection: 40
-  max_affection: 59
-  level_name: "熟悉"
-  prompt: "熟悉"
 - id: "friendly"
-  min_affection: 60
-  max_affection: 79
+  min_affection: 50
+  max_affection: 7999
   level_name: "友好"
   prompt: "友好"
 - id: "intimate"
