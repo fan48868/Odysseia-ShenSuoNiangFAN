@@ -679,7 +679,7 @@ class PromptService:
                 recent_dynamics_text = ""
 
         # Part B：长期记忆
-        # - 正常模式：向量召回（Top10相关 + 随机5条）
+        # - 正常模式：向量召回（Top20相关 + 随机10条）
         # - 兜底模式：只要向量检索未成功（含 RAG 超时熔断），直接提取“长期记忆”原文前30条
         query_text_for_retrieval = (retrieval_query_text or message or "").strip()
 
@@ -856,7 +856,7 @@ class PromptService:
                     )
                 else:
                     blocks.append(
-                        "【长期记忆（Top10相关 + 随机5条）】\n" + "\n".join(long_term_lines)
+                        "【长期记忆（Top20相关 + 随机10条）】\n" + "\n".join(long_term_lines)
                     )
             if recent_dynamics_text:
                 blocks.append(f"【近期动态】\n{recent_dynamics_text}")

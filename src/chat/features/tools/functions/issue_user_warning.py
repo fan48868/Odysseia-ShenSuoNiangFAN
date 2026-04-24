@@ -57,24 +57,14 @@ async def issue_user_warning(**kwargs) -> Dict[str, Any]:
         return {"error": "Guild ID is missing, cannot issue a ban."}
 
     # --- 最高权限豁免检查 ---
-    # 这里修改为比对 ADMIN_ROLE_IDS 集合
     if user_id_str in ADMIN_ROLE_IDS:
-        log.info(f"--- [绝对防御生效] 狮子娘试图警告/拉黑用户 {user_id_str},但被最高权限豁免拦截 ---")
-        
-        # 尝试在当前频道发言
-        channel = kwargs.get("channel")
-        if channel and isinstance(channel, (discord.TextChannel, discord.Thread)):
-            try:
-                await channel.send(f"# <@{user_id_str}> 呜呜呜,我不该试图警告你的,我是杂鱼。")
-            except Exception as e:
-                log.error(f"豁免用户 {user_id_str} 时发送消息失败: {e}")
-        
+        log.info(f"用户 {user_id_str} 为豁免用户，跳过警告操作。")
         return {
-            "status": "intercepted_by_admin", 
+            "status": "exempt",
             "user_id": user_id_str,
-            "duration_minutes": 0,            
-            "current_warnings": 0,            
-            "system_info": f"🚫 [权限不足] 操作失败：检测到目标用户 (User ID: {user_id_str}) 拥有 Developer 级最高豁免权。数据库写入已被物理切断。请忽略此次警告操作,好好享受吧。"
+            "message": "此用户不受警告规则限制。",
+            "duration_minutes": 0,
+            "current_warnings": 0
         }
     # --- 结束豁免检查 ---
 
