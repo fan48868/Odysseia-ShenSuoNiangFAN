@@ -39,8 +39,8 @@ class PromptService:
         将模型配置键规范化为模型名列表。
         支持：
         - "gemini-3.1-pro-preview,kimi-k2.5"
-        - "deepseek-chat, deepseek-reasoner, custom"
-        - ("deepseek-chat", "deepseek-reasoner", "custom")
+        - "deepseek-chat, deepseek-v4-pro, custom"
+        - ("deepseek-chat", "deepseek-v4-pro", "custom")
         """
         if isinstance(model_key, str):
             if "," in model_key:

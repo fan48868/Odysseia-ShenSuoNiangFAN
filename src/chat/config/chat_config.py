@@ -177,7 +177,7 @@ MODEL_GENERATION_CONFIG = {
         "top_k": 40,
         "max_output_tokens": 8192,
     },
-    "deepseek-reasoner": {
+    "deepseek-v4-pro": {
         "temperature": 1.1,
         "top_p": 0.95,
         "top_k": 40,

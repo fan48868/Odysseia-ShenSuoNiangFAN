@@ -80,7 +80,7 @@ def test_group_model_override_supports_comma_separated_keys_and_exact_override(
         "PROMPT_CONFIG",
         {
             "default": dict(MINIMAL_DEFAULT_CONFIG),
-            "deepseek-chat, deepseek-reasoner, custom": {
+            "deepseek-chat, deepseek-v4-pro, custom": {
                 "JAILBREAK_USER_PROMPT": "shared-jailbreak-user",
             },
             "custom": {
@@ -112,7 +112,7 @@ def test_system_prompt_applies_group_then_exact_then_faction_pack(
         "PROMPT_CONFIG",
         {
             "default": dict(MINIMAL_DEFAULT_CONFIG),
-            ("deepseek-chat", "deepseek-reasoner", "kimi-k2.5"): {
+            ("deepseek-chat", "deepseek-v4-pro", "kimi-k2.5"): {
                 "SYSTEM_PROMPT": """
 <abilities>group-abilities</abilities>
 """
