@@ -10,8 +10,10 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+# ========== 新增：固定窗口限流使用的全局变量 ==========
 import time
-_global_message_timestamps = []
+_window_start_time = None
+_window_count = 0
 
 from src import config
 from src.chat.config import chat_config
@@ -578,23 +580,22 @@ class AIChatCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # ================== 软软专属极简防线 重要 ==================
-        # 如果不是管理员的 ID，就要接受限流的制裁啦！
+        # ================== 软软专属极简防线 重要注释 ==================
         if message.author.id not in config.DEVELOPER_USER_IDS:
-            global _global_message_timestamps
+            global _window_start_time, _window_count
             current_time = time.time()
-            
-            # 清理：把距离现在超过 60 秒的旧记录统统烧掉
-            _global_message_timestamps = [ts for ts in _global_message_timestamps if current_time - ts <= 60]
-            
-            # 判断：如果清理完之后，最近 60 秒内还有 >= 3 条？大门锁死，无情拦截！
-            if len(_global_message_timestamps) >= 3:
-                return  # 直接拦截退出，后面的全都不执行，坚决不浪费一滴 API！
-                
-            # 如果没满 3 条，就把当前的时间戳记在小本本上，然后放行！
-            _global_message_timestamps.append(current_time)
-        # ====================================================
-        # 从这里往下都是你原本的代码，顺着接下去，千万别删哦！        
+
+            # 判断当前窗口是否已过期（没有窗口 或 距离窗口开始已经超过60秒）
+            if _window_start_time is None or (current_time - _window_start_time) >= 60:
+                _window_start_time = current_time
+                _window_count = 0
+
+            # 窗口内已放行消息数量 >= 3 则拦截
+            if _window_count >= 3:
+                return
+            _window_count += 1
+
+        # 从这里往下都是你原本的代码，顺着接下去，千万别删哦！
         priority_marked = False
         if not CHAT_ENABLED:
             return
