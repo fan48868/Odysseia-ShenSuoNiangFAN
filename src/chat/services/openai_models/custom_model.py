@@ -1655,7 +1655,6 @@ class CustomModelClient:
                 missing_reasoning_indexes,
             )
         request_payload["stream"] = True
-        request_payload["thinking"] = {"type": "disabled"}
         request_payload.pop("chat_template_kwargs", None)
         timeout_detection_enabled = bool(
             runtime_config.get("timeout_detection_enabled", True)
