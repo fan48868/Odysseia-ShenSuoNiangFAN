@@ -102,6 +102,17 @@ def _api_key_handler(func: Callable) -> Callable:
         # 一次性调试 URL（仅供本轮调用使用）
         debug_base_url = kwargs.pop("debug_base_url", None)
 
+        # ========== 新增：无自定义通道时直接拒绝（非 embedding 任务） ==========
+        if not is_embedding_task and not (self.custom_chat_key and self.custom_chat_url):
+            log.error(
+                "未配置 CUSTOM_GEMINI_URL / CUSTOM_GEMINI_API_KEY，"
+                "无法使用自定义通道，且官方 API 已被禁用。"
+            )
+            if func.__name__ == "generate_embedding":
+                return None
+            return "服务未配置自定义通道，请检查环境变量。（官方 API 已禁用）"
+        # =====================================================================
+
         # [逻辑分流] 决定是否使用自定义通道 (非向量化 且 配置了自定义参数)
         use_custom_channel = (not is_embedding_task) and bool(self.custom_chat_key) and bool(
             debug_base_url or self.custom_chat_url
@@ -745,10 +756,10 @@ class GeminiService:
             self.last_called_tools = list(self.openai_service.last_called_tools)
             return result
 
-        # 如果选择了自定义模型，则尝试使用它，并准备好回退
+        # --- MODIFIED: 自定义模型失败不再回退官方 API，最多重试 7 次 ---
         if model_name and model_name in app_config.CUSTOM_GEMINI_ENDPOINTS:
-            log.info(f"检测到自定义模型 '{model_name}'，将优先尝试使用自定义端点。")
-            max_attempts = 2  # 1次主尝试 + 1次重试
+            log.info(f"检测到自定义模型 '{model_name}'，将尝试使用自定义端点（最多 7 次）。")
+            max_attempts = 7  # ← 改为 7 次重试
             last_exception = None
             for attempt in range(max_attempts):
                 try:
@@ -785,84 +796,16 @@ class GeminiService:
                         f"使用自定义端点 '{model_name}' (尝试 {attempt + 1}/{max_attempts}) 失败: {e}"
                     )
                     if attempt < max_attempts - 1:
-                        await asyncio.sleep(1)  # 在重试前稍作等待
-
-            # 如果所有尝试都失败了，则执行回退逻辑
-            # 检查是否配置了RAG API密钥
-            if self.key_rotation_service is None:
-                log.error(
-                    f"自定义端点 '{model_name}' 的所有 {max_attempts} 次尝试均失败。最终错误: {last_exception}. "
-                    f"未配置 GOOGLE_API_KEYS_LIST，无法回退到官方 API。"
-                )
-                return "呜哇，有点晕嘞，自定义端点连接失败了，还没有配置备用API密钥呢，等配置好了再来找我玩吧！"
-
-            log.warning(
-                f"自定义端点 '{model_name}' 的所有 {max_attempts} 次尝试均失败。最终错误: {last_exception}. "
-                f"将回退到官方 API。"
-            )
-            # --- [新逻辑] 回退时固定使用 gemini-2.5-flash 模型 ---
-            fallback_model_name = "gemini-2.5-flash"
-            log.info(f"回退到官方 API，固定使用模型 '{fallback_model_name}'。")
-
-            result = await self._generate_with_official_api(
-                user_id=user_id,
-                guild_id=guild_id,
-                message=message,
-                channel=channel,
-                replied_message=replied_message,
-                images=images,
-                user_name=user_name,
-                channel_context=channel_context,
-                world_book_entries=world_book_entries,
-                personal_summary=personal_summary,
-                affection_status=affection_status,
-                user_profile_data=user_profile_data,
-                guild_name=guild_name,
-                location_name=location_name,
-                model_name=fallback_model_name,  # 关键：使用固定的回退模型
-                user_id_for_settings=user_id_for_settings,
-                debug_base_url=one_time_debug_base_url,
-                retrieval_query_text=retrieval_query_text,
-                retrieval_query_embedding=retrieval_query_embedding,
-                rag_timeout_fallback=rag_timeout_fallback,
-                text_context=text_context,
-            )
-            return result
-
-        # 对于非自定义模型或回退失败后的默认路径
-        # 检查是否配置了RAG API密钥
-        if self.key_rotation_service is None:
+                        await asyncio.sleep(1)  # 重试前等待
             log.error(
-                "未配置 GOOGLE_API_KEYS_LIST，无法使用官方 API。请选择自定义端点模型。"
+                f"自定义端点 '{model_name}' 重试 {max_attempts} 次均失败，不再回退官方 API。"
             )
-            return "呜哇，现在有点晕嘞，还没有配置好API密钥呢，请选择自定义端点模型或配置 GOOGLE_API_KEYS_LIST 哦～"
-        log.info(
-            f"使用模型 '{model_name or self.default_model_name}'，将使用官方 API 逻辑。"
-        )
-        result = await self._generate_with_official_api(
-            user_id=user_id,
-            guild_id=guild_id,
-            message=message,
-            channel=channel,
-            replied_message=replied_message,
-            images=images,
-            user_name=user_name,
-            channel_context=channel_context,
-            world_book_entries=world_book_entries,
-            personal_summary=personal_summary,
-            affection_status=affection_status,
-            user_profile_data=user_profile_data,
-            guild_name=guild_name,
-            location_name=location_name,
-            model_name=model_name,
-            user_id_for_settings=user_id_for_settings,
-            debug_base_url=one_time_debug_base_url,
-            retrieval_query_text=retrieval_query_text,
-            retrieval_query_embedding=retrieval_query_embedding,
-            rag_timeout_fallback=rag_timeout_fallback,
-            text_context=text_context,
-        )
-        return result
+            return "呜哇，自定义端点遇到了一点问题，稍微休息一下再试试吧～（已重试 7 次）"
+        # --- END OF MODIFIED BLOCK ---
+
+        # 如果模型既不是 OpenAI 兼容，也不是自定义端点，直接拒绝
+        log.error(f"模型 '{model_name}' 不在已知端点列表中且未启用官方回退，无法处理。")
+        return "呜哇，这个模型好像没有配置好呢，请检查一下模型设置哦～"
 
     async def _generate_with_custom_endpoint(
         self,
