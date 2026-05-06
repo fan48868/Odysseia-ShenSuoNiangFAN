@@ -249,8 +249,8 @@ GEMINI_CONFESSION_GEN_CONFIG = {
 }
 
 COOLDOWN_RATES = {
-    "default": 2,  # 每分钟请求次数
-    "coffee": 3,  # 每分钟请求次数
+    "default": 3,  # 每分钟请求次数
+    "coffee": 3,  # （重要注释）
 }
 # (min, max) 分钟
 BLACKLIST_BAN_DURATION_MINUTES = (15, 30) # 黑名单禁言的最短和最长时间范围（分钟）
@@ -317,7 +317,7 @@ COIN_CONFIG = {
     "LOAN_THUMBNAIL_URL": "https://cdn.discordapp.com/attachments/1403347767912562728/1429130259541917716/3_229109312468835_00001_.png",  # 借贷中心缩略图URL
 }
 
-# --- 个人记忆功能 ---
+# --- 个人记忆功能 ---（重要注释）
 PERSONAL_MEMORY_CONFIG = {
     "summary_threshold": 20,  # 触发总结的消息数量阈值 (测试用 5, 原为 50)
     "log_dir": None,  # 关闭自动写入 memory summary 日志

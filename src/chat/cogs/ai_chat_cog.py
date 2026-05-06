@@ -10,11 +10,6 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
-# ========== 新增：固定窗口限流使用的全局变量 ==========
-import time
-_window_start_time = None
-_window_count = 0
-
 from src import config
 from src.chat.config import chat_config
 from src.chat.config.chat_config import CHAT_ENABLED, MESSAGE_SETTINGS
@@ -581,19 +576,18 @@ class AIChatCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         # ================== 软软专属极简防线 重要注释 ==================
+        if self.bot.user not in message.mentions:
+            return
+            
         if message.author.id not in config.DEVELOPER_USER_IDS:
-            global _window_start_time, _window_count
             current_time = time.time()
-
-            # 判断当前窗口是否已过期（没有窗口 或 距离窗口开始已经超过60秒）
-            if _window_start_time is None or (current_time - _window_start_time) >= 60:
-                _window_start_time = current_time
-                _window_count = 0
-
-            # 窗口内已放行消息数量 >= 3 则拦截
-            if _window_count >= 3:
+            # 用 hasattr 直接判断，不用去别的函数里声明啦！
+            if not hasattr(self, '_window_start_time') or (current_time - getattr(self, '_window_start_time', 0)) >= 60:
+                self._window_start_time = current_time
+                self._window_count = 0
+            if self._window_count >= 3:
                 return
-            _window_count += 1
+            self._window_count += 1
 
         # 从这里往下都是你原本的代码，顺着接下去，千万别删哦！
         priority_marked = False
