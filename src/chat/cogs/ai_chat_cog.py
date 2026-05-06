@@ -575,10 +575,12 @@ class AIChatCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # ================== 软软专属极简防线 重要注释 ==================
+        import time
+
+        # ================== 软软专属极简限流防线 重要注释 ==================
         if self.bot.user not in message.mentions:
             return
-            
+
         if message.author.id not in config.DEVELOPER_USER_IDS:
             current_time = time.time()
             # 用 hasattr 直接判断，不用去别的函数里声明啦！
