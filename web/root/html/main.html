@@ -1,0 +1,975 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Odysseia Guidance Console</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+    <div class="app-shell">
+        <div class="mobile-sidebar-backdrop" id="mobile-sidebar-backdrop"></div>
+        <aside class="sidebar">
+            <div class="brand-block">
+                <div class="brand-mark">OG</div>
+                <div class="brand-copy">
+                    <strong>Odysseia</strong>
+                    <span>Guidance Console</span>
+                </div>
+            </div>
+
+            <nav class="sidebar-nav" aria-label="功能导航">
+                <button class="nav-item is-active" type="button" data-view="dashboard">
+                    <span class="nav-index">01</span>
+                    <span class="nav-text">
+                        <strong>仪表盘</strong>
+                        <small>核心状态概览</small>
+                    </span>
+                </button>
+                <button class="nav-item" type="button" data-view="controls">
+                    <span class="nav-index">02</span>
+                    <span class="nav-text">
+                        <strong>机器人控制</strong>
+                        <small>启动与停止操作</small>
+                    </span>
+                </button>
+                <button class="nav-item" type="button" data-view="bot-logs">
+                    <span class="nav-index">03</span>
+                    <span class="nav-text">
+                        <strong>Bot 日志</strong>
+                        <small>按日期筛选查看</small>
+                    </span>
+                </button>
+                <button class="nav-item" type="button" data-view="system">
+                    <span class="nav-index">04</span>
+                    <span class="nav-text">
+                        <strong>系统信息</strong>
+                        <small>资源与 24 小时统计</small>
+                    </span>
+                </button>
+                <button class="nav-item" type="button" data-view="webui-logs">
+                    <span class="nav-index">05</span>
+                    <span class="nav-text">
+                        <strong>WebUI 日志</strong>
+                        <small>服务侧运行情况</small>
+                    </span>
+                </button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="sidebar-meta">
+                    <span class="meta-label">当前主题</span>
+                    <strong id="theme-badge">Light Mode</strong>
+                </div>
+                <div class="sidebar-meta">
+                    <span class="meta-label">机器人状态</span>
+                    <strong id="sidebar-status-text">检测中</strong>
+                </div>
+                <a href="/logout" class="logout-link">退出登录</a>
+            </div>
+        </aside>
+
+        <main class="workspace">
+            <header class="workspace-header">
+                <div class="header-copy">
+                    <button id="mobile-menu-btn" class="mobile-menu-button" type="button" aria-label="打开菜单" title="打开菜单">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                    </button>
+                    <h1 id="page-title">仪表盘</h1>
+                </div>
+                <div class="header-status">
+                    <button id="theme-toggle-btn" class="theme-toggle-button" type="button" aria-label="切换主题" title="切换主题">
+                        <span class="theme-toggle-icon" aria-hidden="true"></span>
+                    </button>
+                    <div class="status-pill status-loading" id="global-status-pill">状态检测中</div>
+                    <div class="header-note" id="last-refresh-text">尚未刷新</div>
+                </div>
+            </header>
+
+            <section class="view-panel is-active" data-view-panel="dashboard">
+                <div class="content-card hero-card">
+                    <div class="hero-copy">
+                        <h2>Web管理面板</h2>
+                    </div>
+                    <div class="hero-actions">
+                        <button class="soft-button" type="button" data-open-view="controls">前往控制页</button>
+                        <button class="soft-button" type="button" data-open-view="bot-logs">查看 Bot 日志</button>
+                    </div>
+                </div>
+
+                <div class="metric-grid">
+                    <article class="metric-card">
+                        <span class="metric-label">机器人状态</span>
+                        <strong class="metric-value" id="dashboard-status-text">检测中</strong>
+                        <span class="metric-meta" id="dashboard-heartbeat-text">等待心跳</span>
+                    </article>
+                    <article class="metric-card">
+                        <span class="metric-label">CPU 使用率</span>
+                        <strong class="metric-value" id="dashboard-cpu-text">--</strong>
+                        <span class="metric-meta" id="dashboard-ram-text">RAM --</span>
+                    </article>
+                    <article class="metric-card">
+                        <span class="metric-label">Bot 日志</span>
+                        <strong class="metric-value" id="dashboard-log-count-text">0</strong>
+                        <span class="metric-meta" id="dashboard-log-lines-text">0 行 Bot 日志</span>
+                    </article>
+                    <article class="metric-card">
+                        <span class="metric-label">WebUI 侧日志</span>
+                        <strong class="metric-value" id="dashboard-webui-count-text">0</strong>
+                        <span class="metric-meta" id="dashboard-webui-state-text">等待刷新</span>
+                    </article>
+                </div>
+
+                <div class="split-grid">
+                    <article class="content-card">
+                        <div class="section-heading">
+                            <div>
+                                <h2>当前概览</h2>
+                            </div>
+                        </div>
+                        <div class="info-list">
+                            <div class="info-row">
+                                <span>容器名称</span>
+                                <strong>Odysseia_Guidance</strong>
+                            </div>
+                            <div class="info-row">
+                                <span>系统刷新</span>
+                                <strong id="dashboard-system-refresh">尚未获取</strong>
+                            </div>
+                            <div class="info-row">
+                                <span>活跃主题</span>
+                                <strong id="dashboard-theme-text">Light Mode</strong>
+                            </div>
+                            <div class="info-row">
+                                <span>当前时区</span>
+                                <strong id="dashboard-timezone-text">未设置</strong>
+                            </div>
+                        </div>
+                    </article>
+
+                    <article class="content-card">
+                        <div class="section-heading">
+                            <div>
+                                <h2>功能入口</h2>
+                            </div>
+                        </div>
+                        <div class="shortcut-list">
+                            <button class="shortcut-card" type="button" data-open-view="controls">
+                                <strong>机器人控制</strong>
+                                <span>重启或停止容器</span>
+                            </button>
+                            <button class="shortcut-card" type="button" data-open-view="system">
+                                <strong>系统信息</strong>
+                                <span>查看 CPU、RAM、磁盘和网络</span>
+                            </button>
+                            <button class="shortcut-card" type="button" data-open-view="webui-logs">
+                                <strong>WebUI 日志</strong>
+                                <span>查看服务自身运行信息</span>
+                            </button>
+                        </div>
+                    </article>
+                </div>
+            </section>
+
+            <section class="view-panel" data-view-panel="controls">
+                <article class="content-card">
+                    <div class="section-heading">
+                        <div>
+                            <h2>机器人控制</h2>
+                        </div>
+                        <div class="inline-status status-loading" id="control-status-badge">状态检测中</div>
+                    </div>
+
+                    <div class="control-layout">
+                        <div class="action-panel">
+                            <button id="restart-btn" class="primary-button" type="button">重启 Bot 容器</button>
+                            <button id="restart-web-btn" class="soft-button" type="button">重启 Web 容器</button>
+                            <button id="shutdown-btn" class="danger-button" type="button">停止 Bot 容器</button>
+                        </div>
+                        <div class="info-list">
+                            <div class="info-row">
+                                <span>目标容器</span>
+                                <strong>Odysseia_Guidance</strong>
+                            </div>
+                            <div class="info-row">
+                                <span>最近操作</span>
+                                <strong id="control-last-action">尚未执行</strong>
+                            </div>
+                            <div class="info-row">
+                                <span>状态同步</span>
+                                <strong id="control-sync-text">等待轮询</strong>
+                            </div>
+                        </div>
+                    </div>
+                </article>
+            </section>
+
+            <section class="view-panel" data-view-panel="bot-logs">
+                <article class="content-card">
+                    <div class="section-heading">
+                        <div>
+                            <h2>Bot 日志</h2>
+                        </div>
+                    </div>
+
+                    <div class="toolbar-grid">
+                        <label class="field">
+                            <span>日志等级</span>
+                            <div id="bot-log-level-filter" class="filter-chip-group">
+                                <label class="filter-chip"><input type="checkbox" value="DEBUG"><span>DEBUG</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="INFO" checked><span>INFO</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="WARNING" checked><span>WARNING</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="ERROR" checked><span>ERROR</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="CRITICAL"><span>CRITICAL</span></label>
+                            </div>
+                        </label>
+                        <label class="field">
+                            <span>显示时区</span>
+                            <select id="timezone-selector"></select>
+                        </label>
+                        <label class="field field-wide">
+                            <span>Regex 过滤</span>
+                            <input type="text" id="bot-regex-search" placeholder="例如: ERROR|backup|guild">
+                        </label>
+                    </div>
+                    <div class="toolbar-actions">
+                        <button id="bot-auto-scroll-toggle" class="soft-button toolbar-toggle" type="button" aria-pressed="false">自动跳转底部</button>
+                    </div>
+
+                    <div class="panel-meta" id="bot-log-summary">显示当前缓存中的 Bot 日志</div>
+                    <div class="log-container" id="bot-log-container" role="log" aria-live="off" spellcheck="false">Loading logs...</div>
+                </article>
+            </section>
+
+            <section class="view-panel" data-view-panel="system">
+                <article class="content-card">
+                    <div class="section-heading">
+                        <div>
+                            <h2>系统信息</h2>
+                        </div>
+                    </div>
+
+                    <div class="stat-grid">
+                        <div class="stat-card">
+                            <span>CPU</span>
+                            <strong id="cpu-usage-text">Loading...</strong>
+                        </div>
+                        <div class="stat-card">
+                            <span>RAM</span>
+                            <strong id="ram-usage-text">Loading...</strong>
+                        </div>
+                        <div class="stat-card">
+                            <span>Disk</span>
+                            <strong id="disk-usage-text">Loading...</strong>
+                        </div>
+                        <div class="stat-card">
+                            <span>Network</span>
+                            <strong id="network-traffic-text">Loading...</strong>
+                        </div>
+                    </div>
+
+                    <div class="split-grid">
+                        <div class="content-block">
+                            <h3>当前资源占用</h3>
+                            <div class="info-list">
+                                <div class="info-row">
+                                    <span>CPU 使用率</span>
+                                    <strong id="system-cpu-current">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>内存占用</span>
+                                    <strong id="system-ram-current">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>磁盘占用</span>
+                                    <strong id="system-disk-current">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>网络发送 / 接收</span>
+                                    <strong id="system-network-current">Loading...</strong>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="content-block">
+                            <h3>24 小时统计</h3>
+                            <div class="info-list">
+                                <div class="info-row">
+                                    <span>CPU 平均</span>
+                                    <strong id="cpu-avg-24h">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>CPU 峰值</span>
+                                    <strong id="cpu-peak-24h">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>RAM 平均</span>
+                                    <strong id="ram-avg-24h">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>RAM 峰值</span>
+                                    <strong id="ram-peak-24h">Loading...</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>采样数量</span>
+                                    <strong id="sample-count-24h">0</strong>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </article>
+            </section>
+
+            <section class="view-panel" data-view-panel="webui-logs">
+                <article class="content-card">
+                    <div class="section-heading">
+                        <div>
+                            <h2>WebUI 日志</h2>
+                        </div>
+                    </div>
+
+                    <div class="toolbar-grid compact-grid">
+                        <label class="field">
+                            <span>日志等级</span>
+                            <div id="webui-log-level-filter" class="filter-chip-group">
+                                <label class="filter-chip"><input type="checkbox" value="DEBUG"><span>DEBUG</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="INFO" checked><span>INFO</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="WARNING" checked><span>WARNING</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="ERROR" checked><span>ERROR</span></label>
+                                <label class="filter-chip"><input type="checkbox" value="CRITICAL"><span>CRITICAL</span></label>
+                            </div>
+                        </label>
+                        <label class="field field-wide">
+                            <span>Regex 过滤</span>
+                            <input type="text" id="webui-regex-search" placeholder="例如: cleanup|status|login">
+                        </label>
+                    </div>
+                    <div class="toolbar-actions">
+                        <button id="webui-auto-scroll-toggle" class="soft-button toolbar-toggle" type="button" aria-pressed="false">自动跳转底部</button>
+                    </div>
+
+                    <div class="panel-meta" id="webui-log-summary">等待 WebUI 日志加载</div>
+                    <div class="log-container" id="webui-log-container" role="log" aria-live="off" spellcheck="false">Loading WebUI logs...</div>
+                </article>
+            </section>
+        </main>
+    </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const VIEW_META = {
+        dashboard: {
+            title: '仪表盘'
+        },
+        controls: {
+            title: '机器人控制'
+        },
+        'bot-logs': {
+            title: 'Bot 日志'
+        },
+        system: {
+            title: '系统信息'
+        },
+        'webui-logs': {
+            title: 'WebUI 日志'
+        }
+    };
+
+    const pageTitle = document.getElementById('page-title');
+    const globalStatusPill = document.getElementById('global-status-pill');
+    const sidebarStatusText = document.getElementById('sidebar-status-text');
+    const lastRefreshText = document.getElementById('last-refresh-text');
+    const themeBadge = document.getElementById('theme-badge');
+    const themeToggleBtn = document.getElementById('theme-toggle-btn');
+    const dashboardThemeText = document.getElementById('dashboard-theme-text');
+    const dashboardTimezoneText = document.getElementById('dashboard-timezone-text');
+    const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+    const mobileSidebarBackdrop = document.getElementById('mobile-sidebar-backdrop');
+    const sidebar = document.querySelector('.sidebar');
+
+    const navItems = Array.from(document.querySelectorAll('.nav-item'));
+    const panels = Array.from(document.querySelectorAll('.view-panel'));
+    const openViewButtons = Array.from(document.querySelectorAll('[data-open-view]'));
+
+    const botLogContainer = document.getElementById('bot-log-container');
+    const botRegexInput = document.getElementById('bot-regex-search');
+    const botLogLevelFilter = document.getElementById('bot-log-level-filter');
+    const botLogSummary = document.getElementById('bot-log-summary');
+    const botAutoScrollToggle = document.getElementById('bot-auto-scroll-toggle');
+
+    const webuiLogContainer = document.getElementById('webui-log-container');
+    const webuiLogLevelFilter = document.getElementById('webui-log-level-filter');
+    const webuiRegexInput = document.getElementById('webui-regex-search');
+    const webuiLogSummary = document.getElementById('webui-log-summary');
+    const webuiAutoScrollToggle = document.getElementById('webui-auto-scroll-toggle');
+
+    const timezoneSelector = document.getElementById('timezone-selector');
+    const restartBtn = document.getElementById('restart-btn');
+    const restartWebBtn = document.getElementById('restart-web-btn');
+    const shutdownBtn = document.getElementById('shutdown-btn');
+    const controlStatusBadge = document.getElementById('control-status-badge');
+    const controlLastAction = document.getElementById('control-last-action');
+    const controlSyncText = document.getElementById('control-sync-text');
+
+    let fullBotLogContent = '';
+    let fullWebUILogContent = '';
+    let selectedTimezone = localStorage.getItem('selectedTimezone') || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    let preferredTheme = localStorage.getItem('preferredTheme') || 'system';
+    let botAutoScrollEnabled = false;
+    let webuiAutoScrollEnabled = false;
+    let mobileSidebarOpen = false;
+    const botLogRenderState = { pending: false, content: '', mode: 'text' };
+    const webuiLogRenderState = { pending: false, content: '', mode: 'text' };
+
+    const escapeHtml = (text) => text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+
+    const formatTimestamp = (date = new Date()) =>
+        date.toLocaleString(undefined, {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        });
+
+    const syncThemeToggle = () => {
+        const isDark = document.documentElement.dataset.theme === 'dark'
+            || (preferredTheme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        const themeText = isDark ? 'Dark Mode' : 'Light Mode';
+        themeBadge.textContent = themeText;
+        dashboardThemeText.textContent = themeText;
+        themeToggleBtn.setAttribute('aria-label', isDark ? '切换浅色模式' : '切换深色模式');
+        themeToggleBtn.setAttribute('title', isDark ? '切换浅色模式' : '切换深色模式');
+        themeToggleBtn.classList.toggle('is-dark', isDark);
+    };
+
+    const applyThemePreference = () => {
+        if (preferredTheme === 'system') {
+            delete document.documentElement.dataset.theme;
+        } else {
+            document.documentElement.dataset.theme = preferredTheme;
+        }
+        syncThemeToggle();
+    };
+
+    const applyThemeLabel = () => {
+        if (preferredTheme === 'system') {
+            syncThemeToggle();
+        }
+    };
+
+    const getSelectedLogLevels = (container) =>
+        Array.from(container.querySelectorAll('input[type="checkbox"]:checked')).map((input) => input.value);
+
+    const scrollLogToBottom = (container) => {
+        container.scrollTop = container.scrollHeight;
+    };
+
+    const toggleAutoScroll = (button, enabled) => {
+        button.classList.toggle('is-active', enabled);
+        button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    };
+
+    const isSelectionInside = (container) => {
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+            return false;
+        }
+
+        return [selection.anchorNode, selection.focusNode].some((node) =>
+            node && (node === container || container.contains(node))
+        );
+    };
+
+    const syncLogContent = (container, state, content, mode = 'html') => {
+        if (isSelectionInside(container)) {
+            state.pending = true;
+            return false;
+        }
+
+        const normalizedMode = mode === 'text' ? 'text' : 'html';
+        state.pending = false;
+        if (state.content === content && state.mode === normalizedMode) {
+            return false;
+        }
+
+        if (normalizedMode === 'text') {
+            container.textContent = content;
+        } else {
+            container.innerHTML = content;
+        }
+
+        state.content = content;
+        state.mode = normalizedMode;
+        return true;
+    };
+
+    const flushPendingLogRender = () => {
+        if (botLogRenderState.pending && !isSelectionInside(botLogContainer)) {
+            renderBotLogs();
+        }
+        if (webuiLogRenderState.pending && !isSelectionInside(webuiLogContainer)) {
+            renderWebUILogs();
+        }
+    };
+
+    const isMobileLayout = () => window.matchMedia('(max-width: 768px)').matches;
+
+    const setMobileSidebarOpen = (open) => {
+        mobileSidebarOpen = open;
+        document.body.classList.toggle('mobile-sidebar-open', open);
+        sidebar.classList.toggle('is-mobile-open', open);
+        mobileSidebarBackdrop.classList.toggle('is-visible', open);
+        mobileMenuBtn.setAttribute('aria-label', open ? '关闭菜单' : '打开菜单');
+        mobileMenuBtn.setAttribute('title', open ? '关闭菜单' : '打开菜单');
+        if (!isMobileLayout()) {
+            document.body.classList.remove('mobile-sidebar-open');
+            sidebar.classList.remove('is-mobile-open');
+            mobileSidebarBackdrop.classList.remove('is-visible');
+            mobileSidebarOpen = false;
+        }
+    };
+
+    const updateLastRefresh = () => {
+        const text = `最近刷新 ${formatTimestamp()}`;
+        lastRefreshText.textContent = text;
+        document.getElementById('dashboard-system-refresh').textContent = text;
+    };
+
+    const setActiveView = (viewName) => {
+        navItems.forEach((item) => {
+            item.classList.toggle('is-active', item.dataset.view === viewName);
+        });
+        panels.forEach((panel) => {
+            panel.classList.toggle('is-active', panel.dataset.viewPanel === viewName);
+        });
+
+        const meta = VIEW_META[viewName];
+        pageTitle.textContent = meta.title;
+
+        if (viewName === 'bot-logs') {
+            fetchBotLogs();
+        }
+        if (viewName === 'system') {
+            fetchSystemInfo();
+        }
+        if (viewName === 'webui-logs') {
+            fetchWebUILogs();
+        }
+
+        if (isMobileLayout() && mobileSidebarOpen) {
+            setMobileSidebarOpen(false);
+        }
+    };
+
+    const setStatusAppearance = (status) => {
+        const normalized = status === 'RUNNING' ? 'RUNNING' : 'DOWN';
+        const label = normalized === 'RUNNING' ? '运行中' : '离线';
+        const statusClass = normalized === 'RUNNING' ? 'status-running' : 'status-down';
+
+        globalStatusPill.textContent = `机器人 ${label}`;
+        globalStatusPill.className = `status-pill ${statusClass}`;
+
+        controlStatusBadge.textContent = label;
+        controlStatusBadge.className = `inline-status ${statusClass}`;
+
+        sidebarStatusText.textContent = label;
+        document.getElementById('dashboard-status-text').textContent = label;
+        document.getElementById('dashboard-heartbeat-text').textContent = `状态更新时间 ${formatTimestamp()}`;
+        controlSyncText.textContent = `上次同步 ${formatTimestamp()}`;
+    };
+
+    const populateTimezones = () => {
+        const timezones = [
+            selectedTimezone,
+            'UTC',
+            'Asia/Shanghai',
+            'Asia/Tokyo',
+            'Europe/Berlin',
+            'America/Los_Angeles',
+            'America/New_York'
+        ];
+
+        Array.from(new Set(timezones)).forEach((tz) => {
+            const option = document.createElement('option');
+            option.value = tz;
+            option.textContent = tz;
+            option.selected = tz === selectedTimezone;
+            timezoneSelector.appendChild(option);
+        });
+
+        dashboardTimezoneText.textContent = selectedTimezone;
+    };
+
+    const localizeBotLogTimestamp = (line) => {
+        const timestampRegex = /\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)\]/;
+        const match = line.match(timestampRegex);
+        if (!match) {
+            return line;
+        }
+
+        const utcDate = new Date(match[1]);
+        const localized = utcDate.toLocaleString(undefined, {
+            timeZone: selectedTimezone,
+            hour12: false
+        });
+        return line.replace(match[1], localized);
+    };
+
+    const renderBotLogs = () => {
+        const regexStr = botRegexInput.value.trim();
+        const selectedLevels = getSelectedLogLevels(botLogLevelFilter);
+        let lines = fullBotLogContent.split('\n').filter((line) => line.trim());
+
+        if (!selectedLevels.length) {
+            lines = [];
+        } else {
+            lines = lines.filter((line) => selectedLevels.some((level) => line.includes(`[${level}]`)));
+        }
+
+        if (regexStr) {
+            try {
+                const regex = new RegExp(regexStr, 'i');
+                lines = lines.filter((line) => regex.test(line));
+            } catch (error) {
+                syncLogContent(botLogContainer, botLogRenderState, 'Invalid Regex...', 'text');
+                if (botLogRenderState.pending) {
+                    return;
+                }
+                botLogSummary.textContent = '正则表达式无效';
+                return;
+            }
+        }
+
+        if (!lines.length) {
+            syncLogContent(botLogContainer, botLogRenderState, 'No matching logs.', 'text');
+            if (botLogRenderState.pending) {
+                return;
+            }
+            botLogSummary.textContent = '当前筛选条件下没有匹配的 Bot 日志';
+            document.getElementById('dashboard-log-count-text').textContent = '0';
+            document.getElementById('dashboard-log-lines-text').textContent = '0 行 Bot 日志';
+            return;
+        }
+
+        const html = lines.map((line) => {
+            const localizedLine = escapeHtml(localizeBotLogTimestamp(line));
+            if (localizedLine.includes('[CRITICAL]')) return `<div class="log-line log-critical">${localizedLine}</div>`;
+            if (localizedLine.includes('[ERROR]')) return `<div class="log-line log-error">${localizedLine}</div>`;
+            if (localizedLine.includes('[WARNING]')) return `<div class="log-line log-warning">${localizedLine}</div>`;
+            if (localizedLine.includes('[INFO]')) return `<div class="log-line log-info">${localizedLine}</div>`;
+            if (localizedLine.includes('[DEBUG]')) return `<div class="log-line log-debug">${localizedLine}</div>`;
+            return `<div class="log-line">${localizedLine}</div>`;
+        }).join('');
+
+        const rendered = syncLogContent(botLogContainer, botLogRenderState, html, 'html');
+        if (botLogRenderState.pending) {
+            return;
+        }
+        botLogSummary.textContent = `${lines.length} 行日志，时区 ${selectedTimezone}`;
+        document.getElementById('dashboard-log-count-text').textContent = String(lines.length);
+        document.getElementById('dashboard-log-lines-text').textContent = `${lines.length} 行 Bot 日志`;
+        if (botAutoScrollEnabled && rendered) {
+            scrollLogToBottom(botLogContainer);
+        }
+    };
+
+    const renderWebUILogs = () => {
+        const regexStr = webuiRegexInput.value.trim();
+        const selectedLevels = getSelectedLogLevels(webuiLogLevelFilter);
+        let lines = fullWebUILogContent.split('\n').filter((line) => line.trim());
+
+        if (!selectedLevels.length) {
+            lines = [];
+        } else {
+            lines = lines.filter((line) => {
+                const upper = line.toUpperCase();
+                return selectedLevels.some((level) => upper.includes(` ${level} `));
+            });
+        }
+
+        if (regexStr) {
+            try {
+                const regex = new RegExp(regexStr, 'i');
+                lines = lines.filter((line) => regex.test(line));
+            } catch (error) {
+                syncLogContent(webuiLogContainer, webuiLogRenderState, 'Invalid Regex...', 'text');
+                if (webuiLogRenderState.pending) {
+                    return;
+                }
+                webuiLogSummary.textContent = '正则表达式无效';
+                return;
+            }
+        }
+
+        if (!lines.length) {
+            syncLogContent(webuiLogContainer, webuiLogRenderState, 'No matching logs.', 'text');
+            if (webuiLogRenderState.pending) {
+                return;
+            }
+            webuiLogSummary.textContent = '当前筛选条件下没有匹配的 WebUI 日志';
+            document.getElementById('dashboard-webui-count-text').textContent = '0';
+            return;
+        }
+
+        const html = lines.map((line) => {
+            const escapedLine = escapeHtml(line);
+            const upper = escapedLine.toUpperCase();
+            if (upper.includes(' CRITICAL ')) return `<div class="log-line log-critical">${escapedLine}</div>`;
+            if (upper.includes(' ERROR ')) return `<div class="log-line log-error">${escapedLine}</div>`;
+            if (upper.includes(' WARNING ')) return `<div class="log-line log-warning">${escapedLine}</div>`;
+            if (upper.includes(' INFO ')) return `<div class="log-line log-info">${escapedLine}</div>`;
+            if (upper.includes(' DEBUG ')) return `<div class="log-line log-debug">${escapedLine}</div>`;
+            return `<div class="log-line">${escapedLine}</div>`;
+        }).join('');
+
+        const rendered = syncLogContent(webuiLogContainer, webuiLogRenderState, html, 'html');
+        if (webuiLogRenderState.pending) {
+            return;
+        }
+        webuiLogSummary.textContent = `${lines.length} 行 WebUI 日志`;
+        document.getElementById('dashboard-webui-count-text').textContent = String(lines.length);
+        document.getElementById('dashboard-webui-state-text').textContent = `最近刷新 ${formatTimestamp()}`;
+        if (webuiAutoScrollEnabled && rendered) {
+            scrollLogToBottom(webuiLogContainer);
+        }
+    };
+
+    const fetchBotStatus = async () => {
+        try {
+            const response = await fetch('/api/status');
+            const data = await response.json();
+            setStatusAppearance(data.status);
+            updateLastRefresh();
+        } catch (error) {
+            setStatusAppearance('DOWN');
+            globalStatusPill.textContent = '状态获取失败';
+            sidebarStatusText.textContent = '获取失败';
+            controlSyncText.textContent = '状态轮询失败';
+        }
+    };
+
+    const fetchBotLogs = async () => {
+        try {
+            const response = await fetch('/api/logs');
+            const data = await response.json();
+            fullBotLogContent = data.logs || '';
+            if (data.tail_lines) {
+                botLogSummary.textContent = `显示最近 ${data.tail_lines} 条缓存日志，时区 ${selectedTimezone}`;
+            }
+            renderBotLogs();
+        } catch (error) {
+            fullBotLogContent = '';
+            syncLogContent(botLogContainer, botLogRenderState, 'Error fetching Bot logs.', 'text');
+            botLogSummary.textContent = 'Bot 日志加载失败';
+        }
+    };
+
+    const fetchWebUILogs = async () => {
+        try {
+            const response = await fetch('/api/webui-logs');
+            const data = await response.json();
+            fullWebUILogContent = data.logs || '';
+            if (data.tail_lines) {
+                webuiLogSummary.textContent = `显示最近 ${data.tail_lines} 行 WebUI 日志`;
+            }
+            renderWebUILogs();
+        } catch (error) {
+            fullWebUILogContent = '';
+            syncLogContent(webuiLogContainer, webuiLogRenderState, 'Error fetching WebUI logs.', 'text');
+            webuiLogSummary.textContent = 'WebUI 日志加载失败';
+        }
+    };
+
+    const fetchSystemInfo = async () => {
+        try {
+            const response = await fetch('/api/system-info');
+            const data = await response.json();
+            const current = data.current;
+            const stats = data.stats_24h;
+
+            const cpuText = `${current.cpu_usage.toFixed(1)}%`;
+            const ramText = `${current.ram_usage_percent.toFixed(1)}% (${current.ram_usage_mb.toFixed(2)} MB / ${current.ram_total_mb.toFixed(2)} MB)`;
+            const diskText = `${current.disk_usage.percent}% (${current.disk_usage.used} / ${current.disk_usage.total})`;
+            const networkText = `${(current.net_io.bytes_sent / 1024 / 1024).toFixed(2)} MB / ${(current.net_io.bytes_recv / 1024 / 1024).toFixed(2)} MB`;
+
+            document.getElementById('cpu-usage-text').textContent = cpuText;
+            document.getElementById('ram-usage-text').textContent = ramText;
+            document.getElementById('disk-usage-text').textContent = diskText;
+            document.getElementById('network-traffic-text').textContent = networkText;
+            document.getElementById('system-cpu-current').textContent = cpuText;
+            document.getElementById('system-ram-current').textContent = ramText;
+            document.getElementById('system-disk-current').textContent = diskText;
+            document.getElementById('system-network-current').textContent = networkText;
+
+            document.getElementById('cpu-avg-24h').textContent = `${stats.cpu_avg.toFixed(1)}%`;
+            document.getElementById('cpu-peak-24h').textContent = `${stats.cpu_peak.toFixed(1)}%`;
+            document.getElementById('ram-avg-24h').textContent = `${stats.ram_avg_percent.toFixed(1)}% (${stats.ram_avg_mb.toFixed(2)} MB)`;
+            document.getElementById('ram-peak-24h').textContent = `${stats.ram_peak_percent.toFixed(1)}% (${stats.ram_peak_mb.toFixed(2)} MB)`;
+            document.getElementById('sample-count-24h').textContent = String(stats.sample_count);
+
+            document.getElementById('dashboard-cpu-text').textContent = cpuText;
+            document.getElementById('dashboard-ram-text').textContent = `RAM ${current.ram_usage_percent.toFixed(1)}%`;
+            updateLastRefresh();
+        } catch (error) {
+            [
+                'cpu-usage-text',
+                'ram-usage-text',
+                'disk-usage-text',
+                'network-traffic-text',
+                'system-cpu-current',
+                'system-ram-current',
+                'system-disk-current',
+                'system-network-current',
+                'cpu-avg-24h',
+                'cpu-peak-24h',
+                'ram-avg-24h',
+                'ram-peak-24h'
+            ].forEach((id) => {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.textContent = 'Error';
+                }
+            });
+            document.getElementById('dashboard-cpu-text').textContent = 'Error';
+            document.getElementById('dashboard-ram-text').textContent = '系统信息获取失败';
+        }
+    };
+
+    const sendControlCommand = async (action) => {
+        const endpointMap = {
+            restart: '/api/bot/restart',
+            restart_web: '/api/web/restart',
+            shutdown: '/api/bot/shutdown'
+        };
+        const actionTextMap = {
+            restart: '重启 Bot',
+            restart_web: '重启 Web',
+            shutdown: '停止 Bot'
+        };
+        const endpoint = endpointMap[action];
+        const actionText = actionTextMap[action];
+        const confirmed = confirm(`确认要执行“${actionText}”吗？`);
+        if (!confirmed) {
+            return;
+        }
+
+        try {
+            controlLastAction.textContent = `${actionText}请求发送中`;
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.message || `${actionText}失败`);
+            }
+
+            controlLastAction.textContent = `${actionText}成功: ${formatTimestamp()}`;
+            fetchBotStatus();
+        } catch (error) {
+            controlLastAction.textContent = `${actionText}失败: ${error.message}`;
+            alert(error.message);
+        }
+    };
+
+    navItems.forEach((item) => {
+        item.addEventListener('click', () => setActiveView(item.dataset.view));
+    });
+
+    openViewButtons.forEach((button) => {
+        button.addEventListener('click', () => setActiveView(button.dataset.openView));
+    });
+
+    botLogLevelFilter.querySelectorAll('input[type="checkbox"]').forEach((checkbox) => {
+        checkbox.addEventListener('change', renderBotLogs);
+    });
+    botRegexInput.addEventListener('input', renderBotLogs);
+    webuiLogLevelFilter.querySelectorAll('input[type="checkbox"]').forEach((checkbox) => {
+        checkbox.addEventListener('change', renderWebUILogs);
+    });
+    webuiRegexInput.addEventListener('input', renderWebUILogs);
+    timezoneSelector.addEventListener('change', (event) => {
+        selectedTimezone = event.target.value;
+        localStorage.setItem('selectedTimezone', selectedTimezone);
+        dashboardTimezoneText.textContent = selectedTimezone;
+        renderBotLogs();
+    });
+    themeToggleBtn.addEventListener('click', () => {
+        const currentIsDark = document.documentElement.dataset.theme === 'dark'
+            || (preferredTheme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        preferredTheme = currentIsDark ? 'light' : 'dark';
+        localStorage.setItem('preferredTheme', preferredTheme);
+        applyThemePreference();
+    });
+    mobileMenuBtn.addEventListener('click', () => {
+        if (!isMobileLayout()) {
+            return;
+        }
+        setMobileSidebarOpen(!mobileSidebarOpen);
+    });
+    mobileSidebarBackdrop.addEventListener('click', () => {
+        setMobileSidebarOpen(false);
+    });
+    botAutoScrollToggle.addEventListener('click', () => {
+        botAutoScrollEnabled = !botAutoScrollEnabled;
+        toggleAutoScroll(botAutoScrollToggle, botAutoScrollEnabled);
+        if (botAutoScrollEnabled) {
+            scrollLogToBottom(botLogContainer);
+        }
+    });
+    webuiAutoScrollToggle.addEventListener('click', () => {
+        webuiAutoScrollEnabled = !webuiAutoScrollEnabled;
+        toggleAutoScroll(webuiAutoScrollToggle, webuiAutoScrollEnabled);
+        if (webuiAutoScrollEnabled) {
+            scrollLogToBottom(webuiLogContainer);
+        }
+    });
+    restartBtn.addEventListener('click', () => sendControlCommand('restart'));
+    restartWebBtn.addEventListener('click', () => sendControlCommand('restart_web'));
+    shutdownBtn.addEventListener('click', () => sendControlCommand('shutdown'));
+    document.addEventListener('selectionchange', flushPendingLogRender);
+
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyThemeLabel);
+    window.matchMedia('(max-width: 768px)').addEventListener('change', () => {
+        setMobileSidebarOpen(false);
+    });
+
+    populateTimezones();
+    applyThemePreference();
+    toggleAutoScroll(botAutoScrollToggle, botAutoScrollEnabled);
+    toggleAutoScroll(webuiAutoScrollToggle, webuiAutoScrollEnabled);
+    fetchBotStatus();
+    fetchBotLogs();
+    fetchWebUILogs();
+    fetchSystemInfo();
+
+    setInterval(fetchBotStatus, 1000);
+    setInterval(fetchSystemInfo, 2000);
+    setInterval(fetchWebUILogs, 2000);
+    setInterval(fetchBotLogs, 1500);
+    setInterval(() => {
+        if (botAutoScrollEnabled && !isSelectionInside(botLogContainer)) {
+            scrollLogToBottom(botLogContainer);
+        }
+        if (webuiAutoScrollEnabled && !isSelectionInside(webuiLogContainer)) {
+            scrollLogToBottom(webuiLogContainer);
+        }
+    }, 500);
+
+    setActiveView('dashboard');
+});
+</script>
+</body>
+</html>

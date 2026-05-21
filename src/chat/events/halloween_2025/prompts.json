@@ -1,0 +1,10 @@
+{
+    "system_prompt_faction_packs": {
+        "church": "factions/church.xml",
+        "vampire": "factions/vampire.xml",
+        "ghost": "factions/ghost.xml",
+        "jiangshi": "factions/jiangshi.xml",
+        "werewolf": "factions/werewolf.xml",
+        "witch": "factions/witch.xml"
+    }
+}

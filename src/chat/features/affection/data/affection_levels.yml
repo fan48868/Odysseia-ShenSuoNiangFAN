@@ -1,0 +1,26 @@
+# 好感度等级定义
+- id: "neutral"
+  min_affection: -9999
+  max_affection: -1
+  level_name: "中立"
+  prompt: "中立"
+- id: "acquaintance"
+  min_affection: 0
+  max_affection: 49
+  level_name: "认识"
+  prompt: "认识"
+- id: "friendly"
+  min_affection: 50
+  max_affection: 7999
+  level_name: "友好"
+  prompt: "友好"
+- id: "intimate"
+  min_affection: 8000
+  max_affection: 9999
+  level_name: "亲密"
+  prompt: "亲密"
+- id: "very_friendly"
+  min_affection: 10000
+  max_affection: 99999
+  level_name: "依恋"
+  prompt: "依恋"

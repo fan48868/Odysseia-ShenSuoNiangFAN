@@ -1,0 +1,20 @@
+{
+    "name" : "Odysseia_Guidance_bot",
+    "dockerComposeFile" : ["../docker-compose.yml"],
+    "workspaceFolder": "/app",
+    "service": "bot_app",
+    "postCreateCommand": "echo 'DEV MODE: Start Successful'",
+    "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance", 
+        "donjayamanne.githistory",
+        "alexcvzz.vscode-sqlite"
+      ],
+      "settings": {
+      "python.defaultInterpreterPath": "/usr/local/bin/python"
+      }
+    }
+  }
+}

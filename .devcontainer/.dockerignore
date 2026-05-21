@@ -1,0 +1,20 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# IDE/Editor
+.idea/
+.vscode/
+
+# Docker
+Dockerfile
+docker-compose.yml

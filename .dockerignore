@@ -1,0 +1,16 @@
+# Copy the runtime code into the image, but keep the build context lean by
+# excluding local databases, caches, docs, and other non-runtime assets.
+**
+!.dockerignore
+!.devcontainer/
+!.devcontainer/Dockerfile
+!requirements.txt
+!alembic.ini
+!src/
+!src/**
+!alembic/
+!alembic/**
+!web/
+!web/**
+!scripts/
+!scripts/**

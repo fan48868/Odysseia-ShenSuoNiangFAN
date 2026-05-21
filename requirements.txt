@@ -1,0 +1,40 @@
+# 项目核心依赖
+discord.py[speed]
+python-dotenv
+Pillow
+requests
+aiohttp
+aiosqlite
+google-genai
+google-api-core
+PyYAML
+chromadb
+objgraph
+uvloop; sys_platform != 'win32'
+apscheduler
+# PostgreSQL and ORM dependencies
+SQLAlchemy
+asyncpg
+pgvector
+alembic
+gradio_client
+
+# Data Processing & AI
+langchain-text-splitters
+numpy==1.26.4
+edge-tts
+
+# Web UI 依赖
+fastapi
+uvicorn
+gunicorn
+eventlet
+docker
+psutil
+
+# 测试依赖
+pytest
+pytest-asyncio
+pytest-dotenv
+# This is for Alembic's sync operations, our main app still uses asyncpg
+psycopg2-binary

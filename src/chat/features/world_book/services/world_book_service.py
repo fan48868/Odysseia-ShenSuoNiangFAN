@@ -1,0 +1,398 @@
+import logging
+from typing import Optional, List, Dict, Any
+import json
+import os
+
+import asyncio
+from sqlalchemy import select
+
+# 导入新的服务依赖
+from src.chat.services.gemini_service import GeminiService, gemini_service
+from src import config
+from src.chat.config import chat_config
+from src.chat.features.world_book.services.incremental_rag_service import (
+    incremental_rag_service,
+)
+from src.database.database import AsyncSessionLocal
+from src.database.models import CommunityMemberProfile
+
+log = logging.getLogger(__name__)
+
+# 定义数据库文件路径
+DB_PATH = os.path.join(config.DATA_DIR, "world_book.sqlite3")
+
+
+class WorldBookService:
+    """
+    使用向量数据库进行语义搜索，以查找相关的世界书条目。
+    同时支持通过 Discord ID 直接从 SQLite 数据库查找用户档案。
+    """
+
+    def __init__(self, gemini_svc: GeminiService):
+        self.gemini_service = gemini_svc
+        log.info("WorldBookService (ParadeDB Hybrid Search version) 初始化完成。")
+
+    def is_ready(self) -> bool:
+        """检查服务是否已准备好（所有依赖项都可用）。"""
+        return self.gemini_service.is_available()
+
+    @staticmethod
+    def _flatten_profile_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+        profile_dict = dict(row)
+        source_metadata = profile_dict.get("source_metadata")
+        if isinstance(source_metadata, str):
+            try:
+                source_metadata = json.loads(source_metadata)
+                profile_dict["source_metadata"] = source_metadata
+            except Exception:
+                source_metadata = None
+
+        if isinstance(source_metadata, dict):
+            for key in ("name", "personality", "background", "preferences"):
+                if key in source_metadata and key not in profile_dict:
+                    profile_dict[key] = source_metadata.get(key)
+        return profile_dict
+
+    async def find_entries(
+        self,
+        latest_query: str,
+        user_id: int,
+        guild_id: int,
+        user_name: str,  # 新增：接收提问者的名字
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+        n_results: int = chat_config.RAG_N_RESULTS_DEFAULT,
+        max_distance: float = 0.5,
+        query_embedding: Optional[List[float]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        根据用户的最新问题和可选的对话历史，总结查询并查找相关的世界书条目。
+
+        Args:
+            latest_query: 用户最新的原始消息。
+            user_id: 用户的 Discord ID。
+            guild_id: 服务器的 Discord ID。
+            conversation_history: (可选) 用于生成查询的特定对话历史。
+            n_results: 要返回的结果数量。
+            max_distance: RAG 搜索的距离阈值，用于过滤不相关的结果。
+
+        Returns:
+            一个包含最相关条目信息的字典列表。
+        """
+        if not self.is_ready() or not latest_query:
+            if not latest_query:
+                log.debug("latest_query 为空，跳过 RAG 搜索。")
+            else:
+                log.info("RAG功能未启用：未配置API密钥，跳过检索。")
+            return []
+
+        # 2. 使用 GeminiService 总结对话历史以生成查询
+        # 在将历史记录传递给RAG总结器之前，移除最后一条由系统注入的上下文提示
+        history_for_rag = conversation_history.copy() if conversation_history else []
+        if history_for_rag and history_for_rag[-1].get("role") == "model":
+            # 通过一个独特的标记来识别这条系统消息
+            if (
+                "我会按好感度和上下文综合回复"
+                in history_for_rag[-1].get("parts", [""])[0]
+            ):
+                history_for_rag.pop()
+                log.debug("已为RAG总结移除系统注入的上下文提示。")
+
+        # RAG 查询重写功能已根据用户要求移除，直接使用清理后的原始查询
+        from src.chat.services.regex_service import regex_service
+        import re
+
+        clean_query = regex_service.clean_user_input(latest_query)
+        # 进一步移除 Discord 提及
+        summarized_query = re.sub(r"<@!?&?\d+>\s*", "", clean_query).strip()
+        # log.info(f"原始查询: '{summarized_query}'")
+
+        # 4. 确保查询字符串不为空
+        if not summarized_query.strip():
+            log.warning(f"最终查询为空，无法进行RAG搜索 (user_id: {user_id})")
+            return []
+
+        # 3. 执行混合搜索
+        try:
+            # 导入新的混合搜索服务
+            from src.chat.features.world_book.services.knowledge_search_service import (
+                knowledge_search_service,
+            )
+
+            search_results = await knowledge_search_service.search(
+                summarized_query,
+                user_id=user_id,
+                query_embedding=query_embedding,
+            )
+
+            if search_results:
+                search_brief = [
+                    f"{r['id']}(score:{1 - r['distance']:.4f})" for r in search_results
+                ]
+                log.debug(f"知识库混合搜索简报 (ID 和 Score): {search_brief}")
+            else:
+                log.debug("知识库混合搜索未返回任何结果。")
+
+            # 根据 max_distance 过滤结果 (虽然主要排序由RRF完成，但保留此逻辑作为补充)
+            # 注意：这里的 'distance' 是从 rrf_score 转换来的，所以阈值可能需要调整
+            # 0.5 的 distance 意味着 rrf_score > 0.5
+            # To-Do: 审查 RRF 分数转换逻辑，目前 distance 过滤不适用
+            # filtered_results = [
+            #     res for res in search_results if res["distance"] <= max_distance
+            # ]
+            #
+            # if len(filtered_results) < len(search_results):
+            #     log.info(
+            #         f"原始召回 {len(search_results)} 个结果, 距离阈值过滤后剩余 {len(filtered_results)} 个。"
+            #     )
+            #
+            # return filtered_results
+            return search_results
+        except Exception as e:
+            log.error(f"在知识库混合搜索过程中发生错误: {e}", exc_info=True)
+            return []
+
+    def add_general_knowledge(
+        self,
+        title: str,
+        name: str,
+        content_text: str,
+        category_name: str,
+        contributor_id: Optional[int] = None,
+    ) -> bool:
+        """
+        向 general_knowledge 表添加一个新的知识条目。
+
+        Args:
+            title: 知识条目的标题
+            name: 知识条目的名称
+            content_text: 知识条目的内容文本
+            category_name: 知识条目的类别名称
+            contributor_id: 贡献者的 Discord ID (可选)
+
+        Returns:
+            bool: 添加成功返回 True，否则返回 False
+        """
+
+        # 直接使用 RAG 服务的数据库连接
+        conn = incremental_rag_service._get_parade_connection()
+        if not conn:
+            log.error("ParadeDB 连接不可用，无法添加知识条目。")
+            return False
+
+        try:
+            from psycopg2.extras import DictCursor
+
+            cursor = conn.cursor(cursor_factory=DictCursor)
+
+            # 1. 检查或创建类别 (假设 category_id=5 存在)
+            # 在 ParadeDB 中，我们暂时不处理动态类别创建，简化逻辑
+            category_id = 5  # 假设 "通用知识" 类别 ID 为 5
+            log.debug(f"使用固定的类别 ID: {category_id}")
+
+            # 2. 准备内容数据
+            content_dict = {"description": content_text}
+            content_json_str = json.dumps(content_dict, ensure_ascii=False)
+
+            # 3. 准备 source_metadata
+            import time
+            import re
+
+            clean_title = re.sub(r"[^\w\u4e00-\u9fff]", "_", title)[:50]
+            external_id = f"{clean_title}_{int(time.time())}"
+
+            source_metadata = {
+                "id": external_id,
+                "title": title,
+                "name": name,
+                "content_json": content_json_str,
+                "category_id": category_id,
+                "contributor_id": contributor_id,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "status": "approved",
+            }
+            source_metadata_str = json.dumps(source_metadata, ensure_ascii=False)
+
+            # 4. 插入新条目并获取返回的 id
+            cursor.execute(
+                """
+                INSERT INTO general_knowledge.knowledge_documents (external_id, title, full_text, source_metadata, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, NOW(), NOW())
+                RETURNING id
+                """,
+                (external_id, title, content_json_str, source_metadata_str),
+            )
+
+            new_entry = cursor.fetchone()
+            if not new_entry or "id" not in new_entry:
+                raise Exception("未能获取新插入条目的 ID。")
+
+            new_id = new_entry["id"]
+            conn.commit()
+            # 异步调用增量RAG服务，使用正确的整数 ID
+            log.info(f"正在为新知识条目 ID={new_id} 创建异步向量化任务...")
+            asyncio.create_task(
+                incremental_rag_service.process_general_knowledge(str(new_id))
+            )
+
+            return True
+
+        except Exception as e:
+            log.error(f"添加知识条目到 ParadeDB 时发生错误: {e}", exc_info=True)
+            if conn:
+                conn.rollback()
+            return False
+        finally:
+            if "cursor" in locals() and cursor:
+                cursor.close()
+            # 注意：不在这里关闭连接，因为连接由 RAG 服务管理
+
+    async def get_profile_by_discord_id(
+        self,
+        discord_id: int,
+        user_name: Optional[str] = None,
+        auto_create: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        通过 Discord ID 从 ParadeDB 的 community.member_profiles 表中获取用户档案。
+
+        Args:
+            discord_id: 用户的 Discord ID。
+            user_name: (可选) 用户名/昵称。当前仅为兼容保留，不用于自动创建名片。
+            auto_create: (可选) 兼容参数，当前不生效（不会自动创建最小名片）。
+
+        Returns:
+            一个包含用户档案数据的字典，如果找不到则返回 None。
+        """
+        log.info(f"正在从 ParadeDB 查询 discord_id 为 {discord_id} 的用户档案...")
+        timeout_seconds = 3.0
+
+        async def _fetch_profile_once() -> Optional[Dict[str, Any]]:
+            async with AsyncSessionLocal() as session:
+                stmt = select(CommunityMemberProfile).where(
+                    CommunityMemberProfile.discord_id == str(discord_id)
+                )
+                result = await session.execute(stmt)
+                profile = result.scalars().first()
+                if profile is None:
+                    return None
+                return self._flatten_profile_dict(
+                    {
+                        "id": profile.id,
+                        "discord_id": profile.discord_id,
+                        "title": profile.title,
+                        "personal_summary": profile.personal_summary,
+                        "source_metadata": profile.source_metadata,
+                    }
+                )
+
+        try:
+            profile = await asyncio.wait_for(_fetch_profile_once(), timeout=timeout_seconds)
+            if profile:
+                log.info(f"成功找到 discord_id {discord_id} 的用户档案。")
+                return profile
+
+            log.warning(f"在 ParadeDB 中未找到 discord_id {discord_id} 的用户档案。")
+            if not auto_create:
+                return None
+
+            created = await asyncio.wait_for(
+                self._auto_create_minimal_member_profile(
+                    discord_id=discord_id,
+                    user_name=user_name,
+                ),
+                timeout=timeout_seconds,
+            )
+            if not created:
+                return None
+
+            return await asyncio.wait_for(_fetch_profile_once(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            log.warning(
+                "查询用户档案超时，已降级为空结果 | discord_id=%s | timeout=%.1fs",
+                discord_id,
+                timeout_seconds,
+            )
+            return None
+        except Exception as e:
+            log.error(f"查询用户档案时发生未知错误: {e}", exc_info=True)
+            return None
+
+    async def _auto_create_minimal_member_profile(
+        self,
+        discord_id: int,
+        user_name: Optional[str] = None,
+    ) -> bool:
+        """
+        自动创建一个最小的 community.member_profiles 名片，用于保证个人记忆功能可写入。
+        - external_id: auto_discord_{discord_id}
+        - title: user_name
+        - personality: 直接复制 user_name
+        - background/preferences 留空
+        """
+        safe_name = (user_name or "").strip() or f"用户 {discord_id}"
+        personality = safe_name
+        background = ""
+        preferences = ""
+
+        full_text = (
+            f"名称: {safe_name}\n"
+            f"Discord ID: {discord_id}\n"
+            f"性格特点: {personality}\n"
+            f"背景信息: {background}\n"
+            f"喜好偏好: {preferences}"
+        ).strip()
+
+        source_metadata = {
+            "name": safe_name,
+            "discord_id": str(discord_id),
+            "personality": personality,
+            "background": background,
+            "preferences": preferences,
+            "source": "auto_create",
+        }
+
+        external_id = f"auto_discord_{discord_id}"
+
+        try:
+            member_id: Optional[str] = None
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    stmt = select(CommunityMemberProfile).where(
+                        CommunityMemberProfile.discord_id == str(discord_id)
+                    )
+                    result = await session.execute(stmt)
+                    existing = result.scalars().first()
+                    if existing is not None:
+                        member_id = str(existing.id)
+                    else:
+                        profile = CommunityMemberProfile(
+                            external_id=external_id,
+                            discord_id=str(discord_id),
+                            title=safe_name,
+                            full_text=full_text,
+                            source_metadata=source_metadata,
+                        )
+                        session.add(profile)
+                        await session.flush()
+                        member_id = str(profile.id)
+
+            if member_id:
+                log.info(
+                    f"已自动创建最小名片: discord_id={discord_id}, member_id={member_id}"
+                )
+                asyncio.create_task(
+                    incremental_rag_service.process_community_member(member_id)
+                )
+                return True
+
+            return True
+        except Exception as e:
+            log.error(
+                f"自动创建最小名片时发生未知错误: discord_id={discord_id}, err={e}",
+                exc_info=True,
+            )
+            return False
+
+
+# 使用已导入的全局服务实例来创建 WorldBookService 的单例
+world_book_service = WorldBookService(gemini_service)

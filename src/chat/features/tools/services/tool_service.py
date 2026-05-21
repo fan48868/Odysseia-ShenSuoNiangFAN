@@ -1,0 +1,371 @@
+import asyncio
+import inspect
+import json
+import logging
+from typing import Optional, Dict, Callable, Any, List, Tuple
+
+import discord
+from google.genai import types
+
+from src.chat.config.chat_config import HIDDEN_TOOLS
+from src.chat.features.tools.services.user_tool_settings_service import (
+    user_tool_settings_service,
+)
+
+log = logging.getLogger(__name__)
+
+_DUPLICATE_TOOL_CALL_MESSAGE = "你已调用过这个工具了，请根据结果生成回复"
+
+
+class ToolService:
+    """
+    一个负责管理和执行 Gemini 模型工具的服务。
+
+    它包含两个核心功能:
+    1. 动态地为每个聊天上下文提供正确的工具列表。
+    2. 执行模型请求的工具函数调用。
+    """
+
+    def __init__(
+        self,
+        bot: Optional[discord.Client],
+        tool_map: Dict[str, Callable],
+        tool_declarations: List[Callable],
+    ):
+        """
+        初始化 ToolService。
+
+        Args:
+            bot: Discord 客户端实例，将注入到需要它的工具中。
+            tool_map: 一个字典，将工具名称映射到其对应的异步函数实现。
+            tool_declarations: 从工具加载器获得的原始工具函数声明列表。
+        """
+        self.bot = bot
+        self.tool_map = tool_map
+        self.tool_declarations = tool_declarations
+        self._last_completed_tool_calls: Dict[str, Dict[str, Any]] = {}
+        self._tool_call_state_lock = asyncio.Lock()
+        log.info(
+            f"ToolService 已使用 {len(tool_map)} 个工具进行初始化: {list(tool_map.keys())}"
+        )
+
+    @staticmethod
+    def _serialize_tool_args(tool_args: Dict[str, Any]) -> str:
+        """将模型原始参数稳定序列化，用于比较“是否完全相同”。"""
+        return json.dumps(tool_args, ensure_ascii=False, sort_keys=True, default=str)
+
+    @classmethod
+    def _build_tool_call_signature(cls, tool_name: str, tool_args: Dict[str, Any]) -> str:
+        return f"{tool_name}:{cls._serialize_tool_args(tool_args)}"
+
+    @staticmethod
+    def _build_tool_call_scope_key(
+        channel: Optional[discord.TextChannel], user_id: Optional[int]
+    ) -> str:
+        channel_id = getattr(channel, "id", None)
+        guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        return f"guild:{guild_id}|channel:{channel_id}|user:{user_id}"
+
+    async def _check_duplicate_tool_call(
+        self, scope_key: str, tool_name: str, tool_signature: str
+    ) -> bool:
+        """
+        仅当“上一次已完成调用”成功执行，且工具名与原始参数完全一致时，
+        才拒绝本次调用。
+        """
+        async with self._tool_call_state_lock:
+            last_call = self._last_completed_tool_calls.get(scope_key)
+            is_duplicate = bool(
+                last_call
+                and last_call.get("succeeded") is True
+                and last_call.get("tool_name") == tool_name
+                and last_call.get("signature") == tool_signature
+            )
+            if is_duplicate:
+                self._last_completed_tool_calls[scope_key] = {
+                    "tool_name": tool_name,
+                    "signature": tool_signature,
+                    "succeeded": False,
+                }
+            return is_duplicate
+
+    async def _remember_completed_tool_call(
+        self, scope_key: str, tool_name: str, tool_signature: str, succeeded: bool
+    ) -> None:
+        async with self._tool_call_state_lock:
+            self._last_completed_tool_calls[scope_key] = {
+                "tool_name": tool_name,
+                "signature": tool_signature,
+                "succeeded": succeeded,
+            }
+
+    async def get_dynamic_tools_for_context(
+        self, user_id_for_settings: Optional[str] = None
+    ) -> List[Callable]:
+        """
+        获取当前上下文可用的原始工具列表。
+
+        全局工具开关会在调用链路中单独过滤，这里始终返回原始工具声明。
+
+        Args:
+            user_id_for_settings: 兼容旧调用链保留的参数，当前已不再使用。
+
+        Returns:
+            所有原始工具函数列表。
+        """
+        if user_id_for_settings:
+            log.info(
+                "当前已使用全局工具开关模式，忽略 user_id_for_settings=%s。",
+                user_id_for_settings,
+            )
+        return self.tool_declarations
+
+    async def filter_tools_for_global_settings(
+        self, tools: List[Callable]
+    ) -> Tuple[List[Callable], List[str]]:
+        """
+        根据全局工具开关过滤工具列表。
+
+        Returns:
+            (filtered_tools, skipped_tool_names)
+        """
+        enabled_tool_names = (
+            await user_tool_settings_service.get_globally_enabled_tool_names()
+        )
+        if enabled_tool_names is None:
+            return tools, []
+
+        filtered_tools: List[Callable] = []
+        skipped_tools: List[str] = []
+
+        for tool in tools:
+            tool_name = getattr(tool, "__name__", "")
+            if not tool_name:
+                filtered_tools.append(tool)
+                continue
+
+            if tool_name in HIDDEN_TOOLS or tool_name in enabled_tool_names:
+                filtered_tools.append(tool)
+                continue
+
+            skipped_tools.append(tool_name)
+
+        return filtered_tools, skipped_tools
+
+    async def is_tool_globally_enabled(self, tool_name: str) -> bool:
+        """检查某个工具当前是否处于全局启用状态。"""
+        if tool_name in HIDDEN_TOOLS:
+            return True
+
+        enabled_tool_names = (
+            await user_tool_settings_service.get_globally_enabled_tool_names()
+        )
+        return enabled_tool_names is None or tool_name in enabled_tool_names
+
+    async def execute_tool_call(
+        self,
+        tool_call: types.FunctionCall,
+        channel: Optional[discord.TextChannel] = None,
+        user_id: Optional[int] = None,
+        log_detailed: bool = False,
+        user_id_for_settings: Optional[str] = None,
+        image_context_list: Optional[List[Dict[str, str]]] = None,
+    ) -> types.Part:
+        """
+        执行单个工具调用，并以可发送回 Gemini 模型的格式返回结果。
+        这个版本通过依赖注入来提供上下文（如 bot 实例、channel），并处理备用参数（如 user_id）。
+
+        Args:
+            tool_call: 来自 Gemini API 响应的函数调用对象。
+            channel: 可选的当前消息所在的 Discord 频道对象。
+            user_id: 可选的当前消息作者的 Discord ID，用作某些参数的备用值。
+            log_detailed: 是否记录详细日志。
+            user_id_for_settings: 兼容旧调用链保留的参数，当前已不再使用。
+
+        Returns:
+            一个格式化为 FunctionResponse 的 Part 对象，其中包含工具的输出。
+        """
+        tool_name = tool_call.name
+        original_tool_args: Dict[str, Any] = (
+            {key: value for key, value in tool_call.args.items()}
+            if getattr(tool_call, "args", None)
+            else {}
+        )
+        tool_signature = (
+            self._build_tool_call_signature(tool_name, original_tool_args)
+            if tool_name
+            else ""
+        )
+        scope_key = self._build_tool_call_scope_key(channel, user_id)
+        if log_detailed:
+            log.info(f"--- [工具执行流程]: 准备执行 '{tool_name}' ---")
+
+        if not tool_name:
+            log.error("接收到没有名称的工具调用。")
+            return types.Part.from_function_response(
+                name="unknown_tool",
+                response={"error": "Tool call with no name received."},
+            )
+
+        tool_function = self.tool_map.get(tool_name)
+
+        if not tool_function:
+            log.error(f"找不到工具 '{tool_name}' 的实现。")
+            await self._remember_completed_tool_call(
+                scope_key, tool_name, tool_signature, succeeded=False
+            )
+            return types.Part.from_function_response(
+                name=tool_name, response={"error": f"Tool '{tool_name}' not found."}
+            )
+
+        try:
+            if not await self.is_tool_globally_enabled(tool_name):
+                log.info("工具 '%s' 当前已全局关闭，拒绝执行。", tool_name)
+                await self._remember_completed_tool_call(
+                    scope_key, tool_name, tool_signature, succeeded=False
+                )
+                return types.Part.from_function_response(
+                    name=tool_name,
+                    response={"error": f"工具 '{tool_name}' 当前已被全局关闭。"},
+                )
+        except Exception as e:
+            log.error("检查全局工具设置时出错: %s", e, exc_info=True)
+
+        try:
+            if await self._check_duplicate_tool_call(
+                scope_key, tool_name, tool_signature
+            ):
+                log.info("检测到连续重复工具调用，已拦截 '%s'。", tool_name)
+                return types.Part.from_function_response(
+                    name=tool_name,
+                    response={"result": _DUPLICATE_TOOL_CALL_MESSAGE},
+                )
+
+            # 步骤 1: 从模型响应中提取参数
+            tool_args: Dict[str, Any] = dict(original_tool_args)
+            if log_detailed:
+                log.info(f"模型提供的参数: {tool_args}")
+
+            # 步骤 2 & 3: 智能注入依赖和上下文
+            # 我们不再检查函数签名，而是将所有可用的上下文信息直接注入
+            # 到 tool_args 中。工具函数可以通过 **kwargs 来按需取用。
+            sig = inspect.signature(tool_function)
+            # 无条件注入 bot 实例，让工具函数可以通过 **kwargs 按需获取
+            tool_args["bot"] = self.bot
+            if log_detailed:
+                log.info("已注入 'bot' 实例。")
+
+            if user_id is not None:
+                # 优先注入通用的 user_id
+                # 统一将 user_id 转为字符串类型再注入，以适配工具函数的类型期望
+                user_id_str = str(user_id)
+                # 核心修复：只有当模型没有提供 user_id 时，才注入当前用户的 id 作为默认值。
+                if "user_id" not in tool_args:
+                    tool_args["user_id"] = user_id_str
+                    if log_detailed:
+                        log.info(
+                            f"模型未提供 'user_id'，已注入当前用户 ID: {user_id_str}"
+                        )
+
+                # 为需要 author_id 的旧工具提供兼容性
+                if "author_id" in sig.parameters and "author_id" not in tool_args:
+                    tool_args["author_id"] = user_id_str
+                    if log_detailed:
+                        log.info(
+                            f"为兼容性，已填充 'author_id': {tool_args['author_id']}"
+                        )
+
+            if channel:
+                tool_args["channel"] = channel
+                if log_detailed:
+                    log.info(f"已注入 'channel' (ID: {channel.id}) 到 **kwargs。")
+                if channel.guild:
+                    # 同时注入 guild 对象本身和 guild_id，以提供最大的灵活性
+                    tool_args["guild"] = channel.guild
+                    tool_args["guild_id"] = str(channel.guild.id)
+                    if log_detailed:
+                        log.info(f"已注入 'guild' (ID: {channel.guild.id}) 实例。")
+                if isinstance(channel, discord.Thread):
+                    tool_args["thread_id"] = channel.id
+                    if log_detailed:
+                        log.info(f"检测到帖子上下文，已注入 'thread_id': {channel.id}")
+
+            # 步骤 4: 智能地传递 log_detailed 参数
+            if "log_detailed" in sig.parameters:
+                tool_args["log_detailed"] = log_detailed
+
+            # 步骤 4.5: 为深度识图工具注入图片上下文（不暴露给模型参数）
+            if tool_name == "analyze_image_with_gemini_pro" and image_context_list:
+                if "image_context_list" not in tool_args:
+                    tool_args["image_context_list"] = image_context_list
+                    if log_detailed:
+                        log.info(
+                            f"已为 '{tool_name}' 注入 image_context_list（{len(image_context_list)} 张图片）。"
+                        )
+
+            # --- 安全加固：确保 'get_yearly_summary' 只能对当前用户执行 ---
+            if tool_name == "get_yearly_summary" and user_id is not None:
+                user_id_str = str(user_id)
+                if tool_args.get("user_id") != user_id_str:
+                    log.warning(
+                        f"检测到模型为 get_yearly_summary 提供了不同的 user_id ({tool_args.get('user_id')})。"
+                        f"已强制覆盖为当前用户 ID ({user_id_str})。"
+                    )
+                tool_args["user_id"] = user_id_str
+
+            # --- 安全加固：确保 'issue_user_warning' 只能对当前用户执行 ---
+            if tool_name == "issue_user_warning" and user_id is not None:
+                user_id_str = str(user_id)
+                if tool_args.get("user_id") != user_id_str:
+                    log.warning(
+                        f"检测到模型尝试为其他用户 ({tool_args.get('user_id')}) 调用警告工具。"
+                        f"已强制重定向到当前用户 ({user_id_str})。"
+                    )
+                tool_args["user_id"] = user_id_str
+
+            # 步骤 5: 执行工具函数
+            result = await tool_function(**tool_args)
+            await self._remember_completed_tool_call(
+                scope_key, tool_name, tool_signature, succeeded=True
+            )
+            if log_detailed:
+                log.info(f"工具 '{tool_name}' 执行完毕。")
+
+            # 步骤 5: 根据工具返回的结果，构造相应的 Part
+            if "image_data" in result and isinstance(result["image_data"], dict):
+                # 这是一个多模态（图片）结果
+                image_info = result["image_data"]
+                if log_detailed:
+                    log.info(
+                        f"检测到图片结果，MIME 类型: {image_info.get('mime_type')}"
+                    )
+                part = types.Part(
+                    inline_data=types.Blob(
+                        mime_type=image_info.get("mime_type", "image/png"),
+                        data=image_info.get("data", b""),
+                    )
+                )
+                if log_detailed:
+                    log.info(f"已为 '{tool_name}' 构造包含图片的 Part。")
+                return part
+            else:
+                # 这是一个标准的文本/JSON结果（包括错误信息）
+                part = types.Part.from_function_response(
+                    name=tool_name,
+                    response={"result": result or "操作成功完成，但没有返回文本内容。"},
+                )
+                if log_detailed:
+                    log.info(f"已为 '{tool_name}' 构造标准的 FunctionResponse Part。")
+                return part
+
+        except Exception as e:
+            log.error(f"执行工具 '{tool_name}' 时发生意外错误。", exc_info=True)
+            await self._remember_completed_tool_call(
+                scope_key, tool_name, tool_signature, succeeded=False
+            )
+            return types.Part.from_function_response(
+                name=tool_name,
+                response={
+                    "error": f"An unexpected error occurred during execution: {str(e)}"
+                },
+            )

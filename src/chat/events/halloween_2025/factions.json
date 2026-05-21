@@ -1,0 +1,62 @@
+[
+    {
+        "faction_id": "werewolf",
+        "faction_name": "狼人",
+        "description": "在绯红的月光下，我们拥抱原始的野性。加入我们，你将获得无与伦比的力量与速度，在暗影森林中肆意奔跑，用利爪与嚎叫宣告我们的统治。我们是黑夜的猎手，是自然的怒火。",
+        "icon": "🐺",
+        "response_images": {
+            "feeding": "https://cdn.discordapp.com/attachments/1403347767912562728/1432339619315449906/3_926158020530680_00001_.png",
+            "confession": "https://cdn.discordapp.com/attachments/1403347767912562728/1432339618828914751/3_1104920547099129_00001_.png"
+        }
+    },
+    {
+        "faction_id": "vampire",
+        "faction_name": "吸血鬼",
+        "description": "我们是永恒的贵族，优雅与力量的化身。在古老的城堡深处，我们品味着时间的醇香，策划着对黑夜的掌控。加入我们，你将获得不朽的生命与蛊惑人心的魅力，成为暗夜的君王。",
+        "icon": "🧛",
+        "response_images": {
+            "feeding": "https://cdn.discordapp.com/attachments/1403347767912562728/1430507365756698724/3_522508349974848_00001_.png",
+            "confession": "https://cdn.discordapp.com/attachments/1403347767912562728/1430507287084138557/3_53148456161468_00002_.png"
+        }
+    },
+    {
+        "faction_id": "church",
+        "faction_name": "教会",
+        "description": "我们是圣光的守护者，是人类最后的防线。面对无尽的黑暗，我们从不畏惧。凭借着信仰、圣水和银弹，我们追猎一切邪恶。加入我们，为黎明而战，让圣光净化这片被诅咒的土地。",
+        "icon": "✝️",
+        "response_images": {
+            "feeding": "https://cdn.discordapp.com/attachments/1403347767912562728/1430886132815761438/3_661001167434285_00001_.png",
+            "confession": "https://cdn.discordapp.com/attachments/1403347767912562728/1430886378140598403/3_432421142712153_00001_.png"
+        }
+    },
+    {
+        "faction_id": "ghost",
+        "faction_name": "幽灵",
+        "description": "我们是被遗忘的低语，是徘徊在现实边缘的观察者。我们穿梭于墙壁之间，洞悉凡人看不见的秘密。加入我们，你将摆脱肉体的束缚，获得无形的自由，成为真正的秘密主宰。",
+        "icon": "👻",
+        "response_images": {
+            "feeding": "https://cdn.discordapp.com/attachments/1403347767912562728/1430189103407693885/3_55824559452269_00001_.png",
+            "confession": "https://cdn.discordapp.com/attachments/1403347767912562728/1430189103965540455/3_794856955991298_00001_.png"
+        }
+    },
+    {
+        "faction_id": "jiangshi",
+        "faction_name": "僵尸",
+        "description": "我们身着前朝官服，额贴符咒，以跳跃代替行走。我们是介于生死之间的存在，听从主人的号令，守护着古老的秘密与宝藏。加入我们，你将获得刀枪不入的躯体和震慑心魄的力量。",
+        "icon": "📜",
+        "response_images": {
+            "feeding": "https://cdn.discordapp.com/attachments/1403347767912562728/1431235395827531786/3_810121096752483_00001_.png",
+            "confession": "https://cdn.discordapp.com/attachments/1403347767912562728/1431235397568036925/3_1089845605437870_00001_.png"
+        }
+    },
+    {
+        "faction_id": "witch",
+        "faction_name": "南瓜女巫",
+        "description": "我们是魔法的宠儿，是自然力量的引导者。在南瓜灯的照耀下，我们熬制着神秘的药水，吟唱着古老的咒语。加入我们，你将掌握变换与创造的奥秘，用魔法守护我们的南瓜乐园。",
+        "icon": "🧙",
+        "response_images": {
+            "feeding": "https://cdn.discordapp.com/attachments/1403347767912562728/1431974346548842588/3_265239702953364_00001_.png",
+            "confession": "https://cdn.discordapp.com/attachments/1403347767912562728/1431973716232896593/3_689257830827179_00001_.png"
+        }
+    }
+]

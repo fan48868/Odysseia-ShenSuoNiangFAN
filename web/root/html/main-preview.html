@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Odysseia Guidance Preview</title>
+    <link rel="stylesheet" href="../css/main.css">
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar">
+            <div class="brand-block">
+                <div class="brand-mark">OG</div>
+                <div class="brand-copy">
+                    <strong>Odysseia</strong>
+                    <span>Preview Console</span>
+                </div>
+            </div>
+
+            <nav class="sidebar-nav" aria-label="功能导航">
+                <button class="nav-item is-active" type="button" data-view="dashboard">
+                    <span class="nav-index">01</span>
+                    <span class="nav-text"><strong>仪表盘</strong><small>核心状态概览</small></span>
+                </button>
+                <button class="nav-item" type="button" data-view="controls">
+                    <span class="nav-index">02</span>
+                    <span class="nav-text"><strong>机器人控制</strong><small>启动与停止操作</small></span>
+                </button>
+                <button class="nav-item" type="button" data-view="bot-logs">
+                    <span class="nav-index">03</span>
+                    <span class="nav-text"><strong>Bot 日志</strong><small>按日期筛选查看</small></span>
+                </button>
+                <button class="nav-item" type="button" data-view="system">
+                    <span class="nav-index">04</span>
+                    <span class="nav-text"><strong>系统信息</strong><small>资源与 24 小时统计</small></span>
+                </button>
+                <button class="nav-item" type="button" data-view="webui-logs">
+                    <span class="nav-index">05</span>
+                    <span class="nav-text"><strong>WebUI 日志</strong><small>服务侧运行情况</small></span>
+                </button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="sidebar-meta">
+                    <span class="meta-label">当前主题</span>
+                    <strong id="theme-badge">Preview</strong>
+                </div>
+                <div class="sidebar-meta">
+                    <span class="meta-label">机器人状态</span>
+                    <strong>运行中</strong>
+                </div>
+                <a href="#" class="logout-link">退出登录</a>
+            </div>
+        </aside>
+
+        <main class="workspace">
+            <header class="workspace-header">
+                <div class="header-copy">
+                    <p class="header-kicker">PREVIEW</p>
+                    <h1 id="page-title">仪表盘</h1>
+                    <p id="page-subtitle">这是一个静态预览页，用来查看重构后的视觉布局。</p>
+                </div>
+                <div class="header-status">
+                    <div class="status-pill status-running">机器人 运行中</div>
+                    <div class="header-note">静态示例，不连真实接口</div>
+                </div>
+            </header>
+
+            <section class="view-panel is-active" data-view-panel="dashboard">
+                <div class="content-card hero-card">
+                    <div class="hero-copy">
+                        <p class="card-kicker">Overview</p>
+                        <h2>新的单页信息架构</h2>
+                        <p>左侧只负责切换，右侧一次展示一个完整功能页，整体改为黑白主导的后台风格。</p>
+                    </div>
+                    <div class="hero-actions">
+                        <button class="soft-button" type="button" data-open-view="controls">看控制页</button>
+                        <button class="soft-button" type="button" data-open-view="bot-logs">看日志页</button>
+                    </div>
+                </div>
+
+                <div class="metric-grid">
+                    <article class="metric-card"><span class="metric-label">机器人状态</span><strong class="metric-value">运行中</strong><span class="metric-meta">最近刷新 2026/04/05 14:40:00</span></article>
+                    <article class="metric-card"><span class="metric-label">CPU 使用率</span><strong class="metric-value">12.4%</strong><span class="metric-meta">RAM 48.1%</span></article>
+                    <article class="metric-card"><span class="metric-label">当前日志日期</span><strong class="metric-value">2026-04-05</strong><span class="metric-meta">128 行 Bot 日志</span></article>
+                    <article class="metric-card"><span class="metric-label">WebUI 侧日志</span><strong class="metric-value">36</strong><span class="metric-meta">最近刷新 2026/04/05 14:40:00</span></article>
+                </div>
+
+                <div class="split-grid">
+                    <article class="content-card">
+                        <div class="section-heading"><div><p class="card-kicker">Quick Summary</p><h2>当前概览</h2></div></div>
+                        <div class="info-list">
+                            <div class="info-row"><span>容器名称</span><strong>Odysseia_Guidance</strong></div>
+                            <div class="info-row"><span>主题模式</span><strong>自动适配浅色 / 深色</strong></div>
+                            <div class="info-row"><span>布局原则</span><strong>单页单功能</strong></div>
+                            <div class="info-row"><span>视觉方向</span><strong>黑白主导、浅色优先</strong></div>
+                        </div>
+                    </article>
+                    <article class="content-card">
+                        <div class="section-heading"><div><p class="card-kicker">Navigation</p><h2>功能入口</h2></div></div>
+                        <div class="shortcut-list">
+                            <button class="shortcut-card" type="button" data-open-view="controls"><strong>机器人控制</strong><span>只做启停操作</span></button>
+                            <button class="shortcut-card" type="button" data-open-view="system"><strong>系统信息</strong><span>只看资源指标</span></button>
+                            <button class="shortcut-card" type="button" data-open-view="webui-logs"><strong>WebUI 日志</strong><span>只看服务端日志</span></button>
+                        </div>
+                    </article>
+                </div>
+            </section>
+
+            <section class="view-panel" data-view-panel="controls">
+                <article class="content-card">
+                    <div class="section-heading"><div><p class="card-kicker">Control Center</p><h2>机器人控制</h2><p>这个页面只保留控制本身，不混放别的面板。</p></div><div class="inline-status status-running">运行中</div></div>
+                    <div class="control-layout">
+                        <div class="action-panel">
+                            <button class="primary-button" type="button">重启 Bot 容器</button>
+                            <button class="danger-button" type="button">停止 Bot 容器</button>
+                            <p class="action-help">预览页不真正执行操作。</p>
+                        </div>
+                        <div class="info-list">
+                            <div class="info-row"><span>目标容器</span><strong>Odysseia_Guidance</strong></div>
+                            <div class="info-row"><span>最近操作</span><strong>2026/04/05 14:38:10 重启成功</strong></div>
+                            <div class="info-row"><span>状态同步</span><strong>轮询中</strong></div>
+                        </div>
+                    </div>
+                </article>
+            </section>
+
+            <section class="view-panel" data-view-panel="bot-logs">
+                <article class="content-card">
+                    <div class="section-heading"><div><p class="card-kicker">Application Logs</p><h2>Bot 日志</h2><p>新的版式里，日志页只负责日志本身。</p></div></div>
+                    <div class="toolbar-grid">
+                        <label class="field"><span>日志日期</span><input type="date" value="2026-04-05"></label>
+                        <label class="field"><span>日志等级</span><select><option>ALL</option><option selected>INFO</option></select></label>
+                        <label class="field"><span>显示时区</span><select><option selected>Asia/Shanghai</option></select></label>
+                        <label class="field field-wide"><span>Regex 过滤</span><input type="text" value="backup|guild|review"></label>
+                    </div>
+                    <div class="panel-meta">128 行日志，时区 Asia/Shanghai</div>
+                    <pre class="log-container"><span class="log-info">[2026-04-05T14:32:11.103Z] [INFO] [src.main] Bot startup sequence initialized.</span><span class="log-info">[2026-04-05T14:32:14.220Z] [INFO] [src.main] Connected to Discord gateway.</span><span class="log-warning">[2026-04-05T14:35:08.450Z] [WARNING] [src.guidance.utils.database] Backup task took longer than expected.</span><span class="log-error">[2026-04-05T14:36:01.774Z] [ERROR] [src.chat.features.review] Failed to parse attachment metadata.</span></pre>
+                </article>
+            </section>
+
+            <section class="view-panel" data-view-panel="system">
+                <article class="content-card">
+                    <div class="section-heading"><div><p class="card-kicker">System Metrics</p><h2>系统信息</h2><p>所有资源指标收拢在一个页面里。</p></div></div>
+                    <div class="stat-grid">
+                        <div class="stat-card"><span>CPU</span><strong>12.4%</strong></div>
+                        <div class="stat-card"><span>RAM</span><strong>48.1%</strong></div>
+                        <div class="stat-card"><span>Disk</span><strong>63%</strong></div>
+                        <div class="stat-card"><span>Network</span><strong>142 MB / 987 MB</strong></div>
+                    </div>
+                    <div class="split-grid">
+                        <div class="content-block">
+                            <h3>当前资源占用</h3>
+                            <div class="info-list">
+                                <div class="info-row"><span>CPU 使用率</span><strong>12.4%</strong></div>
+                                <div class="info-row"><span>内存占用</span><strong>48.1% (3912 MB / 8128 MB)</strong></div>
+                                <div class="info-row"><span>磁盘占用</span><strong>63% (118 GB / 188 GB)</strong></div>
+                                <div class="info-row"><span>网络发送 / 接收</span><strong>142 MB / 987 MB</strong></div>
+                            </div>
+                        </div>
+                        <div class="content-block">
+                            <h3>24 小时统计</h3>
+                            <div class="info-list">
+                                <div class="info-row"><span>CPU 平均</span><strong>18.7%</strong></div>
+                                <div class="info-row"><span>CPU 峰值</span><strong>74.3%</strong></div>
+                                <div class="info-row"><span>RAM 平均</span><strong>44.2% (3591 MB)</strong></div>
+                                <div class="info-row"><span>RAM 峰值</span><strong>57.8% (4698 MB)</strong></div>
+                                <div class="info-row"><span>采样数量</span><strong>1440</strong></div>
+                            </div>
+                        </div>
+                    </div>
+                </article>
+            </section>
+
+            <section class="view-panel" data-view-panel="webui-logs">
+                <article class="content-card">
+                    <div class="section-heading"><div><p class="card-kicker">Service Logs</p><h2>WebUI 日志</h2><p>WebUI 自身日志也被单独拉成一个页面。</p></div></div>
+                    <div class="toolbar-grid compact-grid">
+                        <label class="field"><span>日志等级</span><select><option>ALL</option><option selected>INFO</option></select></label>
+                        <label class="field field-wide"><span>Regex 过滤</span><input type="text" value="cleanup|status|login"></label>
+                    </div>
+                    <div class="panel-meta">36 行 WebUI 日志</div>
+                    <pre class="log-container"><span class="log-info">2026-04-05 14:31:54,105 - web-main - INFO - Flask app is starting.</span><span class="log-info">2026-04-05 14:31:55,011 - web-main - INFO - API call to /api/status received.</span><span class="log-debug">2026-04-05 14:32:10,337 - web-main - DEBUG - Rendering cached dashboard preview.</span><span class="log-warning">2026-04-05 14:33:48,901 - web-main - WARNING - Log file for 2026-03-29 not found.</span></pre>
+                </article>
+            </section>
+        </main>
+    </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const meta = {
+        dashboard: ['仪表盘', '这是一个静态预览页，用来查看重构后的视觉布局。'],
+        controls: ['机器人控制', '控制页只保留重启和停止相关信息。'],
+        'bot-logs': ['Bot 日志', '日志页只处理 Bot 日志筛选和展示。'],
+        system: ['系统信息', '系统页只展示资源数据和 24 小时统计。'],
+        'webui-logs': ['WebUI 日志', 'WebUI 服务日志被独立成单独页面。']
+    };
+
+    const setView = (name) => {
+        document.querySelectorAll('.nav-item').forEach((item) => {
+            item.classList.toggle('is-active', item.dataset.view === name);
+        });
+        document.querySelectorAll('.view-panel').forEach((panel) => {
+            panel.classList.toggle('is-active', panel.dataset.viewPanel === name);
+        });
+        document.getElementById('page-title').textContent = meta[name][0];
+        document.getElementById('page-subtitle').textContent = meta[name][1];
+    };
+
+    document.querySelectorAll('.nav-item').forEach((item) => {
+        item.addEventListener('click', () => setView(item.dataset.view));
+    });
+    document.querySelectorAll('[data-open-view]').forEach((item) => {
+        item.addEventListener('click', () => setView(item.dataset.openView));
+    });
+
+    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.getElementById('theme-badge').textContent = isDark ? 'Dark Mode' : 'Light Mode';
+});
+</script>
+</body>
+</html>

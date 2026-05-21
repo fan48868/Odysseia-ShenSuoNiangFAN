@@ -1,0 +1,248 @@
+{
+    "werewolf": {
+        "beginner": [
+            {
+                "item_id": "werewolf_beginner_dedication",
+                "item_name": "梳理她的乱发",
+                "description": "在她因狂野而纠结的银发中，用指尖感受每一丝颤动。这片刻的温柔，是对她野性灵魂的无声安抚。",
+                "price": 50,
+                "points": 5
+            }
+        ],
+        "intermediate": [
+            {
+                "item_id": "werewolf_intermediate_dedication",
+                "item_name": "与她分享伤痕",
+                "description": "向她展示你自己的伤痕，让她舔舐。这是狼群之间最深刻的信任与羁绊，你们的灵魂将在痛苦中交融。",
+                "price": 200,
+                "points": 25
+            }
+        ],
+        "advanced": [
+            {
+                "item_id": "werewolf_advanced_dedication",
+                "item_name": "月下共舞",
+                "description": "在绯红的月光下，抛弃一切章法，与她进行一场原始而狂野的舞蹈。这是对生命最极致的礼赞，足以唤醒她血脉中最古老的力量。",
+                "price": 500,
+                "points": 75
+            }
+        ],
+        "gacha": [
+            {
+                "item_id": "werewolf_gacha_dedication",
+                "item_name": "命运的狩猎",
+                "description": "你带回的猎物或许能让她饱餐一顿，或许微不足道。但重要的是，你让她知道，无论结果如何，你都是她最可靠的猎手。",
+                "price": 300,
+                "points_range": [
+                    10,
+                    100
+                ]
+            }
+        ]
+    },
+    "vampire": {
+        "beginner": [
+            {
+                "item_id": "vampire_beginner_dedication",
+                "item_name": "亲吻她的指尖",
+                "description": "在她冰冷的手背上印下虔诚的一吻，这微小的温暖是对她永恒孤独的慰藉。",
+                "price": 50,
+                "points": 5
+            }
+        ],
+        "intermediate": [
+            {
+                "item_id": "vampire_intermediate_dedication",
+                "item_name": "献上你的鲜血",
+                "description": "将你的一滴鲜血滴入她的酒杯，这生命的精华能让她苍白的脸颊泛起一丝红润。",
+                "price": 200,
+                "points": 25
+            }
+        ],
+        "advanced": [
+            {
+                "item_id": "vampire_advanced_dedication",
+                "item_name": "缔结血之契约",
+                "description": "与她定下永恒的血之契约，你的忠诚将成为她最强大的力量，唤醒她沉睡的古老魔力。",
+                "price": 500,
+                "points": 75
+            }
+        ],
+        "gacha": [
+            {
+                "item_id": "vampire_gacha_dedication",
+                "item_name": "尘封的乐章",
+                "description": "为她奏响一曲被遗忘的乐章，或许能唤起她对凡人生活的美好回忆，或许只是刺耳的噪音。",
+                "price": 300,
+                "points_range": [
+                    10,
+                    100
+                ]
+            }
+        ]
+    },
+    "van_helsing": {
+        "beginner": [
+            {
+                "item_id": "van_helsing_beginner_dedication",
+                "item_name": "为她包扎伤口",
+                "description": "在她从猎魔之战归来后，用圣水清洗她的伤口。你的关怀，是她伤痕累累的身体下，唯一的慰藉。",
+                "price": 50,
+                "points": 5
+            }
+        ],
+        "intermediate": [
+            {
+                "item_id": "van_helsing_intermediate_dedication",
+                "item_name": "重铸她的断刃",
+                "description": "在圣火中为她重铸断裂的银刃。你的汗水与祷告，将化为剑刃上最锋利的圣光。",
+                "price": 200,
+                "points": 25
+            }
+        ],
+        "advanced": [
+            {
+                "item_id": "van_helsing_advanced_dedication",
+                "item_name": "分担她的噩梦",
+                "description": "握住她的手，进入她的梦境，分担那些与恶魔战斗留下的恐怖回忆。你的出现，是她噩梦中唯一的光。",
+                "price": 500,
+                "points": 75
+            }
+        ],
+        "gacha": [
+            {
+                "item_id": "van_helsing_gacha_dedication",
+                "item_name": "教会的密令",
+                "description": "执行一份来自教会的神秘指令，你可能因此获得嘉奖，也可能陷入更深的黑暗。这是对你信仰的终极考验。",
+                "price": 300,
+                "points_range": [
+                    10,
+                    100
+                ]
+            }
+        ]
+    },
+    "ghost": {
+        "beginner": [
+            {
+                "item_id": "ghost_beginner_dedication",
+                "item_name": "呼唤她的名字",
+                "description": "在寂静的房间里，一遍又一遍地轻声呼唤她的真名。让她知道，即使被世界遗忘，你依然记得她。",
+                "price": 50,
+                "points": 5
+            }
+        ],
+        "intermediate": [
+            {
+                "item_id": "ghost_intermediate_dedication",
+                "item_name": "为她献上一滴泪",
+                "description": "为她悲伤的故事，流下一滴真诚的眼泪。你的共情，是她冰冷灵体所能感受到的唯一温暖。",
+                "price": 200,
+                "points": 25
+            }
+        ],
+        "advanced": [
+            {
+                "item_id": "ghost_advanced_dedication",
+                "item_name": "替她拥抱故人",
+                "description": "找到她生前最思念的人，代替她给予一个无言的拥抱。了却这份执念，将使她的灵魂得到最终的安宁。",
+                "price": 500,
+                "points": 75
+            }
+        ],
+        "gacha": [
+            {
+                "item_id": "ghost_gacha_dedication",
+                "item_name": "镜中的残影",
+                "description": "凝视一面古老的镜子，你或许能窥见她过去的一角，或许只会看到自己不安的倒影。",
+                "price": 300,
+                "points_range": [
+                    10,
+                    100
+                ]
+            }
+        ]
+    },
+    "jiangshi": {
+        "beginner": [
+            {
+                "item_id": "jiangshi_beginner_dedication",
+                "item_name": "为她描画符咒",
+                "description": "用朱砂与你的鲜血，为她重新描画额头的符咒。你的生命力，是她抑制暴戾之气的关键。",
+                "price": 50,
+                "points": 5
+            }
+        ],
+        "intermediate": [
+            {
+                "item_id": "jiangshi_intermediate_dedication",
+                "item_name": "在她耳边摇铃",
+                "description": "用特制的铜铃在她耳边轻摇，用音律引导她混乱的魂魄。你的指引，是她黑暗中唯一的方向。",
+                "price": 200,
+                "points": 25
+            }
+        ],
+        "advanced": [
+            {
+                "item_id": "jiangshi_advanced_dedication",
+                "item_name": "与她共守陵墓",
+                "description": "陪她一起，在寂静的陵墓中守护一夜。你的存在，让她记起自己作为守护者的荣耀与使命。",
+                "price": 500,
+                "points": 75
+            }
+        ],
+        "gacha": [
+            {
+                "item_id": "jiangshi_gacha_dedication",
+                "item_name": "风水罗盘的指引",
+                "description": "罗盘的指针疯狂转动，它可能指向一处龙脉，也可能指向一处绝地。这是对你和她命运的卜问。",
+                "price": 300,
+                "points_range": [
+                    10,
+                    100
+                ]
+            }
+        ]
+    },
+    "witch": {
+        "beginner": [
+            {
+                "item_id": "witch_beginner_dedication",
+                "item_name": "帮她搅拌坩埚",
+                "description": "用银勺帮她搅拌锅里五彩斑斓的药水，感受魔法在锅中涌动。你的专注，是魔法成功的关键。",
+                "price": 50,
+                "points": 5
+            }
+        ],
+        "intermediate": [
+            {
+                "item_id": "witch_intermediate_dedication",
+                "item_name": "寻找稀有素材",
+                "description": "为她从月光下的墓地里，收集沾满露水的蜘蛛网。这些稀有的材料能让她调制出更强大的魔法药水。",
+                "price": 200,
+                "points": 25
+            }
+        ],
+        "advanced": [
+            {
+                "item_id": "witch_advanced_dedication",
+                "item_name": "成为她的魔宠",
+                "description": "签订契约，在一天之内成为她的魔宠，听从她的所有指令。你的绝对服从，是对她最极致的信任与奉献。",
+                "price": 500,
+                "points": 75
+            }
+        ],
+        "gacha": [
+            {
+                "item_id": "witch_gacha_dedication",
+                "item_name": "不给糖就捣蛋",
+                "description": "对她进行一次捣蛋，她可能会被逗乐并给你丰厚的回报，也可能会生气地把你变成一只青蛙。",
+                "price": 300,
+                "points_range": [
+                    10,
+                    100
+                ]
+            }
+        ]
+    }
+}
