@@ -17,7 +17,7 @@ _FLUSH_LOCK_ATTR = "_pending_text_deliveries_flush_lock"
 _FLUSH_TASK_ATTR = "_pending_text_deliveries_flush_task"
 _WAKE_EVENT_ATTR = "_pending_text_deliveries_wake_event"
 
-DeliveryStatus = Literal["confirmed", "missing", "uncertain"]
+DeliveryStatus = Literal["confirmed", "missing", "uncertain", "expired"]
 
 
 @dataclass
@@ -274,7 +274,7 @@ async def _attempt_delivery(
             delivery.task_id,
             delivery.chunk_index,
         )
-        return "missing"
+        return "expired"
 
     channel = await _resolve_channel(bot, delivery.channel_id)
     if channel is None:
@@ -394,6 +394,8 @@ async def send_pending_text_delivery_with_recovery(
     )
     if status == "confirmed":
         return True
+    if status == "expired":
+        return False
 
     if status != "confirmed":
         log.warning(
@@ -410,6 +412,8 @@ async def send_pending_text_delivery_with_recovery(
         )
         if status == "confirmed":
             return True
+        if status == "expired":
+            return False
 
     await enqueue_pending_text_delivery(bot, delivery)
     schedule_pending_text_delivery_flush(
@@ -485,6 +489,8 @@ async def flush_pending_text_deliveries(bot: discord.Client) -> None:
                         delivery.reply_to_message_id,
                         delivery.attempt_count,
                     )
+                    continue
+                if status == "expired":
                     continue
 
                 await _requeue_pending_delivery(bot, delivery)

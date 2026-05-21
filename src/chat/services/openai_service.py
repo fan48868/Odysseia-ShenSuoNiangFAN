@@ -1243,8 +1243,8 @@ class OpenAIService:
                 current_log_model_name = self.kimi_model_client.get_request_model_name()
 
             safe_openai_messages = _sanitize_openai_payload_for_log(openai_messages)
-            # log.info(f"--- [{channel_label}] 完整发送上下文 (用户 {user_id}) ---")
-            # log.info(json.dumps(safe_openai_messages, ensure_ascii=False, indent=2, default=str))
+            log.info(f"--- [{channel_label}] 完整发送上下文 (用户 {user_id}) ---")
+            log.info(json.dumps(safe_openai_messages, ensure_ascii=False, indent=2, default=str))
 
             if is_deepseek_model or is_custom_model:
                 request_tools_for_log = openai_tools

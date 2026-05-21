@@ -437,6 +437,8 @@ class ChatService:
                 # 清空列表，避免影响下一次对话
                 gemini_service.last_called_tools = []
 
+            log.info(f"已为用户 {author.display_name} 生成AI回复: {final_response}")
+
             return GeneratedReply(
                 response_text=final_response,
                 user_name=author.display_name,
