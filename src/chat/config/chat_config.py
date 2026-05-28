@@ -320,6 +320,10 @@ COIN_CONFIG = {
 # --- 个人记忆功能 ---（重要注释）
 PERSONAL_MEMORY_CONFIG = {
     "summary_threshold": 30,  # 触发总结的消息数量阈值 (测试用 5, 原为 50)
+    "summary_enabled": True,  # 记忆总结总开关（关闭后停止总结新记忆）
+    "vector_recall_top_k": 20,  # 向量召回相关记忆条数
+    "vector_recall_random_k": 10,  # 向量召回随机记忆条数
+    "direct_inject_limit": 30,  # 直接注入/兜底模式下从摘要提取的最大条数
     "log_dir": None,  # 关闭自动写入 memory summary 日志
     "semantic_dedupe_max_distance": 0.12,  # 个人长期记忆语义去重的 cosine distance 阈值；值越大越容易判定为重复
 }

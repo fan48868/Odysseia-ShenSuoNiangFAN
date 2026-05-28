@@ -31,7 +31,31 @@ class PromptService:
         """
         初始化 PromptService。
         """
-        pass
+        self._prompt_overrides_cache: Dict[str, str] = {}
+        self._overrides_loaded = False
+
+    async def _load_prompt_overrides(self):
+        """从数据库加载提示词覆盖（仅限 default 配置）。"""
+        from src.chat.features.chat_settings.services.chat_settings_service import (
+            chat_settings_service,
+        )
+        prefix = "prompt_override_default_"
+        for prompt_name in [
+            "SYSTEM_PROMPT",
+            "JAILBREAK_USER_PROMPT",
+            "JAILBREAK_MODEL_RESPONSE",
+            "JAILBREAK_FINAL_INSTRUCTION",
+        ]:
+            key = f"{prefix}{prompt_name}"
+            try:
+                raw = await chat_settings_service.db_manager.get_global_setting(key)
+                if raw and raw.strip():
+                    self._prompt_overrides_cache[prompt_name] = raw
+                elif prompt_name in self._prompt_overrides_cache:
+                    del self._prompt_overrides_cache[prompt_name]
+            except Exception as e:
+                log.warning("加载提示词覆盖 '%s' 失败: %s", prompt_name, e)
+        self._overrides_loaded = True
 
     @staticmethod
     def _normalize_model_targets(model_key: Any) -> List[str]:
@@ -238,11 +262,18 @@ class PromptService:
         安全地获取指定模型或默认模型的提示词。
         规则：
         - 所有 prompt 默认从 default 读取
+        - 优先检查数据库覆盖（通过聊天设置UI修改的）
         - SYSTEM_PROMPT 支持标签级增量覆盖
         - 其他 prompt 仍按整段覆盖
         - 支持一个配置块同时匹配多个模型
         """
-        prompt_template = PROMPT_CONFIG.get("default", {}).get(prompt_name)
+        # 优先使用数据库中的覆盖值（仅对 default 配置）
+        db_override = self._prompt_overrides_cache.get(prompt_name)
+        if db_override:
+            prompt_template = db_override
+            log.debug("使用数据库覆盖的提示词: %s", prompt_name)
+        else:
+            prompt_template = PROMPT_CONFIG.get("default", {}).get(prompt_name)
 
         for model_config in self._get_matching_model_configs(model_name):
             if prompt_name not in model_config:
@@ -679,37 +710,61 @@ class PromptService:
                 recent_dynamics_text = ""
 
         # Part B：长期记忆
-        # - 正常模式：向量召回（Top20相关 + 随机10条）
-        # - 兜底模式：只要向量检索未成功（含 RAG 超时熔断），直接提取“长期记忆”原文前30条
+        # 读取记忆注入模式（从数据库 global_settings）
+        _mem_mode = "vector_fallback"  # 默认
+        try:
+            from src.chat.features.chat_settings.services.chat_settings_service import (
+                chat_settings_service,
+            )
+            mem_mode_raw = await chat_settings_service.db_manager.get_global_setting(
+                "memory_injection_mode"
+            )
+            _mem_mode = (mem_mode_raw or "vector_fallback").strip().lower()
+            if _mem_mode not in {"vector", "vector_fallback", "direct"}:
+                _mem_mode = "vector_fallback"
+        except Exception:
+            pass
+
         query_text_for_retrieval = (retrieval_query_text or message or "").strip()
 
         long_term_lines: List[str] = []
         long_term_hits: List[Dict[str, Any]] = []
-        use_long_term_fallback = rag_timeout_fallback
-        fallback_reason = "rag_timeout" if rag_timeout_fallback else "none"
 
-        if not use_long_term_fallback and user_id and query_text_for_retrieval:
-            try:
-                from src.chat.features.personal_memory.services.personal_memory_search_service import (
-                    personal_memory_search_service,
-                )
+        # direct 模式：跳过向量，直接从摘要提取
+        if _mem_mode == "direct":
+            log.info("记忆注入模式: 直接注入，跳过向量召回。")
+            use_long_term_fallback = True
+            fallback_reason = "direct_mode"
+        else:
+            # vector 或 vector_fallback 模式
+            use_long_term_fallback = rag_timeout_fallback
+            fallback_reason = "rag_timeout" if rag_timeout_fallback else "none"
 
-                (
-                    long_term_hits,
-                    long_term_vector_search_succeeded,
-                ) = await personal_memory_search_service.search_with_status(
-                    discord_id=user_id,
-                    query_text=query_text_for_retrieval,
-                    query_embedding=retrieval_query_embedding,
-                )
-                if not long_term_vector_search_succeeded:
-                    use_long_term_fallback = True
-                    fallback_reason = "vector_search_failed"
-            except Exception as e:
-                log.warning(f"长期记忆向量召回失败: {e}", exc_info=True)
-                long_term_hits = []
-                use_long_term_fallback = True
-                fallback_reason = "vector_search_exception"
+            if not use_long_term_fallback and user_id and query_text_for_retrieval:
+                try:
+                    from src.chat.features.personal_memory.services.personal_memory_search_service import (
+                        personal_memory_search_service,
+                    )
+
+                    (
+                        long_term_hits,
+                        long_term_vector_search_succeeded,
+                    ) = await personal_memory_search_service.search_with_status(
+                        discord_id=user_id,
+                        query_text=query_text_for_retrieval,
+                        query_embedding=retrieval_query_embedding,
+                    )
+                    if not long_term_vector_search_succeeded:
+                        # vector_fallback 模式下才回退，vector 模式下不回退
+                        if _mem_mode == "vector_fallback":
+                            use_long_term_fallback = True
+                            fallback_reason = "vector_search_failed"
+                except Exception as e:
+                    log.warning(f"长期记忆向量召回失败: {e}", exc_info=True)
+                    long_term_hits = []
+                    if _mem_mode == "vector_fallback":
+                        use_long_term_fallback = True
+                        fallback_reason = "vector_search_exception"
 
         if use_long_term_fallback:
             fallback_source = "none"
@@ -722,15 +777,20 @@ class PromptService:
                         personal_memory_vector_service,
                     )
 
-                    items = personal_memory_vector_service.parse_personal_summary(
+                        items = personal_memory_vector_service.parse_personal_summary(
                         personal_summary
                     )
+                    _direct_limit = 30
+                    try:
+                        _direct_limit = chat_config.PERSONAL_MEMORY_CONFIG.get("direct_inject_limit", 30)
+                    except Exception:
+                        pass
                     for it in items:
                         mem_text = str(it.get("memory_text") or "").strip()
                         if not mem_text:
                             continue
                         long_term_lines.append(f"- {mem_text}")
-                        if len(long_term_lines) >= 30:
+                        if len(long_term_lines) >= _direct_limit:
                             break
 
                     if long_term_lines:
@@ -749,13 +809,18 @@ class PromptService:
                     from src.database.database import AsyncSessionLocal
                     from src.database.models import PersonalMemoryChunk
 
+                    _db_limit = 30
+                    try:
+                        _db_limit = chat_config.PERSONAL_MEMORY_CONFIG.get("direct_inject_limit", 30)
+                    except Exception:
+                        pass
                     async with AsyncSessionLocal() as session:
                         res = await session.execute(
                             select(PersonalMemoryChunk.memory_text)
                             .where(PersonalMemoryChunk.discord_id == str(user_id))
                             .where(PersonalMemoryChunk.memory_type == "long_term")
                             .order_by(PersonalMemoryChunk.id.desc())
-                            .limit(30)
+                            .limit(_db_limit)
                         )
                         rows = [str(x or "").strip() for x in res.scalars().all()]
 
@@ -819,7 +884,7 @@ class PromptService:
                             continue
 
                         long_term_lines.append(f"- {text}")
-                        if len(long_term_lines) >= 30:
+                        if len(long_term_lines) >= _direct_limit:
                             break
 
                     if long_term_lines:

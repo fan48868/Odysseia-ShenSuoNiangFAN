@@ -101,7 +101,22 @@ class PersonalMemoryService:
         """
         核心入口：更新对话历史和计数，并在达到阈值时触发总结。
         仅由计数阈值触发，不接受任何手动/强制请求。
+        summary_enabled 为 False 时跳过所有历史累积和总结。
         """
+        # 总开关：关闭时不累积历史、不总结（优先读数据库覆盖，回退到配置文件）
+        _summary_enabled = True
+        try:
+            from src.chat.features.chat_settings.services.chat_settings_service import (
+                chat_settings_service,
+            )
+            _se_raw = await chat_settings_service.db_manager.get_global_setting("summary_enabled")
+            _summary_enabled = (_se_raw or "true").strip().lower() == "true"
+        except Exception:
+            _summary_enabled = PERSONAL_MEMORY_CONFIG.get("summary_enabled", True)
+        if not _summary_enabled:
+            log.debug("记忆总结已关闭，跳过历史累积和总结。user_id=%s", user_id)
+            return
+
         history_to_summarize = None
         async with AsyncSessionLocal() as session:
             async with session.begin():

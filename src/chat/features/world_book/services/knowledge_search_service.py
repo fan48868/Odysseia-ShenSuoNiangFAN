@@ -48,14 +48,15 @@ class KnowledgeSearchService:
         self, session, query_text: str, query_vector: List[float]
     ) -> List[Dict[str, Any]]:
         """
-        在 community.member_chunks 和 general_knowledge.knowledge_chunks
+        在 general_knowledge.knowledge_chunks 和 community.member_chunks
         两个表中执行混合搜索，并返回融合排序后的 chunk 结果。
+        当前用户名片由 get_user_card_exact 精确注入，这里仍会返回其他人的名片作为补充。
+        通过"直接注入"模式可整体跳过此搜索。
         """
-        # SQL 查询同时搜索两个 chunks 表
         sql_query = text(
             """
             WITH vector_candidates AS (
-                -- 社区成员向量搜索
+                -- 社区成员向量搜索（其他人名片）
                 (SELECT
                     'community' as source_table,
                     id as chunk_id,
@@ -80,14 +81,12 @@ class KnowledgeSearchService:
                 LIMIT :top_k_vector)
             ),
             semantic_search AS (
-                -- 对合并后的结果进行全局排名
-                SELECT 
-                    *,
+                SELECT *,
                     ROW_NUMBER() OVER (ORDER BY distance ASC) as rank
                 FROM vector_candidates
             ),
             keyword_candidates AS (
-                -- 社区成员 BM25 搜索 (使用 paradedb.score)
+                -- 社区成员 BM25 搜索
                 (SELECT
                     'community' as source_table,
                     id as chunk_id,
@@ -98,7 +97,7 @@ class KnowledgeSearchService:
                 WHERE chunk_text @@@ :query_text
                 LIMIT :top_k_fts)
                 UNION ALL
-                -- 通用知识 BM25 搜索 (使用 paradedb.score)
+                -- 通用知识 BM25 搜索
                 (SELECT
                     'general_knowledge' as source_table,
                     id as chunk_id,
@@ -110,13 +109,10 @@ class KnowledgeSearchService:
                 LIMIT :top_k_fts)
             ),
             keyword_search AS (
-                -- 对合并后的结果进行全局排名
-                SELECT 
-                    *,
+                SELECT *,
                     ROW_NUMBER() OVER (ORDER BY bm25_score DESC) as rank
                 FROM keyword_candidates
             ),
-            -- 使用 RRF (Reciprocal Rank Fusion) 融合排名
             fused_ranks AS (
                 SELECT
                     COALESCE(s.chunk_id, k.chunk_id) as chunk_id,
@@ -263,6 +259,52 @@ class KnowledgeSearchService:
 
         return final_results
 
+    async def get_user_card_exact(
+        self,
+        user_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        通过精确的 user_id 直接查询用户的专属名片（不经过向量检索）。
+
+        Args:
+            user_id: 当前聊天对象的 Discord user_id。
+
+        Returns:
+            名片格式的结果字典，若无名片则返回 None。
+        """
+        try:
+            async with AsyncSessionLocal() as session:
+                user_card_query = text("""
+                    SELECT
+                        c.id as chunk_id,
+                        c.profile_id as parent_id,
+                        c.chunk_text,
+                        'community' as source_table
+                    FROM community.member_chunks c
+                    JOIN community.member_profiles p ON c.profile_id = p.id
+                    WHERE p.discord_id = :user_id
+                    LIMIT 1
+                """)
+                result = await session.execute(
+                    user_card_query, {"user_id": str(user_id)}
+                )
+                row = result.fetchone()
+                if row:
+                    chunk = dict(row._mapping)
+                    log.info("精确获取用户 %s 的名片成功。", user_id)
+                    return self._format_result(
+                        parent_id=chunk.get("parent_id"),
+                        chunk_text=chunk.get("chunk_text", ""),
+                        source_table="community",
+                        distance=0.0,
+                        is_user_card=True,
+                    )
+                log.debug("用户 %s 无名片，跳过名片注入。", user_id)
+                return None
+        except Exception as e:
+            log.error("精确获取用户 %s 名片失败: %s", user_id, e, exc_info=True)
+            return None
+
     async def search(
         self,
         query: str,
@@ -270,18 +312,21 @@ class KnowledgeSearchService:
         query_embedding: Optional[List[float]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        执行完整的 RAG 混合搜索流程。
-        1. 生成查询嵌入（支持外部传入 query_embedding，传入则不再调用 embedding API）。
-        2. 在 chunks 表中进行混合搜索。
-        3. (暂定)直接返回 chunks 内容，因为我们的场景下，chunk 可能就是全部。
-        """
-        # log.info(f"收到知识库混合搜索请求: '{query}'")
+        执行完整的 RAG 混合搜索流程（世界书 + 其他人名片）。
+        当前用户名片由 get_user_card_exact 精确注入，不在此处处理。
+        通过"直接注入"模式可整体跳过此搜索。
 
+        1. 生成查询嵌入（支持外部传入 query_embedding）。
+        2. 在 chunks 表中进行混合搜索（通用知识 + 社区成员名片）。
+        3. 返回搜索结果。
+        """
         # 1) 生成/复用查询向量
         if query_embedding is None:
             try:
                 query_embedding = await asyncio.wait_for(
-                    gemini_service.generate_embedding(text=query, task_type="retrieval_query"),
+                    gemini_service.generate_embedding(
+                        text=query, task_type="retrieval_query"
+                    ),
                     timeout=self.config["EMBEDDING_TIMEOUT_SECONDS"],
                 )
                 if not query_embedding or not isinstance(query_embedding, list):
@@ -302,41 +347,14 @@ class KnowledgeSearchService:
 
         search_results = []
         try:
-            # 清理用于全文搜索的查询文本
             cleaned_fts_query = self._clean_fts_query(query)
-
-            user_card_chunk = None
             async with AsyncSessionLocal() as session:
-                # 如果提供了 user_id，尝试获取该用户的名片并强制置顶
-                if user_id:
-                    try:
-                        user_card_query = text("""
-                            SELECT 
-                                c.id as chunk_id,
-                                c.profile_id as parent_id,
-                                c.chunk_text,
-                                'community' as source_table
-                            FROM community.member_chunks c
-                            JOIN community.member_profiles p ON c.profile_id = p.id
-                            WHERE p.discord_id = :user_id OR p.source_metadata->>'uploaded_by' = :user_id
-                            LIMIT 1
-                        """)
-                        result = await session.execute(user_card_query, {"user_id": str(user_id)})
-                        row = result.fetchone()
-                        if row:
-                            user_card_chunk = dict(row._mapping)
-                            log.info(f"成功获取并置顶用户 {user_id} 的名片")
-                    except Exception as e:
-                        log.error(f"获取用户 {user_id} 名片失败: {e}")
-
                 search_results = await asyncio.wait_for(
                     self._hybrid_search_chunks(
                         session, cleaned_fts_query, query_embedding
                     ),
                     timeout=self.config["HYBRID_SEARCH_TIMEOUT_SECONDS"],
                 )
-                # log.info(f"混合搜索 RRF 结果: {search_results}")
-
         except asyncio.TimeoutError:
             log.warning(
                 f"数据库混合搜索超时（>{self.config['HYBRID_SEARCH_TIMEOUT_SECONDS']:.1f}s），触发熔断并返回空结果。"
@@ -346,11 +364,11 @@ class KnowledgeSearchService:
             log.error(f"在数据库中执行混合搜索时出错: {e}", exc_info=True)
             return []
 
-        if not search_results and not user_card_chunk:
-            log.info(f"知识库混合搜索未找到的相关文档。")
+        if not search_results:
+            log.info("知识库混合搜索未找到相关文档。")
             return []
 
-        return self._select_final_results(search_results, user_card_chunk)
+        return self._select_final_results(search_results, user_card_chunk=None)
 
 
 # 创建服务的单例

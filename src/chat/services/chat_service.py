@@ -585,7 +585,29 @@ class ChatService:
         retrieval_query_embedding: Optional[List[float]] = None
         rag_timeout_fallback = False
 
+        # 读取记忆注入模式（控制个人记忆注入方式）
+        mem_mode_raw = await chat_settings_service.db_manager.get_global_setting(
+            "memory_injection_mode"
+        )
+        mem_mode = (mem_mode_raw or "vector_fallback").strip().lower()
+        if mem_mode not in {"vector", "vector_fallback", "direct"}:
+            mem_mode = "vector_fallback"
+
+        # 读取世界书向量搜索开关（控制世界书+其他人名片向量搜索）
+        wb_raw = await chat_settings_service.db_manager.get_global_setting(
+            "world_book_search_enabled"
+        )
+        wb_enabled = (wb_raw or "true").strip().lower() == "true"
+
         async def _run_rag_with_shared_embedding():
+            # 当前用户名片始终精确注入（不受任何开关影响）
+            card_entry = await world_book_service.find_card_entry(user_id=author_id)
+
+            # 世界书搜索关闭 或 direct模式：跳过向量搜索
+            if not wb_enabled or mem_mode == "direct":
+                entries = [card_entry] if card_entry else []
+                return entries, None, []
+
             from src.chat.services.regex_service import regex_service
             import re as _re
 
@@ -607,6 +629,7 @@ class ChatService:
             if not embedding:
                 embedding = []
 
+            # RAG 搜索通用知识 + 其他人名片
             entries = await world_book_service.find_entries(
                 latest_query=rag_query,
                 user_id=author_id,
@@ -615,6 +638,14 @@ class ChatService:
                 conversation_history=channel_context,
                 query_embedding=embedding,
             )
+
+            # 3) 名片置顶合并
+            if card_entry:
+                entries.insert(0, card_entry)
+                log.info("已将用户 %s 的名片精确注入到世界书条目中。", author_id)
+            else:
+                log.debug("用户 %s 无名片，跳过名片注入。", author_id)
+
             return entries, summarized_query, embedding
 
         try:

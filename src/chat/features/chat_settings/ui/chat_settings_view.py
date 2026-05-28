@@ -35,8 +35,23 @@ from src.chat.features.chat_settings.ui.custom_model_config_view import (
 from src.chat.features.chat_settings.ui.ai_reply_regex_settings_view import (
     AIReplyRegexSettingsView,
 )
+from src.chat.features.chat_settings.ui.prompt_config_view import (
+    PromptConfigView,
+)
 
 _GLOBAL_TTS_MODE_KEY = "global_tts_mode"
+_MEMORY_INJECTION_MODE_KEY = "memory_injection_mode"
+_MEMORY_MODE_VECTOR = "vector"          # 向量召回：Top20相关 + 随机10条
+_MEMORY_MODE_VECTOR_FALLBACK = "vector_fallback"  # 向量召回 + 兜底：超时自动回退到直接注入
+_MEMORY_MODE_DIRECT = "direct"          # 直接注入：不走向量，直接从摘要提取
+
+_MEMORY_MODE_LABELS = {
+    _MEMORY_MODE_VECTOR: "向量召回（Top20相关+随机10条）",
+    _MEMORY_MODE_VECTOR_FALLBACK: "向量召回+兜底（超时回退直接注入）",
+    _MEMORY_MODE_DIRECT: "直接注入（不走向量）",
+}
+
+_WORLD_BOOK_SEARCH_KEY = "world_book_search_enabled"
 _TTS_MODE_LEGACY = "legacy"  # tts_tool (edge_tts)
 _TTS_MODE_NEW = "new"  # new_tts_tool (gradio / qwen3)
 
@@ -108,6 +123,9 @@ class ChatSettingsView(View):
         self.token_usage: Optional[TokenUsage] = None
         self.reaction_enabled: bool = True
         self.dm_enabled: bool = True
+        self.memory_injection_mode: str = _MEMORY_MODE_VECTOR_FALLBACK
+        self.world_book_enabled: bool = True
+        self.summary_enabled: bool = True
 
     async def _initialize(self):
         """异步获取设置并构建UI。"""
@@ -131,6 +149,16 @@ class ChatSettingsView(View):
 
         dm_raw = await self.service.db_manager.get_global_setting("global_dm_enabled")
         self.dm_enabled = dm_raw.lower() == "true" if dm_raw is not None else True
+
+        mem_raw = await self.service.db_manager.get_global_setting(_MEMORY_INJECTION_MODE_KEY)
+        if mem_raw and mem_raw.strip() in {_MEMORY_MODE_VECTOR, _MEMORY_MODE_VECTOR_FALLBACK, _MEMORY_MODE_DIRECT}:
+            self.memory_injection_mode = mem_raw.strip()
+
+        wb_raw = await self.service.db_manager.get_global_setting(_WORLD_BOOK_SEARCH_KEY)
+        self.world_book_enabled = (wb_raw or "true").strip().lower() == "true"
+
+        summary_raw = await self.service.db_manager.get_global_setting("summary_enabled")
+        self.summary_enabled = (summary_raw or "true").strip().lower() == "true"
 
         self._create_paginators()
         self._create_view_items()
@@ -249,9 +277,9 @@ class ChatSettingsView(View):
 
         self.add_item(
             Button(
-                label="记忆总结频率",
-                style=ButtonStyle.secondary,
-                custom_id="memory_settings",
+                label=f"记忆总结: {'开' if self.summary_enabled else '关'}",
+                style=ButtonStyle.green if self.summary_enabled else ButtonStyle.red,
+                custom_id="summary_toggle",
                 row=3,
             )
         )
@@ -283,6 +311,14 @@ class ChatSettingsView(View):
         )
         self.add_item(
             Button(
+                label="提示词配置",
+                style=ButtonStyle.secondary,
+                custom_id="prompt_config",
+                row=4,
+            )
+        )
+        self.add_item(
+            Button(
                 label="供应商设置",
                 style=ButtonStyle.secondary,
                 custom_id="vercel_gateway_settings",
@@ -295,6 +331,34 @@ class ChatSettingsView(View):
                 style=ButtonStyle.secondary,
                 custom_id="regex_settings",
                 row=4,
+            )
+        )
+
+        # 记忆注入模式选择器（第 5 行）+ 世界书开关
+        mem_options = [
+            SelectOption(
+                label=label,
+                value=mode,
+                default=(self.memory_injection_mode == mode),
+            )
+            for mode, label in _MEMORY_MODE_LABELS.items()
+        ]
+        mem_select = Select(
+            placeholder=f"记忆注入: {_MEMORY_MODE_LABELS[self.memory_injection_mode]}",
+            options=mem_options,
+            custom_id="memory_injection_mode_select",
+            row=5,
+        )
+        mem_select.callback = self.on_memory_injection_mode_select
+        self.add_item(mem_select)
+
+        # 世界书向量搜索开关（第 5 行）
+        self.add_item(
+            Button(
+                label=f"世界书搜索: {'开' if self.world_book_enabled else '关'}",
+                style=ButtonStyle.green if self.world_book_enabled else ButtonStyle.red,
+                custom_id="world_book_toggle",
+                row=5,
             )
         )
 
@@ -328,12 +392,20 @@ class ChatSettingsView(View):
             await self.on_temp_debug_once(interaction)
         elif custom_id == "memory_settings":
             await self.on_memory_settings(interaction)
+        elif custom_id == "summary_toggle":
+            await self.on_summary_toggle(interaction)
         elif custom_id == "tts_settings":
             await self.on_tts_settings(interaction)
         elif custom_id == "vercel_gateway_settings":
             await self.on_vercel_gateway_settings(interaction)
         elif custom_id == "regex_settings":
             await self.on_regex_settings(interaction)
+        elif custom_id == "prompt_config":
+            await self.on_prompt_config(interaction)
+        elif custom_id == "memory_injection_mode_select":
+            await self.on_memory_injection_mode_select(interaction)
+        elif custom_id == "world_book_toggle":
+            await self.on_world_book_toggle(interaction)
 
         return True
 
@@ -362,6 +434,55 @@ class ChatSettingsView(View):
         view = AIReplyRegexSettingsView(opener_user_id=interaction.user.id)
         await interaction.response.send_message(
             content=view.build_content(),
+            view=view,
+            ephemeral=True,
+        )
+        view.message = await interaction.original_response()
+
+    async def on_world_book_toggle(self, interaction: Interaction):
+        """切换世界书向量搜索开关。"""
+        wb_raw = await self.service.db_manager.get_global_setting(_WORLD_BOOK_SEARCH_KEY)
+        wb_enabled = (wb_raw or "true").strip().lower() == "true"
+        new_state = not wb_enabled
+        await self.service.db_manager.set_global_setting(
+            _WORLD_BOOK_SEARCH_KEY, "true" if new_state else "false"
+        )
+        await self._update_view(interaction)
+
+    async def on_memory_injection_mode_select(self, interaction: Interaction):
+        """处理记忆注入模式切换。"""
+        if not interaction.data or "values" not in interaction.data:
+            await interaction.response.defer()
+            return
+
+        new_mode = interaction.data["values"][0]
+        if new_mode not in _MEMORY_MODE_LABELS:
+            await interaction.response.defer()
+            return
+
+        await self.service.db_manager.set_global_setting(_MEMORY_INJECTION_MODE_KEY, new_mode)
+        self.memory_injection_mode = new_mode
+        await self._update_view(interaction)
+
+    async def on_prompt_config(self, interaction: Interaction):
+        """打开提示词配置面板。"""
+        from src.chat.features.chat_settings.ui.prompt_config_view import (
+            _get_override,
+        )
+
+        view = PromptConfigView(opener_user_id=interaction.user.id)
+
+        # 先获取状态
+        sys_override = await _get_override("SYSTEM_PROMPT")
+        jb_override = await _get_override("JAILBREAK_USER_PROMPT")
+        has_sys = sys_override is not None
+        has_jb = jb_override is not None
+
+        content = view._render_content(has_sys, has_jb)
+        view._rebuild_buttons(has_sys, has_jb)
+
+        await interaction.response.send_message(
+            content=content,
             view=view,
             ephemeral=True,
         )
@@ -591,6 +712,19 @@ class ChatSettingsView(View):
             on_submit_callback=modal_callback,
         )
         await interaction.response.send_modal(modal)
+
+    async def on_summary_toggle(self, interaction: Interaction):
+        """切换记忆总结总开关。"""
+        summary_raw = await self.service.db_manager.get_global_setting("summary_enabled")
+        is_enabled = (summary_raw or "true").strip().lower() == "true"
+        new_state = not is_enabled
+        await self.service.db_manager.set_global_setting(
+            "summary_enabled", "true" if new_state else "false"
+        )
+        # 同步更新运行时配置，确保即时生效
+        from src.chat.config.chat_config import PERSONAL_MEMORY_CONFIG
+        PERSONAL_MEMORY_CONFIG["summary_enabled"] = new_state
+        await self._update_view(interaction)
 
     async def on_memory_settings(self, interaction: Interaction):
         """打开记忆总结频率设置模态框。"""

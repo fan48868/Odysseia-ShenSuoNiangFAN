@@ -53,6 +53,25 @@ class WorldBookService:
                     profile_dict[key] = source_metadata.get(key)
         return profile_dict
 
+    async def find_card_entry(
+        self,
+        user_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        通过精确的 user_id 获取当前聊天对象的专属名片。
+        不经过向量检索，直接查询数据库。若无名片则返回 None。
+
+        Args:
+            user_id: 当前聊天对象的 Discord user_id。
+
+        Returns:
+            名片格式的结果字典，若无名片则返回 None。
+        """
+        from src.chat.features.world_book.services.knowledge_search_service import (
+            knowledge_search_service,
+        )
+        return await knowledge_search_service.get_user_card_exact(user_id)
+
     async def find_entries(
         self,
         latest_query: str,
