@@ -777,7 +777,7 @@ class PromptService:
                         personal_memory_vector_service,
                     )
 
-                        items = personal_memory_vector_service.parse_personal_summary(
+                    items = personal_memory_vector_service.parse_personal_summary(
                         personal_summary
                     )
                     _direct_limit = 30

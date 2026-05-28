@@ -300,7 +300,7 @@ class ChatSettingsView(View):
             )
         )
 
-        # 最底下一行：切换 TTS（单独一行）
+        # 第 4 行：TTS + 提示词 + 供应商 + 世界书 + 记忆注入
         self.add_item(
             Button(
                 label="切换TTS",
@@ -319,48 +319,26 @@ class ChatSettingsView(View):
         )
         self.add_item(
             Button(
-                label="供应商设置",
-                style=ButtonStyle.secondary,
-                custom_id="vercel_gateway_settings",
-                row=4,
-            )
-        )
-        self.add_item(
-            Button(
-                label="正则设置",
-                style=ButtonStyle.secondary,
-                custom_id="regex_settings",
-                row=4,
-            )
-        )
-
-        # 记忆注入模式选择器（第 5 行）+ 世界书开关
-        mem_options = [
-            SelectOption(
-                label=label,
-                value=mode,
-                default=(self.memory_injection_mode == mode),
-            )
-            for mode, label in _MEMORY_MODE_LABELS.items()
-        ]
-        mem_select = Select(
-            placeholder=f"记忆注入: {_MEMORY_MODE_LABELS[self.memory_injection_mode]}",
-            options=mem_options,
-            custom_id="memory_injection_mode_select",
-            row=5,
-        )
-        mem_select.callback = self.on_memory_injection_mode_select
-        self.add_item(mem_select)
-
-        # 世界书向量搜索开关（第 5 行）
-        self.add_item(
-            Button(
-                label=f"世界书搜索: {'开' if self.world_book_enabled else '关'}",
+                label=f"世界书: {'开' if self.world_book_enabled else '关'}",
                 style=ButtonStyle.green if self.world_book_enabled else ButtonStyle.red,
                 custom_id="world_book_toggle",
-                row=5,
+                row=4,
             )
         )
+        _mem_short = {
+            _MEMORY_MODE_VECTOR: "向量",
+            _MEMORY_MODE_VECTOR_FALLBACK: "向量+兜底",
+            _MEMORY_MODE_DIRECT: "直接注入",
+        }
+        self.add_item(
+            Button(
+                label=f"记忆: {_mem_short.get(self.memory_injection_mode, '?')}",
+                style=ButtonStyle.secondary,
+                custom_id="memory_mode_cycle",
+                row=4,
+            )
+        )
+
 
     async def _update_view(self, interaction: Interaction):
         """通过编辑附加的消息来刷新视图。"""
@@ -402,8 +380,8 @@ class ChatSettingsView(View):
             await self.on_regex_settings(interaction)
         elif custom_id == "prompt_config":
             await self.on_prompt_config(interaction)
-        elif custom_id == "memory_injection_mode_select":
-            await self.on_memory_injection_mode_select(interaction)
+        elif custom_id == "memory_injection_mode_select" or custom_id == "memory_mode_cycle":
+            await self.on_memory_mode_cycle(interaction)
         elif custom_id == "world_book_toggle":
             await self.on_world_book_toggle(interaction)
 
@@ -449,17 +427,11 @@ class ChatSettingsView(View):
         )
         await self._update_view(interaction)
 
-    async def on_memory_injection_mode_select(self, interaction: Interaction):
-        """处理记忆注入模式切换。"""
-        if not interaction.data or "values" not in interaction.data:
-            await interaction.response.defer()
-            return
-
-        new_mode = interaction.data["values"][0]
-        if new_mode not in _MEMORY_MODE_LABELS:
-            await interaction.response.defer()
-            return
-
+    async def on_memory_mode_cycle(self, interaction: Interaction):
+        """循环切换记忆注入模式。"""
+        modes = [_MEMORY_MODE_VECTOR, _MEMORY_MODE_VECTOR_FALLBACK, _MEMORY_MODE_DIRECT]
+        current_idx = modes.index(self.memory_injection_mode) if self.memory_injection_mode in modes else 1
+        new_mode = modes[(current_idx + 1) % len(modes)]
         await self.service.db_manager.set_global_setting(_MEMORY_INJECTION_MODE_KEY, new_mode)
         self.memory_injection_mode = new_mode
         await self._update_view(interaction)
