@@ -28,7 +28,6 @@ from src.chat.features.personal_memory.services.personal_memory_service import (
 from src.chat.features.chat_settings.ui.memory_settings_modal import (
     MemorySettingsModal,
 )
-from src.chat.services.gemini_service import gemini_service
 from src.chat.features.chat_settings.ui.custom_model_config_view import (
     CustomModelConfigView,
 )
@@ -44,12 +43,6 @@ _MEMORY_INJECTION_MODE_KEY = "memory_injection_mode"
 _MEMORY_MODE_VECTOR = "vector"          # 向量召回：Top20相关 + 随机10条
 _MEMORY_MODE_VECTOR_FALLBACK = "vector_fallback"  # 向量召回 + 兜底：超时自动回退到直接注入
 _MEMORY_MODE_DIRECT = "direct"          # 直接注入：不走向量，直接从摘要提取
-
-_MEMORY_MODE_LABELS = {
-    _MEMORY_MODE_VECTOR: "向量召回（Top20相关+随机10条）",
-    _MEMORY_MODE_VECTOR_FALLBACK: "向量召回+兜底（超时回退直接注入）",
-    _MEMORY_MODE_DIRECT: "直接注入（不走向量）",
-}
 
 _WORLD_BOOK_SEARCH_KEY = "world_book_search_enabled"
 _TTS_MODE_LEGACY = "legacy"  # tts_tool (edge_tts)
@@ -121,7 +114,6 @@ class ChatSettingsView(View):
         self.factions: Optional[List[Dict[str, Any]]] = None
         self.selected_faction: Optional[str] = None
         self.token_usage: Optional[TokenUsage] = None
-        self.reaction_enabled: bool = True
         self.dm_enabled: bool = True
         self.memory_injection_mode: str = _MEMORY_MODE_VECTOR_FALLBACK
         self.world_book_enabled: bool = True
@@ -139,13 +131,6 @@ class ChatSettingsView(View):
             )
         self.factions = event_service.get_event_factions()
         self.selected_faction = event_service.get_selected_faction()
-
-        # 读取“表情反应”全局开关（按 guild 维度存储在 global_settings）
-        reaction_key = f"reaction_enabled:{self.guild.id}"
-        reaction_raw = await self.service.db_manager.get_global_setting(reaction_key)
-        self.reaction_enabled = (
-            reaction_raw.lower() == "true" if reaction_raw is not None else True
-        )
 
         dm_raw = await self.service.db_manager.get_global_setting("global_dm_enabled")
         self.dm_enabled = dm_raw.lower() == "true" if dm_raw is not None else True
@@ -212,15 +197,6 @@ class ChatSettingsView(View):
 
         self.add_item(
             Button(
-                label=f"表情反应: {'开' if self.reaction_enabled else '关'}",
-                style=ButtonStyle.green if self.reaction_enabled else ButtonStyle.red,
-                custom_id="reaction_toggle",
-                row=0,
-            )
-        )
-
-        self.add_item(
-            Button(
                 label=f"私信开关: {'开' if self.dm_enabled else '关'}",
                 style=ButtonStyle.green if self.dm_enabled else ButtonStyle.red,
                 custom_id="global_dm_toggle",
@@ -270,7 +246,7 @@ class ChatSettingsView(View):
         if self.entity_paginator:
             self.add_item(self.entity_paginator.create_select(row=2))
 
-        # 第 3 行：分页按钮（最多2个） + 三个设置按钮（总计最多5个）
+        # 第 3 行：分页按钮（最多2个） + 两个设置按钮
         if self.entity_paginator:
             for btn in self.entity_paginator.get_buttons(row=3):
                 self.add_item(btn)
@@ -288,14 +264,6 @@ class ChatSettingsView(View):
                 label="今日 Token 统计",
                 style=ButtonStyle.secondary,
                 custom_id="show_token_usage",
-                row=3,
-            )
-        )
-        self.add_item(
-            Button(
-                label="临时调试",
-                style=ButtonStyle.secondary,
-                custom_id="temp_debug_once",
                 row=3,
             )
         )
@@ -350,8 +318,6 @@ class ChatSettingsView(View):
 
         if custom_id == "global_chat_toggle":
             await self.on_global_toggle(interaction)
-        elif custom_id == "reaction_toggle":
-            await self.on_reaction_toggle(interaction)
         elif custom_id == "global_dm_toggle":
             await self.on_global_dm_toggle(interaction)
         elif (
@@ -366,8 +332,6 @@ class ChatSettingsView(View):
             await self.on_ai_model_settings(interaction)
         elif custom_id == "show_token_usage":
             await self.on_show_token_usage(interaction)
-        elif custom_id == "temp_debug_once":
-            await self.on_temp_debug_once(interaction)
         elif custom_id == "memory_settings":
             await self.on_memory_settings(interaction)
         elif custom_id == "summary_toggle":
@@ -438,26 +402,8 @@ class ChatSettingsView(View):
 
     async def on_prompt_config(self, interaction: Interaction):
         """打开提示词配置面板。"""
-        from src.chat.features.chat_settings.ui.prompt_config_view import (
-            _get_override,
-        )
-
         view = PromptConfigView(opener_user_id=interaction.user.id)
-
-        # 先获取状态
-        sys_override = await _get_override("SYSTEM_PROMPT")
-        jb_override = await _get_override("JAILBREAK_USER_PROMPT")
-        has_sys = sys_override is not None
-        has_jb = jb_override is not None
-
-        content = view._render_content(has_sys, has_jb)
-        view._rebuild_buttons(has_sys, has_jb)
-
-        await interaction.response.send_message(
-            content=content,
-            view=view,
-            ephemeral=True,
-        )
+        await view.build_and_send(interaction)
         view.message = await interaction.original_response()
 
     async def on_global_toggle(self, interaction: Interaction):
@@ -467,16 +413,6 @@ class ChatSettingsView(View):
             return
         await self.service.db_manager.update_global_chat_config(
             self.guild.id, chat_enabled=new_state
-        )
-        await self._update_view(interaction)
-
-    async def on_reaction_toggle(self, interaction: Interaction):
-        if not self.guild:
-            return
-        new_state = not self.reaction_enabled
-        reaction_key = f"reaction_enabled:{self.guild.id}"
-        await self.service.db_manager.set_global_setting(
-            reaction_key, "true" if new_state else "false"
         )
         await self._update_view(interaction)
 
@@ -718,21 +654,6 @@ class ChatSettingsView(View):
             on_submit_callback=modal_callback,
         )
         await interaction.response.send_modal(modal)
-
-    async def on_temp_debug_once(self, interaction: Interaction):
-        """激活一次性临时调试 URL。"""
-        debug_url = "http://host.docker.internal:1000"
-        current_model = await self.service.get_current_ai_model()
-        gemini_service.arm_one_time_debug_base_url(debug_url)
-
-        await interaction.response.send_message(
-            (
-                f"✅ 已为当前模型 **{current_model}** 启用一次性临时调试。\n"
-                f"本次将临时把 API URL 指向：`{debug_url}`\n"
-                "下一次发送生效 1 次后会自动恢复原配置。"
-            ),
-            ephemeral=True,
-        )
 
     async def on_show_token_usage(self, interaction: Interaction):
         """显示今天的 Token 使用情况。"""

@@ -5,6 +5,11 @@
 提供在聊天设置中修改默认人设和越狱方式的界面。
 支持人设预设的保存、加载和删除。
 所有修改存储在数据库 global_settings 中，不会修改源码文件。
+
+人设拆分为三个编辑框：
+  1. 核心人设  → <core_identity>...</core_identity>
+  2. 互动规范  → <behavioral_guidelines> 到 </style_guide>（含 acting_guide, abilities, style_guide）
+  3. 越狱方式  → JAILBREAK_USER_PROMPT / MODEL_RESPONSE / FINAL_INSTRUCTION
 """
 
 import json
@@ -12,7 +17,7 @@ import logging
 import re
 import discord
 from discord import ButtonStyle, Interaction
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict
 
 from src.chat.features.chat_settings.services.chat_settings_service import (
     chat_settings_service,
@@ -25,6 +30,11 @@ log = logging.getLogger(__name__)
 _PROMPT_OVERRIDE_PREFIX = "prompt_override_default_"
 _PRESET_DB_KEY = "persona_presets"  # JSON 格式存储所有预设
 _ACTIVE_PRESET_KEY = "active_persona_preset_name"
+
+
+# ============================================================
+# 基础读写
+# ============================================================
 
 
 def _db_key(prompt_name: str) -> str:
@@ -60,7 +70,15 @@ def _get_file_default(prompt_name: str) -> str:
     return (PROMPT_CONFIG.get("default", {}).get(prompt_name) or "").strip()
 
 
-# --- <character> 标签提取/替换 ---
+async def _get_current_system_prompt() -> str:
+    """获取当前生效的 SYSTEM_PROMPT（优先 DB 覆盖，否则文件默认）。"""
+    override = await _get_override("SYSTEM_PROMPT")
+    return override if override is not None else _get_file_default("SYSTEM_PROMPT")
+
+
+# ============================================================
+# 标签提取 / 替换
+# ============================================================
 
 
 def _extract_character_content(text: str) -> str:
@@ -71,16 +89,52 @@ def _extract_character_content(text: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _extract_tag_content(text: str, tag_name: str) -> str:
+    """提取指定标签的内容（不含标签本身）。"""
+    if not text:
+        return ""
+    match = re.search(f"<{tag_name}>(.*?)</{tag_name}>", text, re.DOTALL)
+    return match.group(1).strip() if match else ""
+
+
+def _extract_tag_range(text: str, start_tag: str, end_tag: str) -> str:
+    """提取从 <start_tag> 到 </end_tag> 的完整范围（含标签本身）。"""
+    if not text:
+        return ""
+    match = re.search(f"(<{start_tag}>.*?</{end_tag}>)", text, re.DOTALL)
+    return match.group(0).strip() if match else ""
+
+
+def _replace_tag_content(text: str, tag_name: str, new_inner: str) -> str:
+    """替换指定标签内的内容，保留标签本身。"""
+    return re.sub(
+        f"(<{tag_name}>)(.*?)(</{tag_name}>)",
+        lambda m: f"{m.group(1)}\n{new_inner}\n{m.group(3)}",
+        text,
+        count=1,
+        flags=re.DOTALL,
+    )
+
+
+def _replace_tag_range(text: str, start_tag: str, end_tag: str, new_block: str) -> str:
+    """替换从 <start_tag> 到 </end_tag> 的完整范围（含标签）。"""
+    return re.sub(
+        f"<{start_tag}>.*?</{end_tag}>",
+        new_block,
+        text,
+        count=1,
+        flags=re.DOTALL,
+    )
+
+
 def _build_system_prompt_with_character(character_content: str) -> str:
     """用新的 <character> 内容重建完整的 SYSTEM_PROMPT（基于文件默认值的非 character 部分）。"""
     default_prompt = _get_file_default("SYSTEM_PROMPT")
     if not default_prompt:
         return f"<character>\n{character_content}\n</character>"
 
-    # 提取默认值中的非 character 部分（<character>之前和之后的内容）
     match = re.search(r"<character>.*?</character>", default_prompt, re.DOTALL)
     if not match:
-        # 默认值没有 <character> 标签，直接追加
         return f"{default_prompt}\n<character>\n{character_content}\n</character>"
 
     before = default_prompt[:match.start()].rstrip()
@@ -91,7 +145,9 @@ def _build_system_prompt_with_character(character_content: str) -> str:
     return "\n\n".join(parts)
 
 
-# --- 预设管理 ---
+# ============================================================
+# 预设管理
+# ============================================================
 
 
 async def _get_presets() -> Dict[str, str]:
@@ -125,37 +181,75 @@ async def _set_active_preset_name(name: Optional[str]) -> None:
     )
 
 
-# --- Modals ---
+# ============================================================
+# Modals
+# ============================================================
 
 
-class CharacterEditModal(discord.ui.Modal, title="修改人设 (<character>)"):
-    """编辑 SYSTEM_PROMPT 中 <character>...</character> 的内容。"""
+class CoreIdentityModal(discord.ui.Modal, title="修改核心人设 (core_identity)"):
+    """编辑 <core_identity>...</core_identity> 内容。"""
 
-    def __init__(self, current_character_content: str):
+    def __init__(self, current_content: str):
         super().__init__(timeout=300)
-        self.character_input = discord.ui.TextInput(
-            label="<character> 标签内的内容",
-            placeholder="输入人设内容（<core_identity>、<behavioral_guidelines> 等）...",
+        self.content_input = discord.ui.TextInput(
+            label="<core_identity> 标签内的内容",
+            placeholder="输入核心人设内容（名称、性格、喜好等）...",
             style=discord.TextStyle.paragraph,
             required=True,
             max_length=4000,
-            default=current_character_content[:4000] if current_character_content else "",
+            default=current_content[:4000] if current_content else "",
         )
-        self.add_item(self.character_input)
+        self.add_item(self.content_input)
 
     async def on_submit(self, interaction: Interaction):
         await interaction.response.defer(ephemeral=True)
-        new_character = self.character_input.value.strip()
-        if not new_character:
+        new_content = self.content_input.value.strip()
+        if not new_content:
             await interaction.followup.send("❌ 内容不能为空。", ephemeral=True)
             return
 
-        # 用新的 character 内容重建完整 SYSTEM_PROMPT
-        full_prompt = _build_system_prompt_with_character(new_character)
-        await _set_override("SYSTEM_PROMPT", full_prompt)
+        # 在当前 SYSTEM_PROMPT 中替换 <core_identity> 内容
+        current_prompt = await _get_current_system_prompt()
+        updated = _replace_tag_content(current_prompt, "core_identity", new_content)
+        await _set_override("SYSTEM_PROMPT", updated)
         await interaction.followup.send(
-            "✅ **人设 (character)** 已更新。\n"
+            "✅ **核心人设 (core_identity)** 已更新。\n"
             "下次对话时将使用新的人设。如需恢复默认，点击「恢复默认」按钮。",
+            ephemeral=True,
+        )
+
+
+class BehavioralGuidelineModal(discord.ui.Modal, title="修改互动规范 (behavioral~style)"):
+    """编辑 <behavioral_guidelines> 到 </style_guide> 范围（含 acting_guide, abilities, style_guide）。"""
+
+    def __init__(self, current_range_content: str):
+        super().__init__(timeout=300)
+        self.range_input = discord.ui.TextInput(
+            label="behavioral_guidelines ~ style_guide 范围",
+            placeholder="编辑互动规范、扮演指导、能力定义、对话风格等...",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=4000,
+            default=current_range_content[:4000] if current_range_content else "",
+        )
+        self.add_item(self.range_input)
+
+    async def on_submit(self, interaction: Interaction):
+        await interaction.response.defer(ephemeral=True)
+        new_range = self.range_input.value.strip()
+        if not new_range:
+            await interaction.followup.send("❌ 内容不能为空。", ephemeral=True)
+            return
+
+        # 在当前 SYSTEM_PROMPT 中替换 behavioral_guidelines ~ style_guide 范围
+        current_prompt = await _get_current_system_prompt()
+        updated = _replace_tag_range(
+            current_prompt, "behavioral_guidelines", "style_guide", new_range
+        )
+        await _set_override("SYSTEM_PROMPT", updated)
+        await interaction.followup.send(
+            "✅ **互动规范 (behavioral_guidelines ~ style_guide)** 已更新。\n"
+            "下次对话时将使用新的互动规范。如需恢复默认，点击「恢复默认」按钮。",
             ephemeral=True,
         )
 
@@ -254,7 +348,9 @@ class JailbreakModal(discord.ui.Modal, title="修改越狱方式"):
         )
 
 
-# --- Views ---
+# ============================================================
+# Views
+# ============================================================
 
 
 class PromptConfigView(discord.ui.View):
@@ -274,33 +370,42 @@ class PromptConfigView(discord.ui.View):
 
     def _render_content(
         self,
-        has_system_override: bool,
+        core_customized: bool,
+        behav_customized: bool,
         has_jb_override: bool,
         active_preset_name: Optional[str] = None,
         preset_count: int = 0,
     ) -> str:
         lines = [
             "📝 **提示词配置**\n",
-            f"**1. 人设 (character)**: {'🟡 已自定义' if has_system_override else '🟢 使用文件默认值'}",
-            f"**2. 越狱方式 (JAILBREAK)**: {'🟡 已自定义' if has_jb_override else '🟢 使用文件默认值'}",
+            f"**1. 核心人设 (core_identity)**: {'🟡 已自定义' if core_customized else '🟢 默认'}",
+            f"**2. 互动规范 (behavioral~style)**: {'🟡 已自定义' if behav_customized else '🟢 默认'}",
+            f"**3. 越狱方式 (JAILBREAK)**: {'🟡 已自定义' if has_jb_override else '🟢 使用文件默认值'}",
             f"**当前预设**: {'🏷️ ' + active_preset_name if active_preset_name else '无'}  |  已保存预设: {preset_count}个",
             "",
-            "人设修改只影响 `<character>...</character>` 内容，不影响其他部分。",
+            "修改只影响对应标签内容，不影响其他部分。",
             "修改会保存到数据库，不会修改源码文件。重启后依然生效。",
         ]
         return "\n".join(lines)
 
+    async def _check_customization(self):
+        """检查核心人设和互动规范是否与文件默认值不同。"""
+        current = await _get_current_system_prompt()
+        default = _get_file_default("SYSTEM_PROMPT")
+        core_custom = _extract_tag_content(current, "core_identity") != _extract_tag_content(default, "core_identity")
+        behav_custom = _extract_tag_range(current, "behavioral_guidelines", "style_guide") != _extract_tag_range(default, "behavioral_guidelines", "style_guide")
+        return core_custom, behav_custom
+
     async def build_and_send(self, interaction: Interaction):
         """构建并发送提示词配置面板。"""
-        sys_override = await _get_override("SYSTEM_PROMPT")
+        core_custom, behav_custom = await self._check_customization()
         jb_override = await _get_override("JAILBREAK_USER_PROMPT")
-        has_sys = sys_override is not None
         has_jb = jb_override is not None
         presets = await _get_presets()
         active_name = await _get_active_preset_name()
 
-        content = self._render_content(has_sys, has_jb, active_name, len(presets))
-        self._rebuild_buttons(has_sys, has_jb, presets, active_name)
+        content = self._render_content(core_custom, behav_custom, has_jb, active_name, len(presets))
+        self._rebuild_buttons(core_custom or behav_custom, has_jb, presets, active_name)
         await interaction.response.edit_message(content=content, view=self)
 
     def _rebuild_buttons(
@@ -313,26 +418,35 @@ class PromptConfigView(discord.ui.View):
         self.clear_items()
         presets = presets or {}
 
-        # Row 0: 编辑按钮
-        edit_sys_btn = discord.ui.Button(
-            label="修改人设",
+        # Row 0: 三个编辑按钮
+        btn_core = discord.ui.Button(
+            label="修改核心人设",
             style=ButtonStyle.primary,
             emoji="🎭",
             row=0,
         )
-        edit_sys_btn.callback = self._on_edit_system_prompt
-        self.add_item(edit_sys_btn)
+        btn_core.callback = self._on_edit_core_identity
+        self.add_item(btn_core)
 
-        edit_jb_btn = discord.ui.Button(
+        btn_behav = discord.ui.Button(
+            label="修改互动规范",
+            style=ButtonStyle.primary,
+            emoji="📋",
+            row=0,
+        )
+        btn_behav.callback = self._on_edit_behavioral
+        self.add_item(btn_behav)
+
+        btn_jb = discord.ui.Button(
             label="修改越狱方式",
             style=ButtonStyle.primary,
             emoji="🔓",
             row=0,
         )
-        edit_jb_btn.callback = self._on_edit_jailbreak
-        self.add_item(edit_jb_btn)
+        btn_jb.callback = self._on_edit_jailbreak
+        self.add_item(btn_jb)
 
-        # Row 1: 预设按钮
+        # Row 1: 预设保存按钮
         save_btn = discord.ui.Button(
             label="保存当前为预设",
             style=ButtonStyle.success,
@@ -342,7 +456,7 @@ class PromptConfigView(discord.ui.View):
         save_btn.callback = self._on_save_preset
         self.add_item(save_btn)
 
-        # 预设选择下拉菜单
+        # Row 2: 预设选择下拉菜单
         if presets:
             preset_options = [
                 discord.SelectOption(
@@ -361,7 +475,7 @@ class PromptConfigView(discord.ui.View):
             preset_select.callback = self._on_load_preset
             self.add_item(preset_select)
 
-            # 删除预设下拉菜单
+            # Row 3: 删除预设下拉菜单
             delete_options = [
                 discord.SelectOption(label=f"🗑️ {name}", value=name)
                 for name in list(presets.keys())[:25]
@@ -375,7 +489,7 @@ class PromptConfigView(discord.ui.View):
             delete_select.callback = self._on_delete_preset
             self.add_item(delete_select)
 
-        # Row 4: 恢复默认
+        # Row 4: 恢复默认按钮
         if has_system_override or has_jb_override:
             reset_btn = discord.ui.Button(
                 label="恢复全部默认",
@@ -406,14 +520,67 @@ class PromptConfigView(discord.ui.View):
             reset_jb_btn.callback = self._on_reset_jailbreak
             self.add_item(reset_jb_btn)
 
-    async def _on_edit_system_prompt(self, interaction: Interaction):
-        """打开修改人设的模态框（只编辑 <character> 内容）。"""
-        current = await _get_override("SYSTEM_PROMPT")
-        if current is None:
-            current = _get_file_default("SYSTEM_PROMPT")
+    # --- 编辑回调 ---
 
-        character_content = _extract_character_content(current)
-        modal = CharacterEditModal(current_character_content=character_content)
+    async def _on_edit_core_identity(self, interaction: Interaction):
+        """打开核心人设编辑模态框（只编辑 <core_identity> 内容）。"""
+        current_prompt = await _get_current_system_prompt()
+        content = _extract_tag_content(current_prompt, "core_identity")
+        if not content:
+            content = _extract_tag_content(
+                _get_file_default("SYSTEM_PROMPT"), "core_identity"
+            )
+
+        modal = CoreIdentityModal(current_content=content)
+        await interaction.response.send_modal(modal)
+
+        try:
+            await modal.wait()
+            await self._refresh_panel()
+        except Exception:
+            pass
+
+    async def _on_edit_behavioral(self, interaction: Interaction):
+        """打开互动规范编辑模态框（编辑 behavioral_guidelines ~ style_guide 范围）。"""
+        current_prompt = await _get_current_system_prompt()
+        range_content = _extract_tag_range(
+            current_prompt, "behavioral_guidelines", "style_guide"
+        )
+        if not range_content:
+            range_content = _extract_tag_range(
+                _get_file_default("SYSTEM_PROMPT"),
+                "behavioral_guidelines",
+                "style_guide",
+            )
+
+        modal = BehavioralGuidelineModal(current_range_content=range_content)
+        await interaction.response.send_modal(modal)
+
+        try:
+            await modal.wait()
+            await self._refresh_panel()
+        except Exception:
+            pass
+
+    async def _on_edit_jailbreak(self, interaction: Interaction):
+        """打开修改越狱方式的模态框。"""
+        current_user = await _get_override("JAILBREAK_USER_PROMPT")
+        if current_user is None:
+            current_user = _get_file_default("JAILBREAK_USER_PROMPT")
+
+        current_model = await _get_override("JAILBREAK_MODEL_RESPONSE")
+        if current_model is None:
+            current_model = _get_file_default("JAILBREAK_MODEL_RESPONSE")
+
+        current_final = await _get_override("JAILBREAK_FINAL_INSTRUCTION")
+        if current_final is None:
+            current_final = _get_file_default("JAILBREAK_FINAL_INSTRUCTION")
+
+        modal = JailbreakModal(
+            current_user_prompt=current_user,
+            current_model_response=current_model,
+            current_final_instruction=current_final,
+        )
         await interaction.response.send_modal(modal)
 
         try:
@@ -458,13 +625,17 @@ class PromptConfigView(discord.ui.View):
         await _set_active_preset_name(preset_name)
 
         # 刷新面板
-        sys_override = await _get_override("SYSTEM_PROMPT")
         jb_override = await _get_override("JAILBREAK_USER_PROMPT")
-        has_sys = sys_override is not None
         has_jb = jb_override is not None
         updated_presets = await _get_presets()
-        content = self._render_content(has_sys, has_jb, preset_name, len(updated_presets))
-        self._rebuild_buttons(has_sys, has_jb, updated_presets, preset_name)
+
+        # 检查加载后各部分是否与默认值不同
+        default_prompt = _get_file_default("SYSTEM_PROMPT")
+        core_custom = _extract_tag_content(full_prompt, "core_identity") != _extract_tag_content(default_prompt, "core_identity")
+        behav_custom = _extract_tag_range(full_prompt, "behavioral_guidelines", "style_guide") != _extract_tag_range(default_prompt, "behavioral_guidelines", "style_guide")
+
+        content = self._render_content(core_custom, behav_custom, has_jb, preset_name, len(updated_presets))
+        self._rebuild_buttons(core_custom or behav_custom, has_jb, updated_presets, preset_name)
         await interaction.response.edit_message(content=content, view=self)
 
     async def _on_delete_preset(self, interaction: Interaction):
@@ -491,53 +662,24 @@ class PromptConfigView(discord.ui.View):
             active_name = None
 
         # 刷新面板
-        sys_override = await _get_override("SYSTEM_PROMPT")
+        core_custom, behav_custom = await self._check_customization()
         jb_override = await _get_override("JAILBREAK_USER_PROMPT")
-        has_sys = sys_override is not None
         has_jb = jb_override is not None
-        content = self._render_content(has_sys, has_jb, active_name, len(presets))
-        self._rebuild_buttons(has_sys, has_jb, presets, active_name)
+        content = self._render_content(core_custom, behav_custom, has_jb, active_name, len(presets))
+        self._rebuild_buttons(core_custom or behav_custom, has_jb, presets, active_name)
         await interaction.response.edit_message(content=content, view=self)
 
     async def _refresh_panel(self):
         """刷新面板内容。"""
-        sys_override = await _get_override("SYSTEM_PROMPT")
+        core_custom, behav_custom = await self._check_customization()
         jb_override = await _get_override("JAILBREAK_USER_PROMPT")
-        has_sys = sys_override is not None
         has_jb = jb_override is not None
         presets = await _get_presets()
         active_name = await _get_active_preset_name()
-        content = self._render_content(has_sys, has_jb, active_name, len(presets))
-        self._rebuild_buttons(has_sys, has_jb, presets, active_name)
+        content = self._render_content(core_custom, behav_custom, has_jb, active_name, len(presets))
+        self._rebuild_buttons(core_custom or behav_custom, has_jb, presets, active_name)
         if self.message:
             await self.message.edit(content=content, view=self)
-
-    async def _on_edit_jailbreak(self, interaction: Interaction):
-        """打开修改越狱方式的模态框。"""
-        current_user = await _get_override("JAILBREAK_USER_PROMPT")
-        if current_user is None:
-            current_user = _get_file_default("JAILBREAK_USER_PROMPT")
-
-        current_model = await _get_override("JAILBREAK_MODEL_RESPONSE")
-        if current_model is None:
-            current_model = _get_file_default("JAILBREAK_MODEL_RESPONSE")
-
-        current_final = await _get_override("JAILBREAK_FINAL_INSTRUCTION")
-        if current_final is None:
-            current_final = _get_file_default("JAILBREAK_FINAL_INSTRUCTION")
-
-        modal = JailbreakModal(
-            current_user_prompt=current_user,
-            current_model_response=current_model,
-            current_final_instruction=current_final,
-        )
-        await interaction.response.send_modal(modal)
-
-        try:
-            await modal.wait()
-            await self._refresh_panel()
-        except Exception:
-            pass
 
     async def _on_reset_all(self, interaction: Interaction):
         """恢复全部默认。"""
