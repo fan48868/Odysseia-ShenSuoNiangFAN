@@ -271,9 +271,17 @@ class PromptService:
         db_override = self._prompt_overrides_cache.get(prompt_name)
         if db_override:
             prompt_template = db_override
-            log.debug("使用数据库覆盖的提示词: %s", prompt_name)
+            log.info(
+                "使用数据库覆盖的提示词: %s (前50字符: %s)",
+                prompt_name, db_override[:50],
+            )
         else:
             prompt_template = PROMPT_CONFIG.get("default", {}).get(prompt_name)
+            if prompt_name == "SYSTEM_PROMPT":
+                log.info(
+                    "未找到数据库覆盖 '%s'，使用文件默认值。缓存状态: loaded=%s, keys=%s",
+                    prompt_name, self._overrides_loaded, list(self._prompt_overrides_cache.keys()),
+                )
 
         for model_config in self._get_matching_model_configs(model_name):
             if prompt_name not in model_config:
