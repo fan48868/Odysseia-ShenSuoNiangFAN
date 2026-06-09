@@ -23,6 +23,7 @@ from src.chat.features.chat_settings.services.chat_settings_service import (
     chat_settings_service,
 )
 from src.chat.config.prompts import PROMPT_CONFIG
+from src.chat.services.prompt_service import prompt_service
 
 log = logging.getLogger(__name__)
 
@@ -212,6 +213,8 @@ class CoreIdentityModal(discord.ui.Modal, title="修改核心人设 (core_identi
         current_prompt = await _get_current_system_prompt()
         updated = _replace_tag_content(current_prompt, "core_identity", new_content)
         await _set_override("SYSTEM_PROMPT", updated)
+        prompt_service._overrides_loaded = False
+        prompt_service._prompt_overrides_cache.clear()
         await interaction.followup.send(
             "✅ **核心人设 (core_identity)** 已更新。\n"
             "下次对话时将使用新的人设。如需恢复默认，点击「恢复默认」按钮。",
@@ -247,6 +250,8 @@ class BehavioralGuidelineModal(discord.ui.Modal, title="修改互动规范 (beha
             current_prompt, "behavioral_guidelines", "style_guide", new_range
         )
         await _set_override("SYSTEM_PROMPT", updated)
+        prompt_service._overrides_loaded = False
+        prompt_service._prompt_overrides_cache.clear()
         await interaction.followup.send(
             "✅ **互动规范 (behavioral_guidelines ~ style_guide)** 已更新。\n"
             "下次对话时将使用新的互动规范。如需恢复默认，点击「恢复默认」按钮。",
@@ -308,10 +313,10 @@ class JailbreakModal(discord.ui.Modal, title="修改越狱方式"):
         self.model_response_input = discord.ui.TextInput(
             label="JAILBREAK_MODEL_RESPONSE（越狱模型回复）",
             placeholder="输入越狱模型回复...",
-            style=discord.TextStyle.short,
+            style=discord.TextStyle.paragraph,
             required=True,
-            max_length=2000,
-            default=current_model_response[:2000] if current_model_response else "",
+            max_length=4000,
+            default=current_model_response[:4000] if current_model_response else "",
         )
         self.final_instruction_input = discord.ui.TextInput(
             label="JAILBREAK_FINAL_INSTRUCTION（最终指令）",
@@ -338,6 +343,8 @@ class JailbreakModal(discord.ui.Modal, title="修改越狱方式"):
         await _set_override("JAILBREAK_USER_PROMPT", user_prompt)
         await _set_override("JAILBREAK_MODEL_RESPONSE", model_response)
         await _set_override("JAILBREAK_FINAL_INSTRUCTION", final_instruction)
+        prompt_service._overrides_loaded = False
+        prompt_service._prompt_overrides_cache.clear()
         await interaction.followup.send(
             "✅ **越狱方式** 已更新。\n"
             "- JAILBREAK_USER_PROMPT ✅\n"
@@ -623,6 +630,8 @@ class PromptConfigView(discord.ui.View):
         full_prompt = _build_system_prompt_with_character(character_content)
         await _set_override("SYSTEM_PROMPT", full_prompt)
         await _set_active_preset_name(preset_name)
+        prompt_service._overrides_loaded = False
+        prompt_service._prompt_overrides_cache.clear()
 
         # 刷新面板
         jb_override = await _get_override("JAILBREAK_USER_PROMPT")
@@ -689,6 +698,8 @@ class PromptConfigView(discord.ui.View):
         await _clear_override("JAILBREAK_MODEL_RESPONSE")
         await _clear_override("JAILBREAK_FINAL_INSTRUCTION")
         await _set_active_preset_name(None)
+        prompt_service._overrides_loaded = False
+        prompt_service._prompt_overrides_cache.clear()
 
         await self._refresh_panel()
         await interaction.followup.send("✅ 已恢复全部默认提示词。", ephemeral=True)
@@ -698,6 +709,8 @@ class PromptConfigView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         await _clear_override("SYSTEM_PROMPT")
         await _set_active_preset_name(None)
+        prompt_service._overrides_loaded = False
+        prompt_service._prompt_overrides_cache.clear()
 
         await self._refresh_panel()
         await interaction.followup.send("✅ 已恢复默认人设。", ephemeral=True)
@@ -708,6 +721,8 @@ class PromptConfigView(discord.ui.View):
         await _clear_override("JAILBREAK_USER_PROMPT")
         await _clear_override("JAILBREAK_MODEL_RESPONSE")
         await _clear_override("JAILBREAK_FINAL_INSTRUCTION")
+        prompt_service._overrides_loaded = False
+        prompt_service._prompt_overrides_cache.clear()
 
         await self._refresh_panel()
         await interaction.followup.send("✅ 已恢复默认越狱方式。", ephemeral=True)

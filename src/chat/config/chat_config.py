@@ -40,7 +40,7 @@ HIDDEN_TOOLS = [""]
 GEMINI_MODEL = "gemini-2.5-flash"
 
 # 用于个人记忆摘要的模型。
-SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "deepseek-chat")
+SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "deepseek-v4-flash")
 
 
 def get_summary_model() -> str:
@@ -171,7 +171,7 @@ MODEL_GENERATION_CONFIG = {
             "thinking_level": "Medium",  # 使用新的思考等级设置
         },
     },
-    "deepseek-chat": {
+    "deepseek-v4-flash": {
         "temperature": 1.3,
         "top_p": 0.95,
         "top_k": 40,

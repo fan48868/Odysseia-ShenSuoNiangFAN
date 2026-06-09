@@ -43,7 +43,7 @@ from src.chat.services.openai_service import OpenAIService
 log = logging.getLogger(__name__)
 
 OPENAI_COMPATIBLE_MODELS = {
-    "deepseek-chat",
+    "deepseek-v4-flash",
     "deepseek-v4-pro",
     "kimi-k2.5",
     "custom",
@@ -727,7 +727,7 @@ class GeminiService:
             )
 
         # --- OpenAI 兼容专用路由（DeepSeek / Kimi） ---
-        if model_name in ["deepseek-chat", "deepseek-v4-pro", "kimi-k2.5", "custom"]:
+        if model_name in ["deepseek-v4-flash", "deepseek-v4-pro", "kimi-k2.5", "custom"]:
             log.info(f"检测到 {model_name} 模型，切换至 OpenAIService。")
             result = await self.openai_service.generate_response(
                 user_id=user_id,
@@ -1055,15 +1055,15 @@ class GeminiService:
         此方法被 _generate_with_official_api 和 _generate_with_custom_endpoint 复用。
         """
 
-        # 自动 RAG 检索逻辑：如果调用方没传条目，且有用户消息，我们就自己去数据库搜！
+        # 自动关键词检索：如果调用方没传条目，且有用户消息，就用关键词匹配（不消耗AI模型）
         if not world_book_entries and message:
             try:
                 # 延迟导入，防止循环引用
                 from src.chat.features.world_book.database.world_book_db_manager import world_book_db_manager
-                
-                #拿着用户的消息去数据库里搜关键词
+
+                # 拿着用户的消息去数据库里搜关键词（纯字符串匹配，零成本）
                 found_entries = await world_book_db_manager.search_entries_in_message(message)
-                
+
                 if found_entries:
                     # 如果搜到了，就强制替换掉原本为空的 entries
                     world_book_entries = found_entries

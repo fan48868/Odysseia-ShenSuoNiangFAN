@@ -12,7 +12,7 @@
 2.支持每个模型对提示词进行模块化拆分。特定模型可仅针对某一片段(如“<core_identity>”或“JAILBREAK_USER_PROMPT”)进行重写,
 未定义的片段自动继承 default 配置。
 
-3.支持多个模型公用一个提示词,使用逗号分隔。比如"deepseek-chat,deepseek-v4-pro"
+3.支持多个模型公用一个提示词,使用逗号分隔。比如"deepseek-v4-flash,deepseek-v4-pro"
 
 4.custom模型支持特定模型自定义配置。格式:"custom-{ModelName}"。如"custom-deepseek-expert-reasoner"
 当选择 custom 模式时,系统优先匹配全称(deepseek-expert-reasoner)；若未命中,则回退至 custom 配置

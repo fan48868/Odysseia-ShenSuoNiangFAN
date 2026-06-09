@@ -27,8 +27,8 @@ def test_get_summary_model_reads_runtime_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("SUMMARY_MODEL", raising=False)
     assert chat_config.get_summary_model() == chat_config.SUMMARY_MODEL
 
-    monkeypatch.setenv("SUMMARY_MODEL", "deepseek-chat")
-    assert chat_config.get_summary_model() == "deepseek-chat"
+    monkeypatch.setenv("SUMMARY_MODEL", "deepseek-v4-flash")
+    assert chat_config.get_summary_model() == "deepseek-v4-flash"
 
     monkeypatch.setenv("SUMMARY_MODEL", "")
     assert chat_config.get_summary_model() == chat_config.SUMMARY_MODEL
@@ -77,7 +77,7 @@ def test_ai_model_settings_modal_submits_main_and_summary_models():
         )
         interaction = AsyncMock()
 
-        modal.model_input = SimpleNamespace(value="deepseek-chat")
+        modal.model_input = SimpleNamespace(value="deepseek-v4-flash")
         modal.summary_model_input = SimpleNamespace(value="kimi-k2.5")
 
         await modal.on_submit(interaction)
@@ -85,7 +85,7 @@ def test_ai_model_settings_modal_submits_main_and_summary_models():
         callback.assert_awaited_once_with(
             interaction,
             {
-                "ai_model": "deepseek-chat",
+                "ai_model": "deepseek-v4-flash",
                 "summary_model": "kimi-k2.5",
             },
         )
@@ -128,7 +128,7 @@ def test_personal_memory_summary_uses_latest_summary_model(
     response_text = "<new_long_memory>\n- 用户喜欢猫\n</new_long_memory>\n<recent_dynamics>\n- 用户刚提到宠物\n</recent_dynamics>"
     generate_simple_response = AsyncMock(return_value=response_text)
 
-    monkeypatch.setenv("SUMMARY_MODEL", "deepseek-chat")
+    monkeypatch.setenv("SUMMARY_MODEL", "deepseek-v4-flash")
     monkeypatch.setattr(
         personal_memory_service_module, "AsyncSessionLocal", lambda: _FakeSession("")
     )
@@ -155,4 +155,4 @@ def test_personal_memory_summary_uses_latest_summary_model(
     )
 
     assert generate_simple_response.await_count == 1
-    assert generate_simple_response.await_args.kwargs["model_name"] == "deepseek-chat"
+    assert generate_simple_response.await_args.kwargs["model_name"] == "deepseek-v4-flash"

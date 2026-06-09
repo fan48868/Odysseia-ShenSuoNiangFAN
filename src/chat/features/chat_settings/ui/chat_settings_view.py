@@ -287,7 +287,7 @@ class ChatSettingsView(View):
         )
         self.add_item(
             Button(
-                label=f"世界书: {'开' if self.world_book_enabled else '关'}",
+                label=f"向量搜索: {'开' if self.world_book_enabled else '关'}",
                 style=ButtonStyle.green if self.world_book_enabled else ButtonStyle.red,
                 custom_id="world_book_toggle",
                 row=4,

@@ -79,7 +79,7 @@ AVAILABLE_AI_MODELS = [
     "gemini-3.1-pro-preview",
     "gemini-2.5-pro-custom",
     "gemini-3-flash-custom",
-    "deepseek-chat",
+    "deepseek-v4-flash",
     "deepseek-v4-pro",
     "kimi-k2.5",
     "custom",

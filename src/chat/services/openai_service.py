@@ -258,9 +258,9 @@ class OpenAIService:
         用于内部任务，例如个人记忆摘要、礼物感谢词等一次性 prompt。
         这里不构建完整聊天上下文，也不执行工具调用。
         """
-        effective_model_name = model_name or "deepseek-chat"
+        effective_model_name = model_name or "deepseek-v4-flash"
         is_deepseek_model = effective_model_name in {
-            "deepseek-chat",
+            "deepseek-v4-flash",
             "deepseek-v4-pro",
         }
         is_custom_model = effective_model_name == "custom"
@@ -540,9 +540,9 @@ class OpenAIService:
         """
         OpenAI 兼容专用通道（DeepSeek / Kimi / Custom）。
         """
-        effective_model_name = model_name or "deepseek-chat"
+        effective_model_name = model_name or "deepseek-v4-flash"
         is_deepseek_model = effective_model_name in {
-            "deepseek-chat",
+            "deepseek-v4-flash",
             "deepseek-v4-pro",
         }
         is_custom_model = effective_model_name == "custom"

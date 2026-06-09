@@ -80,7 +80,7 @@ def test_group_model_override_supports_comma_separated_keys_and_exact_override(
         "PROMPT_CONFIG",
         {
             "default": dict(MINIMAL_DEFAULT_CONFIG),
-            "deepseek-chat, deepseek-v4-pro, custom": {
+            "deepseek-v4-flash, deepseek-v4-pro, custom": {
                 "JAILBREAK_USER_PROMPT": "shared-jailbreak-user",
             },
             "custom": {
@@ -90,7 +90,7 @@ def test_group_model_override_supports_comma_separated_keys_and_exact_override(
     )
 
     deepseek_prompt = prompt_service.get_prompt(
-        "JAILBREAK_USER_PROMPT", model_name="deepseek-chat"
+        "JAILBREAK_USER_PROMPT", model_name="deepseek-v4-flash"
     )
     custom_prompt = prompt_service.get_prompt(
         "JAILBREAK_USER_PROMPT", model_name="custom"
@@ -112,7 +112,7 @@ def test_system_prompt_applies_group_then_exact_then_faction_pack(
         "PROMPT_CONFIG",
         {
             "default": dict(MINIMAL_DEFAULT_CONFIG),
-            ("deepseek-chat", "deepseek-v4-pro", "kimi-k2.5"): {
+            ("deepseek-v4-flash", "deepseek-v4-pro", "kimi-k2.5"): {
                 "SYSTEM_PROMPT": """
 <abilities>group-abilities</abilities>
 """
