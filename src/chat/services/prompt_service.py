@@ -577,6 +577,10 @@ class PromptService:
         此方法将单一的系统提示动态拆分为多个部分，并按顺序注入到对话历史中，
         形成一个结构化的、引导式的上下文，以提高AI的稳定性和可控性。
         """
+        # 确保提示词覆盖已从数据库加载
+        if not self._overrides_loaded:
+            await self._load_prompt_overrides()
+
         final_conversation = []
         safe_user_name = self._mask_potential_impersonator_name(user_name, user_id)
 
