@@ -38,31 +38,32 @@ _ACTIVE_PRESET_KEY = "active_persona_preset_name"
 # ============================================================
 
 
-def _db_key(prompt_name: str) -> str:
-    return f"{_PROMPT_OVERRIDE_PREFIX}{prompt_name}"
+def _db_key(prompt_name: str, user_id: int) -> str:
+    """生成用户专属的数据库 key：prompt_override_default_<user_id>_<prompt_name>"""
+    return f"{_PROMPT_OVERRIDE_PREFIX}{user_id}_{prompt_name}"
 
 
-async def _get_override(prompt_name: str) -> Optional[str]:
-    """从数据库读取提示词覆盖值。"""
+async def _get_override(prompt_name: str, user_id: int) -> Optional[str]:
+    """从数据库读取指定用户的提示词覆盖值。"""
     raw = await chat_settings_service.db_manager.get_global_setting(
-        _db_key(prompt_name)
+        _db_key(prompt_name, user_id)
     )
     if raw is not None and raw.strip():
         return raw
     return None
 
 
-async def _set_override(prompt_name: str, value: str) -> None:
-    """将提示词覆盖值写入数据库。"""
+async def _set_override(prompt_name: str, value: str, user_id: int) -> None:
+    """将指定用户的提示词覆盖值写入数据库。"""
     await chat_settings_service.db_manager.set_global_setting(
-        _db_key(prompt_name), value
+        _db_key(prompt_name, user_id), value
     )
 
 
-async def _clear_override(prompt_name: str) -> None:
-    """清除数据库中的提示词覆盖值（恢复为文件默认值）。"""
+async def _clear_override(prompt_name: str, user_id: int) -> None:
+    """清除数据库中指定用户的提示词覆盖值（恢复为文件默认值）。"""
     await chat_settings_service.db_manager.set_global_setting(
-        _db_key(prompt_name), ""
+        _db_key(prompt_name, user_id), ""
     )
 
 
@@ -71,9 +72,9 @@ def _get_file_default(prompt_name: str) -> str:
     return (PROMPT_CONFIG.get("default", {}).get(prompt_name) or "").strip()
 
 
-async def _get_current_system_prompt() -> str:
-    """获取当前生效的 SYSTEM_PROMPT（优先 DB 覆盖，否则文件默认）。"""
-    override = await _get_override("SYSTEM_PROMPT")
+async def _get_current_system_prompt(user_id: int) -> str:
+    """获取指定用户当前生效的 SYSTEM_PROMPT（优先 DB 覆盖，否则文件默认）。"""
+    override = await _get_override("SYSTEM_PROMPT", user_id)
     return override if override is not None else _get_file_default("SYSTEM_PROMPT")
 
 
@@ -190,8 +191,9 @@ async def _set_active_preset_name(name: Optional[str]) -> None:
 class CoreIdentityModal(discord.ui.Modal, title="修改核心人设 (core_identity)"):
     """编辑 <core_identity>...</core_identity> 内容。"""
 
-    def __init__(self, current_content: str):
+    def __init__(self, current_content: str, user_id: int):
         super().__init__(timeout=300)
+        self._user_id = user_id
         self.content_input = discord.ui.TextInput(
             label="<core_identity> 标签内的内容",
             placeholder="输入核心人设内容（名称、性格、喜好等）...",
@@ -210,9 +212,9 @@ class CoreIdentityModal(discord.ui.Modal, title="修改核心人设 (core_identi
             return
 
         # 在当前 SYSTEM_PROMPT 中替换 <core_identity> 内容
-        current_prompt = await _get_current_system_prompt()
+        current_prompt = await _get_current_system_prompt(self._user_id)
         updated = _replace_tag_content(current_prompt, "core_identity", new_content)
-        await _set_override("SYSTEM_PROMPT", updated)
+        await _set_override("SYSTEM_PROMPT", updated, self._user_id)
         prompt_service._overrides_loaded = False
         prompt_service._prompt_overrides_cache.clear()
         await interaction.followup.send(
@@ -225,8 +227,9 @@ class CoreIdentityModal(discord.ui.Modal, title="修改核心人设 (core_identi
 class BehavioralGuidelineModal(discord.ui.Modal, title="修改互动规范 (behavioral~style)"):
     """编辑 <behavioral_guidelines> 到 </style_guide> 范围（含 acting_guide, abilities, style_guide）。"""
 
-    def __init__(self, current_range_content: str):
+    def __init__(self, current_range_content: str, user_id: int):
         super().__init__(timeout=300)
+        self._user_id = user_id
         self.range_input = discord.ui.TextInput(
             label="behavioral_guidelines ~ style_guide 范围",
             placeholder="编辑互动规范、扮演指导、能力定义、对话风格等...",
@@ -245,11 +248,11 @@ class BehavioralGuidelineModal(discord.ui.Modal, title="修改互动规范 (beha
             return
 
         # 在当前 SYSTEM_PROMPT 中替换 behavioral_guidelines ~ style_guide 范围
-        current_prompt = await _get_current_system_prompt()
+        current_prompt = await _get_current_system_prompt(self._user_id)
         updated = _replace_tag_range(
             current_prompt, "behavioral_guidelines", "style_guide", new_range
         )
-        await _set_override("SYSTEM_PROMPT", updated)
+        await _set_override("SYSTEM_PROMPT", updated, self._user_id)
         prompt_service._overrides_loaded = False
         prompt_service._prompt_overrides_cache.clear()
         await interaction.followup.send(
@@ -300,8 +303,10 @@ class JailbreakModal(discord.ui.Modal, title="修改越狱方式"):
         current_user_prompt: str,
         current_model_response: str,
         current_final_instruction: str,
+        user_id: int,
     ):
         super().__init__(timeout=300)
+        self._user_id = user_id
         self.user_prompt_input = discord.ui.TextInput(
             label="JAILBREAK_USER_PROMPT（越狱用户提示）",
             placeholder="输入越狱用户提示...",
@@ -340,9 +345,9 @@ class JailbreakModal(discord.ui.Modal, title="修改越狱方式"):
             await interaction.followup.send("❌ 所有字段都不能为空。", ephemeral=True)
             return
 
-        await _set_override("JAILBREAK_USER_PROMPT", user_prompt)
-        await _set_override("JAILBREAK_MODEL_RESPONSE", model_response)
-        await _set_override("JAILBREAK_FINAL_INSTRUCTION", final_instruction)
+        await _set_override("JAILBREAK_USER_PROMPT", user_prompt, self._user_id)
+        await _set_override("JAILBREAK_MODEL_RESPONSE", model_response, self._user_id)
+        await _set_override("JAILBREAK_FINAL_INSTRUCTION", final_instruction, self._user_id)
         prompt_service._overrides_loaded = False
         prompt_service._prompt_overrides_cache.clear()
         await interaction.followup.send(
@@ -395,9 +400,9 @@ class PromptConfigView(discord.ui.View):
         ]
         return "\n".join(lines)
 
-    async def _check_customization(self):
+    async def _check_customization(self, user_id: int):
         """检查核心人设和互动规范是否与文件默认值不同。"""
-        current = await _get_current_system_prompt()
+        current = await _get_current_system_prompt(user_id)
         default = _get_file_default("SYSTEM_PROMPT")
         core_custom = _extract_tag_content(current, "core_identity") != _extract_tag_content(default, "core_identity")
         behav_custom = _extract_tag_range(current, "behavioral_guidelines", "style_guide") != _extract_tag_range(default, "behavioral_guidelines", "style_guide")
@@ -405,8 +410,8 @@ class PromptConfigView(discord.ui.View):
 
     async def build_and_send(self, interaction: Interaction):
         """构建并发送提示词配置面板。"""
-        core_custom, behav_custom = await self._check_customization()
-        jb_override = await _get_override("JAILBREAK_USER_PROMPT")
+        core_custom, behav_custom = await self._check_customization(self.opener_user_id)
+        jb_override = await _get_override("JAILBREAK_USER_PROMPT", self.opener_user_id)
         has_jb = jb_override is not None
         presets = await _get_presets()
         active_name = await _get_active_preset_name()
@@ -531,14 +536,14 @@ class PromptConfigView(discord.ui.View):
 
     async def _on_edit_core_identity(self, interaction: Interaction):
         """打开核心人设编辑模态框（只编辑 <core_identity> 内容）。"""
-        current_prompt = await _get_current_system_prompt()
+        current_prompt = await _get_current_system_prompt(self.opener_user_id)
         content = _extract_tag_content(current_prompt, "core_identity")
         if not content:
             content = _extract_tag_content(
                 _get_file_default("SYSTEM_PROMPT"), "core_identity"
             )
 
-        modal = CoreIdentityModal(current_content=content)
+        modal = CoreIdentityModal(current_content=content, user_id=self.opener_user_id)
         await interaction.response.send_modal(modal)
 
         try:
@@ -549,7 +554,7 @@ class PromptConfigView(discord.ui.View):
 
     async def _on_edit_behavioral(self, interaction: Interaction):
         """打开互动规范编辑模态框（编辑 behavioral_guidelines ~ style_guide 范围）。"""
-        current_prompt = await _get_current_system_prompt()
+        current_prompt = await _get_current_system_prompt(self.opener_user_id)
         range_content = _extract_tag_range(
             current_prompt, "behavioral_guidelines", "style_guide"
         )
@@ -560,7 +565,7 @@ class PromptConfigView(discord.ui.View):
                 "style_guide",
             )
 
-        modal = BehavioralGuidelineModal(current_range_content=range_content)
+        modal = BehavioralGuidelineModal(current_range_content=range_content, user_id=self.opener_user_id)
         await interaction.response.send_modal(modal)
 
         try:
@@ -571,15 +576,15 @@ class PromptConfigView(discord.ui.View):
 
     async def _on_edit_jailbreak(self, interaction: Interaction):
         """打开修改越狱方式的模态框。"""
-        current_user = await _get_override("JAILBREAK_USER_PROMPT")
+        current_user = await _get_override("JAILBREAK_USER_PROMPT", self.opener_user_id)
         if current_user is None:
             current_user = _get_file_default("JAILBREAK_USER_PROMPT")
 
-        current_model = await _get_override("JAILBREAK_MODEL_RESPONSE")
+        current_model = await _get_override("JAILBREAK_MODEL_RESPONSE", self.opener_user_id)
         if current_model is None:
             current_model = _get_file_default("JAILBREAK_MODEL_RESPONSE")
 
-        current_final = await _get_override("JAILBREAK_FINAL_INSTRUCTION")
+        current_final = await _get_override("JAILBREAK_FINAL_INSTRUCTION", self.opener_user_id)
         if current_final is None:
             current_final = _get_file_default("JAILBREAK_FINAL_INSTRUCTION")
 
@@ -587,6 +592,7 @@ class PromptConfigView(discord.ui.View):
             current_user_prompt=current_user,
             current_model_response=current_model,
             current_final_instruction=current_final,
+            user_id=self.opener_user_id,
         )
         await interaction.response.send_modal(modal)
 
@@ -598,7 +604,7 @@ class PromptConfigView(discord.ui.View):
 
     async def _on_save_preset(self, interaction: Interaction):
         """保存当前人设为预设。"""
-        current = await _get_override("SYSTEM_PROMPT")
+        current = await _get_override("SYSTEM_PROMPT", self.opener_user_id)
         if current is None:
             current = _get_file_default("SYSTEM_PROMPT")
         character_content = _extract_character_content(current)
@@ -628,13 +634,13 @@ class PromptConfigView(discord.ui.View):
             return
 
         full_prompt = _build_system_prompt_with_character(character_content)
-        await _set_override("SYSTEM_PROMPT", full_prompt)
+        await _set_override("SYSTEM_PROMPT", full_prompt, self.opener_user_id)
         await _set_active_preset_name(preset_name)
         prompt_service._overrides_loaded = False
         prompt_service._prompt_overrides_cache.clear()
 
         # 刷新面板
-        jb_override = await _get_override("JAILBREAK_USER_PROMPT")
+        jb_override = await _get_override("JAILBREAK_USER_PROMPT", self.opener_user_id)
         has_jb = jb_override is not None
         updated_presets = await _get_presets()
 
@@ -671,8 +677,8 @@ class PromptConfigView(discord.ui.View):
             active_name = None
 
         # 刷新面板
-        core_custom, behav_custom = await self._check_customization()
-        jb_override = await _get_override("JAILBREAK_USER_PROMPT")
+        core_custom, behav_custom = await self._check_customization(self.opener_user_id)
+        jb_override = await _get_override("JAILBREAK_USER_PROMPT", self.opener_user_id)
         has_jb = jb_override is not None
         content = self._render_content(core_custom, behav_custom, has_jb, active_name, len(presets))
         self._rebuild_buttons(core_custom or behav_custom, has_jb, presets, active_name)
@@ -680,8 +686,8 @@ class PromptConfigView(discord.ui.View):
 
     async def _refresh_panel(self):
         """刷新面板内容。"""
-        core_custom, behav_custom = await self._check_customization()
-        jb_override = await _get_override("JAILBREAK_USER_PROMPT")
+        core_custom, behav_custom = await self._check_customization(self.opener_user_id)
+        jb_override = await _get_override("JAILBREAK_USER_PROMPT", self.opener_user_id)
         has_jb = jb_override is not None
         presets = await _get_presets()
         active_name = await _get_active_preset_name()
@@ -693,10 +699,10 @@ class PromptConfigView(discord.ui.View):
     async def _on_reset_all(self, interaction: Interaction):
         """恢复全部默认。"""
         await interaction.response.defer(ephemeral=True)
-        await _clear_override("SYSTEM_PROMPT")
-        await _clear_override("JAILBREAK_USER_PROMPT")
-        await _clear_override("JAILBREAK_MODEL_RESPONSE")
-        await _clear_override("JAILBREAK_FINAL_INSTRUCTION")
+        await _clear_override("SYSTEM_PROMPT", self.opener_user_id)
+        await _clear_override("JAILBREAK_USER_PROMPT", self.opener_user_id)
+        await _clear_override("JAILBREAK_MODEL_RESPONSE", self.opener_user_id)
+        await _clear_override("JAILBREAK_FINAL_INSTRUCTION", self.opener_user_id)
         await _set_active_preset_name(None)
         prompt_service._overrides_loaded = False
         prompt_service._prompt_overrides_cache.clear()
@@ -707,7 +713,7 @@ class PromptConfigView(discord.ui.View):
     async def _on_reset_system(self, interaction: Interaction):
         """恢复人设默认。"""
         await interaction.response.defer(ephemeral=True)
-        await _clear_override("SYSTEM_PROMPT")
+        await _clear_override("SYSTEM_PROMPT", self.opener_user_id)
         await _set_active_preset_name(None)
         prompt_service._overrides_loaded = False
         prompt_service._prompt_overrides_cache.clear()
@@ -718,9 +724,9 @@ class PromptConfigView(discord.ui.View):
     async def _on_reset_jailbreak(self, interaction: Interaction):
         """恢复越狱默认。"""
         await interaction.response.defer(ephemeral=True)
-        await _clear_override("JAILBREAK_USER_PROMPT")
-        await _clear_override("JAILBREAK_MODEL_RESPONSE")
-        await _clear_override("JAILBREAK_FINAL_INSTRUCTION")
+        await _clear_override("JAILBREAK_USER_PROMPT", self.opener_user_id)
+        await _clear_override("JAILBREAK_MODEL_RESPONSE", self.opener_user_id)
+        await _clear_override("JAILBREAK_FINAL_INSTRUCTION", self.opener_user_id)
         prompt_service._overrides_loaded = False
         prompt_service._prompt_overrides_cache.clear()
 

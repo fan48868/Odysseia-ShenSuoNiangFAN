@@ -34,8 +34,8 @@ class PromptService:
         self._prompt_overrides_cache: Dict[str, str] = {}
         self._overrides_loaded = False
 
-    async def _load_prompt_overrides(self):
-        """从数据库加载提示词覆盖（仅限 default 配置）。"""
+    async def _load_prompt_overrides(self, user_id: Optional[int] = None):
+        """从数据库加载提示词覆盖（仅限 default 配置）。如果提供 user_id，则只加载该用户的专属覆盖。"""
         from src.chat.features.chat_settings.services.chat_settings_service import (
             chat_settings_service,
         )
@@ -46,7 +46,12 @@ class PromptService:
             "JAILBREAK_MODEL_RESPONSE",
             "JAILBREAK_FINAL_INSTRUCTION",
         ]:
-            key = f"{prefix}{prompt_name}"
+            # 按 user_id 区分：prompt_override_default_<user_id>_SYSTEM_PROMPT
+            if user_id is not None:
+                key = f"{prefix}{user_id}_{prompt_name}"
+            else:
+                # 兼容旧数据：不带 user_id 的全局覆盖（仅限 SYSTEM_PROMPT 等）
+                key = f"{prefix}{prompt_name}"
             try:
                 raw = await chat_settings_service.db_manager.get_global_setting(key)
                 if raw and raw.strip():
@@ -54,7 +59,7 @@ class PromptService:
                 elif prompt_name in self._prompt_overrides_cache:
                     del self._prompt_overrides_cache[prompt_name]
             except Exception as e:
-                log.warning("加载提示词覆盖 '%s' 失败: %s", prompt_name, e)
+                log.warning("加载提示词覆盖 '%s' (user_id=%s) 失败: %s", prompt_name, user_id, e)
         self._overrides_loaded = True
 
     @staticmethod
@@ -577,9 +582,9 @@ class PromptService:
         此方法将单一的系统提示动态拆分为多个部分，并按顺序注入到对话历史中，
         形成一个结构化的、引导式的上下文，以提高AI的稳定性和可控性。
         """
-        # 确保提示词覆盖已从数据库加载
+        # 确保提示词覆盖已从数据库加载（按 user_id 加载专属覆盖）
         if not self._overrides_loaded:
-            await self._load_prompt_overrides()
+            await self._load_prompt_overrides(user_id=user_id)
 
         final_conversation = []
         safe_user_name = self._mask_potential_impersonator_name(user_name, user_id)
