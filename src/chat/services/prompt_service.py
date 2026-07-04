@@ -31,36 +31,37 @@ class PromptService:
         """
         初始化 PromptService。
         """
-        self._prompt_overrides_cache: Dict[str, str] = {}
-        self._overrides_loaded = False
+        self._prompt_overrides_cache: Dict[int, Dict[str, str]] = {}
+        self._overrides_loaded: set[int] = set()
 
     async def _load_prompt_overrides(self, user_id: Optional[int] = None):
-        """从数据库加载提示词覆盖（仅限 default 配置）。如果提供 user_id，则只加载该用户的专属覆盖。"""
+        """从数据库加载提示词覆盖（仅限 default 配置）。按用户隔离缓存。"""
+        uid = user_id or 0
+        if uid in self._overrides_loaded:
+            return
         from src.chat.features.chat_settings.services.chat_settings_service import (
             chat_settings_service,
         )
         prefix = "prompt_override_default_"
+        user_cache: Dict[str, str] = {}
         for prompt_name in [
             "SYSTEM_PROMPT",
             "JAILBREAK_USER_PROMPT",
             "JAILBREAK_MODEL_RESPONSE",
             "JAILBREAK_FINAL_INSTRUCTION",
         ]:
-            # 按 user_id 区分：prompt_override_default_<user_id>_SYSTEM_PROMPT
             if user_id is not None:
                 key = f"{prefix}{user_id}_{prompt_name}"
             else:
-                # 兼容旧数据：不带 user_id 的全局覆盖（仅限 SYSTEM_PROMPT 等）
                 key = f"{prefix}{prompt_name}"
             try:
                 raw = await chat_settings_service.db_manager.get_global_setting(key)
                 if raw and raw.strip():
-                    self._prompt_overrides_cache[prompt_name] = raw
-                elif prompt_name in self._prompt_overrides_cache:
-                    del self._prompt_overrides_cache[prompt_name]
+                    user_cache[prompt_name] = raw
             except Exception as e:
                 log.warning("加载提示词覆盖 '%s' (user_id=%s) 失败: %s", prompt_name, user_id, e)
-        self._overrides_loaded = True
+        self._prompt_overrides_cache[uid] = user_cache
+        self._overrides_loaded.add(uid)
 
     @staticmethod
     def _normalize_model_targets(model_key: Any) -> List[str]:
@@ -261,31 +262,34 @@ class PromptService:
         return modified_template
 
     def _get_model_specific_prompt(
-        self, model_name: Optional[str], prompt_name: str
+        self, model_name: Optional[str], prompt_name: str, user_id: Optional[int] = None,
     ) -> Optional[str]:
         """
         安全地获取指定模型或默认模型的提示词。
         规则：
         - 所有 prompt 默认从 default 读取
-        - 优先检查数据库覆盖（通过聊天设置UI修改的）
+        - 优先检查数据库覆盖（按用户隔离，仅对修改过人设的用户生效）
         - SYSTEM_PROMPT 支持标签级增量覆盖
         - 其他 prompt 仍按整段覆盖
         - 支持一个配置块同时匹配多个模型
         """
-        # 优先使用数据库中的覆盖值（仅对 default 配置）
-        db_override = self._prompt_overrides_cache.get(prompt_name)
+        # 优先使用数据库中的覆盖值（仅对 default 配置，按用户隔离）
+        db_override = None
+        if user_id is not None:
+            user_cache = self._prompt_overrides_cache.get(user_id, {})
+            db_override = user_cache.get(prompt_name)
         if db_override:
             prompt_template = db_override
             log.info(
-                "使用数据库覆盖的提示词: %s (前50字符: %s)",
-                prompt_name, db_override[:50],
+                "使用数据库覆盖的提示词: %s (前50字符: %s, user_id=%s)",
+                prompt_name, db_override[:50], user_id,
             )
         else:
             prompt_template = PROMPT_CONFIG.get("default", {}).get(prompt_name)
             if prompt_name == "SYSTEM_PROMPT":
                 log.info(
-                    "未找到数据库覆盖 '%s'，使用文件默认值。缓存状态: loaded=%s, keys=%s",
-                    prompt_name, self._overrides_loaded, list(self._prompt_overrides_cache.keys()),
+                    "未找到数据库覆盖 '%s' (user_id=%s)，使用文件默认值。",
+                    prompt_name, user_id,
                 )
 
         for model_config in self._get_matching_model_configs(model_name):
@@ -331,7 +335,8 @@ class PromptService:
             )
         else:
             # 2. 如果没有活动覆盖，则获取模型特定的提示词
-            prompt_template = self._get_model_specific_prompt(model_name, prompt_name)
+            user_id = kwargs.get("user_id")
+            prompt_template = self._get_model_specific_prompt(model_name, prompt_name, user_id=user_id)
 
         if not prompt_template:
             log.warning(
@@ -647,10 +652,10 @@ class PromptService:
 
         # --- 新增：根据模型动态注入绕过限制的上下文 ---
         jailbreak_user = self._get_model_specific_prompt(
-            model_name, "JAILBREAK_USER_PROMPT"
+            model_name, "JAILBREAK_USER_PROMPT", user_id=user_id,
         )
         jailbreak_model = self._get_model_specific_prompt(
-            model_name, "JAILBREAK_MODEL_RESPONSE"
+            model_name, "JAILBREAK_MODEL_RESPONSE", user_id=user_id,
         )
         if jailbreak_user and jailbreak_model:
             final_conversation.append({"role": "user", "parts": [jailbreak_user]})
@@ -661,7 +666,7 @@ class PromptService:
         beijing_tz = timezone(timedelta(hours=8))
         current_beijing_time = datetime.now(beijing_tz).strftime("%Y年%m月%d日 %H:%M")
         # 动态知识块（世界之书、个人记忆）将作为独立消息注入，无需在此处处理占位符
-        core_prompt_template = self.get_prompt("SYSTEM_PROMPT", model_name=model_name)
+        core_prompt_template = self.get_prompt("SYSTEM_PROMPT", model_name=model_name, user_id=user_id)
 
         # 填充核心提示词
         core_prompt = core_prompt_template
@@ -674,7 +679,7 @@ class PromptService:
 
     # --- 规则独立轮注入 ---
         final_instruction_template = self._get_model_specific_prompt(
-            model_name, "JAILBREAK_FINAL_INSTRUCTION"
+            model_name, "JAILBREAK_FINAL_INSTRUCTION", user_id=user_id,
         )
         if not final_instruction_template:
             log.error(f"未能为模型 '{model_name}' 找到 JAILBREAK_FINAL_INSTRUCTION。")
