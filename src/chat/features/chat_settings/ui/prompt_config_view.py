@@ -119,10 +119,10 @@ def _replace_tag_content(text: str, tag_name: str, new_inner: str) -> str:
 
 
 def _replace_tag_range(text: str, start_tag: str, end_tag: str, new_block: str) -> str:
-    """替换从 <start_tag> 到 </end_tag> 的完整范围（含标签）。"""
+    """替换从 <start_tag> 到 </end_tag> 的完整范围（含标签）。使用 lambda 避免 re.sub 将 new_block 中的反斜杠解释为正则回溯引用。"""
     return re.sub(
         f"<{start_tag}>.*?</{end_tag}>",
-        new_block,
+        lambda _: new_block,
         text,
         count=1,
         flags=re.DOTALL,
