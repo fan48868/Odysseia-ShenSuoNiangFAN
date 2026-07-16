@@ -151,6 +151,71 @@ def _replace_tag_range(text: str, start_tag: str, end_tag: str, new_block: str) 
     )
 
 
+# 互动规范相关的三个标签（按源码顺序）
+_INTERACTION_NORM_TAGS = ["core_vows", "community_firewall", "acting_guide"]
+
+
+def _extract_interaction_norms(text: str) -> str:
+    """灵活提取互动规范内容。
+
+    优先尝试提取从 <core_vows> 到 </acting_guide> 的完整范围。
+    如果用户删除了部分标签导致范围提取失败，则逐个提取仍然存在的标签内容并拼接。
+    """
+    if not text:
+        return ""
+
+    # 优先：完整范围提取
+    match = re.search(r"<core_vows>.*?</acting_guide>", text, re.DOTALL)
+    if match:
+        return match.group(0).strip()
+
+    # 回退：逐个提取仍然存在的标签
+    parts: list[str] = []
+    for tag in _INTERACTION_NORM_TAGS:
+        content = _extract_tag_content(text, tag)
+        if content:
+            parts.append(f"<{tag}>\n{content}\n</{tag}>")
+
+    return "\n\n".join(parts) if parts else ""
+
+
+def _replace_interaction_norms(text: str, new_norms: str) -> str:
+    """灵活替换互动规范内容。
+
+    优先使用完整范围替换 <core_vows> 到 </acting_guide>。
+    如果目标文本中不存在该范围（默认值被修改、标签被删除等），则先清除所有三个旧标签，再插入新内容。
+    """
+    if not text or not new_norms:
+        return text
+
+    # 优先：完整范围替换
+    if re.search(r"<core_vows>.*?</acting_guide>", text, re.DOTALL):
+        return re.sub(
+            r"<core_vows>.*?</acting_guide>",
+            lambda _: new_norms,
+            text,
+            count=1,
+            flags=re.DOTALL,
+        )
+
+    # 回退：删除所有三个标签的残留内容，在 </core_identity> 之后插入新规范
+    for tag in _INTERACTION_NORM_TAGS:
+        text = re.sub(
+            rf"<{tag}>.*?</{tag}>\s*",
+            "",
+            text,
+            flags=re.DOTALL,
+        )
+
+    text = re.sub(
+        r"(</core_identity>)",
+        rf"\1\n\n{new_norms}",
+        text,
+        count=1,
+    )
+    return text
+
+
 def _build_system_prompt_from_parts(
     core_identity: str,
     interaction_norms: str,
@@ -177,7 +242,7 @@ def _build_system_prompt_from_parts(
     # 从文件默认值提取 character 内部结构，替换三个部分
     char_default = match.group(1).strip()
     char_updated = _replace_tag_content(char_default, "core_identity", core_identity)
-    char_updated = _replace_tag_range(char_updated, "core_vows", "acting_guide", interaction_norms)
+    char_updated = _replace_interaction_norms(char_updated, interaction_norms)
     char_updated = _replace_tag_content(char_updated, "style_guide", style_guide)
 
     parts = [before, f"<character>\n{char_updated}\n</character>"]
@@ -206,7 +271,7 @@ async def _get_presets() -> Dict[str, dict]:
 
     default_prompt = _get_file_default("SYSTEM_PROMPT")
     default_core = _extract_tag_content(default_prompt, "core_identity")
-    default_norms = _extract_tag_range(default_prompt, "core_vows", "acting_guide")
+    default_norms = _extract_interaction_norms(default_prompt)
     default_style = _extract_tag_content(default_prompt, "style_guide")
     default_jb_user = _get_file_default("JAILBREAK_USER_PROMPT")
     default_jb_model = _get_file_default("JAILBREAK_MODEL_RESPONSE")
@@ -327,8 +392,8 @@ class InteractionNormModal(discord.ui.Modal, title="修改互动规范 (core_vow
             return
 
         # 用 _build_system_prompt_from_parts 重建完整 SYSTEM_PROMPT，
-        # 而不是在当前 prompt 上做正则替换——因为用户可能删掉了 core_vows 等标签，
-        # 导致 _replace_tag_range 的正则匹配不到而静默失败。
+        # 而不是在当前 prompt 上做正则替换——因为用户可能删掉了部分标签，
+        # _build_system_prompt_from_parts 会基于文件默认结构重建，确保结构完整。
         current_prompt = await _get_current_system_prompt(self._user_id)
         core_identity = _extract_tag_content(current_prompt, "core_identity")
         if not core_identity:
@@ -532,8 +597,7 @@ class PromptConfigView(discord.ui.View):
     async def _check_customization(self, user_id: int) -> tuple:
         """检查各部分是否与文件默认值不同。
         返回 (core_custom, norms_custom, style_custom)。
-        对互动规范使用 _build_system_prompt_from_parts 重建后再比较，
-        因为 _extract_tag_range 在用户删掉 core_vows 标签后会返回空串，无法正确判断。
+        互动规范通过分别比较三个标签内容来判断，避免因用户删掉部分标签导致误判。
         """
         current = await _get_current_system_prompt(user_id)
         default = _get_file_default("SYSTEM_PROMPT")
@@ -566,9 +630,9 @@ class PromptConfigView(discord.ui.View):
         if not core_identity:
             core_identity = _extract_tag_content(default_prompt, "core_identity")
 
-        interaction_norms = _extract_tag_range(current_prompt, "core_vows", "acting_guide")
+        interaction_norms = _extract_interaction_norms(current_prompt)
         if not interaction_norms:
-            interaction_norms = _extract_tag_range(default_prompt, "core_vows", "acting_guide")
+            interaction_norms = _extract_interaction_norms(default_prompt)
 
         style_guide = _extract_tag_content(current_prompt, "style_guide")
         if not style_guide:
@@ -732,14 +796,10 @@ class PromptConfigView(discord.ui.View):
     async def _on_edit_interaction_norms(self, interaction: Interaction):
         """打开互动规范编辑模态框（编辑 core_vows ~ acting_guide 范围）。"""
         current_prompt = await _get_current_system_prompt(self.opener_user_id)
-        range_content = _extract_tag_range(
-            current_prompt, "core_vows", "acting_guide"
-        )
+        range_content = _extract_interaction_norms(current_prompt)
         if not range_content:
-            range_content = _extract_tag_range(
-                _get_file_default("SYSTEM_PROMPT"),
-                "core_vows",
-                "acting_guide",
+            range_content = _extract_interaction_norms(
+                _get_file_default("SYSTEM_PROMPT")
             )
 
         modal = InteractionNormModal(current_range_content=range_content, user_id=self.opener_user_id)
@@ -860,7 +920,7 @@ class PromptConfigView(discord.ui.View):
 
         default_prompt = _get_file_default("SYSTEM_PROMPT")
         core_custom = _extract_tag_content(full_prompt, "core_identity") != _extract_tag_content(default_prompt, "core_identity")
-        norms_custom = _extract_tag_range(full_prompt, "core_vows", "acting_guide") != _extract_tag_range(default_prompt, "core_vows", "acting_guide")
+        norms_custom = _extract_interaction_norms(full_prompt) != _extract_interaction_norms(default_prompt)
         style_custom = _extract_tag_content(full_prompt, "style_guide") != _extract_tag_content(default_prompt, "style_guide")
         has_any_system = core_custom or norms_custom or style_custom
 
