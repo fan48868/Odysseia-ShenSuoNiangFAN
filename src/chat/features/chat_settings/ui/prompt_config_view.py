@@ -161,7 +161,7 @@ def _build_system_prompt_from_parts(
     default_prompt = _get_file_default("SYSTEM_PROMPT")
 
     # 提取文件默认值中 <character> 外部文本
-    match = re.search(r"<character>.*?</character>", default_prompt, re.DOTALL)
+    match = re.search(r"<character>(.*?)</character>", default_prompt, re.DOTALL)
     if not match:
         # 没有 character 标签，构造一个
         char_content = (
@@ -175,7 +175,7 @@ def _build_system_prompt_from_parts(
     after = default_prompt[match.end():].lstrip()
 
     # 从文件默认值提取 character 内部结构，替换三个部分
-    char_default = match.group(1)
+    char_default = match.group(1).strip()
     char_updated = _replace_tag_content(char_default, "core_identity", core_identity)
     char_updated = _replace_tag_range(char_updated, "core_vows", "acting_guide", interaction_norms)
     char_updated = _replace_tag_content(char_updated, "style_guide", style_guide)
