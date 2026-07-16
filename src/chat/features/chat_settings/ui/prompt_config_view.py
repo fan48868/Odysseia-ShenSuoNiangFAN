@@ -326,10 +326,18 @@ class InteractionNormModal(discord.ui.Modal, title="修改互动规范 (core_vow
             await interaction.followup.send("❌ 内容不能为空。", ephemeral=True)
             return
 
+        # 用 _build_system_prompt_from_parts 重建完整 SYSTEM_PROMPT，
+        # 而不是在当前 prompt 上做正则替换——因为用户可能删掉了 core_vows 等标签，
+        # 导致 _replace_tag_range 的正则匹配不到而静默失败。
         current_prompt = await _get_current_system_prompt(self._user_id)
-        updated = _replace_tag_range(
-            current_prompt, "core_vows", "acting_guide", new_range
-        )
+        core_identity = _extract_tag_content(current_prompt, "core_identity")
+        if not core_identity:
+            core_identity = _extract_tag_content(_get_file_default("SYSTEM_PROMPT"), "core_identity")
+        style_guide = _extract_tag_content(current_prompt, "style_guide")
+        if not style_guide:
+            style_guide = _extract_tag_content(_get_file_default("SYSTEM_PROMPT"), "style_guide")
+
+        updated = _build_system_prompt_from_parts(core_identity, new_range, style_guide)
         await _set_override("SYSTEM_PROMPT", updated, self._user_id)
         _invalidate_prompt_cache(self._user_id)
         await interaction.followup.send(
@@ -524,12 +532,29 @@ class PromptConfigView(discord.ui.View):
     async def _check_customization(self, user_id: int) -> tuple:
         """检查各部分是否与文件默认值不同。
         返回 (core_custom, norms_custom, style_custom)。
+        对互动规范使用 _build_system_prompt_from_parts 重建后再比较，
+        因为 _extract_tag_range 在用户删掉 core_vows 标签后会返回空串，无法正确判断。
         """
         current = await _get_current_system_prompt(user_id)
         default = _get_file_default("SYSTEM_PROMPT")
+
         core_custom = _extract_tag_content(current, "core_identity") != _extract_tag_content(default, "core_identity")
-        norms_custom = _extract_tag_range(current, "core_vows", "acting_guide") != _extract_tag_range(default, "core_vows", "acting_guide")
         style_custom = _extract_tag_content(current, "style_guide") != _extract_tag_content(default, "style_guide")
+
+        # 互动规范：分别提取三个标签的内容拼接后比较，而非用 _extract_tag_range
+        # 因为用户可能删掉了 core_vows / community_firewall 标签导致范围提取失败
+        default_cv = _extract_tag_content(default, "core_vows")
+        default_cf = _extract_tag_content(default, "community_firewall")
+        default_ag = _extract_tag_content(default, "acting_guide")
+        current_cv = _extract_tag_content(current, "core_vows")
+        current_cf = _extract_tag_content(current, "community_firewall")
+        current_ag = _extract_tag_content(current, "acting_guide")
+
+        norms_custom = (
+            current_cv != default_cv
+            or current_cf != default_cf
+            or current_ag != default_ag
+        )
         return core_custom, norms_custom, style_custom
 
     async def _collect_current_preset_data(self) -> dict:
