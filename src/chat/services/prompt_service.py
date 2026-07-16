@@ -588,7 +588,7 @@ class PromptService:
         形成一个结构化的、引导式的上下文，以提高AI的稳定性和可控性。
         """
         # 确保提示词覆盖已从数据库加载（按 user_id 加载专属覆盖）
-        if not self._overrides_loaded:
+        if (user_id or 0) not in self._overrides_loaded:
             await self._load_prompt_overrides(user_id=user_id)
 
         final_conversation = []
