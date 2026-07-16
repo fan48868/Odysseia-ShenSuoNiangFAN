@@ -631,7 +631,7 @@ class PromptConfigView(discord.ui.View):
         btn_jb.callback = self._on_edit_jailbreak
         self.add_item(btn_jb)
 
-        # Row 2: 预设保存按钮
+        # Row 2: 保存预设 + 恢复全部默认（合并到一行节省空间）
         save_btn = discord.ui.Button(
             label="保存当前为预设",
             style=ButtonStyle.success,
@@ -640,6 +640,16 @@ class PromptConfigView(discord.ui.View):
         )
         save_btn.callback = self._on_save_preset
         self.add_item(save_btn)
+
+        if has_system_override or has_jb_override:
+            reset_btn = discord.ui.Button(
+                label="恢复全部默认",
+                style=ButtonStyle.danger,
+                emoji="🔄",
+                row=2,
+            )
+            reset_btn.callback = self._on_reset_all
+            self.add_item(reset_btn)
 
         # Row 3: 预设选择下拉菜单
         if presets:
@@ -673,37 +683,6 @@ class PromptConfigView(discord.ui.View):
             )
             delete_select.callback = self._on_delete_preset
             self.add_item(delete_select)
-
-        # Row 5: 恢复默认按钮
-        if has_system_override or has_jb_override:
-            reset_btn = discord.ui.Button(
-                label="恢复全部默认",
-                style=ButtonStyle.danger,
-                emoji="🔄",
-                row=5,
-            )
-            reset_btn.callback = self._on_reset_all
-            self.add_item(reset_btn)
-
-        if has_system_override:
-            reset_sys_btn = discord.ui.Button(
-                label="恢复人设默认",
-                style=ButtonStyle.secondary,
-                emoji="↩️",
-                row=5,
-            )
-            reset_sys_btn.callback = self._on_reset_system
-            self.add_item(reset_sys_btn)
-
-        if has_jb_override:
-            reset_jb_btn = discord.ui.Button(
-                label="恢复越狱默认",
-                style=ButtonStyle.secondary,
-                emoji="↩️",
-                row=5,
-            )
-            reset_jb_btn.callback = self._on_reset_jailbreak
-            self.add_item(reset_jb_btn)
 
     # --- 编辑回调 ---
 
