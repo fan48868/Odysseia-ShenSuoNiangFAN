@@ -118,6 +118,7 @@ class ChatSettingsView(View):
         self.memory_injection_mode: str = _MEMORY_MODE_VECTOR_FALLBACK
         self.world_book_enabled: bool = True
         self.summary_enabled: bool = True
+        self.summary_threshold: int = 30
 
     async def _initialize(self):
         """异步获取设置并构建UI。"""
@@ -144,6 +145,8 @@ class ChatSettingsView(View):
 
         summary_raw = await self.service.db_manager.get_global_setting("summary_enabled")
         self.summary_enabled = (summary_raw or "true").strip().lower() == "true"
+
+        self.summary_threshold = personal_memory_service.get_summary_threshold()
 
         self._create_paginators()
         self._create_view_items()
@@ -253,9 +256,17 @@ class ChatSettingsView(View):
 
         self.add_item(
             Button(
-                label=f"记忆总结: {'开' if self.summary_enabled else '关'}",
+                label=f"记忆总结: {'开' if self.summary_enabled else '关'} (每{self.summary_threshold}条)",
                 style=ButtonStyle.green if self.summary_enabled else ButtonStyle.red,
                 custom_id="summary_toggle",
+                row=3,
+            )
+        )
+        self.add_item(
+            Button(
+                label=f"修改阈值: {self.summary_threshold}条",
+                style=ButtonStyle.secondary,
+                custom_id="memory_settings",
                 row=3,
             )
         )
@@ -647,6 +658,11 @@ class ChatSettingsView(View):
                 await modal_interaction.response.send_message(
                     f"✅ 已成功将记忆总结阈值更新为: **{new_threshold}** 条消息", ephemeral=True
                 )
+                # 刷新主面板以显示新阈值
+                if self.message:
+                    new_view = await ChatSettingsView.create(interaction)
+                    new_view.message = self.message
+                    await self.message.edit(view=new_view)
 
         modal = MemorySettingsModal(
             title="设置记忆总结频率",
