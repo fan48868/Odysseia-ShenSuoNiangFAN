@@ -756,10 +756,10 @@ class GeminiService:
             self.last_called_tools = list(self.openai_service.last_called_tools)
             return result
 
-        # --- MODIFIED: 自定义模型失败不再回退官方 API，最多重试 7 次 ---
+        # --- MODIFIED: 自定义模型失败不再回退官方 API，最多重试 2 次 ---
         if model_name and model_name in app_config.CUSTOM_GEMINI_ENDPOINTS:
-            log.info(f"检测到自定义模型 '{model_name}'，将尝试使用自定义端点（最多 7 次）。")
-            max_attempts = 7  # ← 改为 7 次重试
+            log.info(f"检测到自定义模型 '{model_name}'，将尝试使用自定义端点（最多 2 次）。")
+            max_attempts = 2  # ← 改为 2 次重试
             last_exception = None
             for attempt in range(max_attempts):
                 try:
@@ -800,7 +800,7 @@ class GeminiService:
             log.error(
                 f"自定义端点 '{model_name}' 重试 {max_attempts} 次均失败，不再回退官方 API。"
             )
-            return "呜哇，自定义端点遇到了一点问题，稍微休息一下再试试吧～（已重试 7 次）"
+            return "呜哇，自定义端点遇到了一点问题，稍微休息一下再试试吧～"
         # --- END OF MODIFIED BLOCK ---
 
         # 如果模型既不是 OpenAI 兼容，也不是自定义端点，直接拒绝
