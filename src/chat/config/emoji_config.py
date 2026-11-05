@@ -44,16 +44,7 @@ EMOJI_MAPPINGS = [
     (re.compile(r"六"), ["⑥"]),
     (re.compile(r"七"), ["⑦"]),
     (re.compile(r"八"), ["⑧"]),
-    (re.compile(r"九"), ["⑨"]),
-    (re.compile(r"1"), ["①"]),
-    (re.compile(r"2"), ["②"]),
-    (re.compile(r"3"), ["③"]),
-    (re.compile(r"4"), ["④"]),
-    (re.compile(r"5"), ["⑤"]),
-    (re.compile(r"6"), ["⑥"]),
-    (re.compile(r"7"), ["⑦"]),
-    (re.compile(r"8"), ["⑧"]),
-    (re.compile(r"9"), ["⑨"])
+    (re.compile(r"九"), ["⑨"])
 ]
 
 # --- 活动专属表情 ---
